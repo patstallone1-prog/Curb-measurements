@@ -1,0 +1,9 @@
+# Working images are streamed and deleted; nothing here is worth versioning.
+work/
+*.jpg
+*.jpeg
+*.png
+.venv/
+__pycache__/
+*.pyc
+.env.local
