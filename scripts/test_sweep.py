@@ -87,11 +87,28 @@ def main() -> int:
     ground = pts[(down > 0.5) & (down < 4.0)]
     print(f"  plausible-ground points: {len(ground):,}")
     if len(ground) > 300:
-        z = ground[:, 2]; A = np.column_stack((ground[:, 0], ground[:, 1], np.ones(len(ground))))
-        coef, *_ = np.linalg.lstsq(A, z, rcond=None)
-        resid = z - A @ coef
-        print(f"  plane fit residual: rms {resid.std()*1000:.0f} mm   slope {np.hypot(*coef[:2])*100:.1f}%")
-        print(f"  camera height above that plane: {ref.centre[2] - (coef[0]*ref.centre[0]+coef[1]*ref.centre[1]+coef[2]):.2f} m")
+        # RANSAC, not least squares. The candidate set still holds parked cars, pedestrians and
+        # stray mismatches, and a least-squares plane is dragged by every one of them -- it
+        # reports a 600 mm residual whether the road is flat or not, which is no test at all.
+        rng = np.random.default_rng(0)
+        best_inliers, best_coef = None, None
+        A = np.column_stack((ground[:, 0], ground[:, 1], np.ones(len(ground))))
+        z = ground[:, 2]
+        for _ in range(400):
+            pick = rng.choice(len(ground), 3, replace=False)
+            try:
+                coef = np.linalg.solve(A[pick], z[pick])
+            except np.linalg.LinAlgError:
+                continue
+            inliers = np.abs(z - A @ coef) < 0.05
+            if best_inliers is None or inliers.sum() > best_inliers.sum():
+                best_inliers, best_coef = inliers, coef
+        coef, *_ = np.linalg.lstsq(A[best_inliers], z[best_inliers], rcond=None)
+        resid = z[best_inliers] - A[best_inliers] @ coef
+        print(f"  road plane: {best_inliers.sum():,} inliers ({100*best_inliers.mean():.0f}%)"
+              f"  rms {resid.std()*1000:.0f} mm   slope {np.hypot(*coef[:2])*100:.1f}%")
+        print(f"  camera height above it: {ref.centre[2] - (coef[0]*ref.centre[0]+coef[1]*ref.centre[1]+coef[2]):.2f} m"
+              "   (a vehicle camera sits about 2.5 m up)")
     for q in paths:
         q.unlink(missing_ok=True)
     return 0

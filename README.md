@@ -107,32 +107,55 @@ Disk is the harder limit: **13 GB free**. At 1024 px the full 92,834-image catal
 at 2048 px it is 109 GB, so images can never all be resident. The pipeline streams — fetch a
 working set, measure, delete the pixels, keep only the measurements.
 
-## Plane sweep: built, fast, not yet correct
+## Plane sweep with semi-global aggregation
 
-`src/curbmeasure/stereo.py` implements the sweep — inverse-depth plane hypotheses, homography
-warps of each neighbour into the reference, ZNCC cost, winner-take-all with a best-vs-second
-margin test. It runs on Metal: **325,000 pixels over 96 depth planes against 4 neighbours in
-1.4–2.3 s**, which extrapolates to the whole corpus comfortably inside the machine's limits.
+`src/curbmeasure/stereo.py`. Inverse-depth plane hypotheses, homography warps of each neighbour
+into the reference, ZNCC cost, then semi-global aggregation along four directions before the
+minimum is taken. Sub-plane refinement fits a parabola to the winning cost and its neighbours.
 
-The output is not yet usable, and the diagnostic says why:
+Winner-take-all was tried first and does not work on this material: ninety-six hypotheses give
+noise ninety-six chances to beat a signal, and plain asphalt has no signal to beat. The depth
+profile came out compressed into 3–5 m across the whole frame. With aggregation it spans 13.7 m
+at the top of the swept band to 2.7 m at the bottom, which is what a road seen from a moving
+camera should do.
+
+Two details earned their place:
+
+*The margin test excludes a neighbourhood of the winner.* Aggregation smooths the cost curve, so
+the adjacent plane is always a close second; testing against it rejected 92% of pixels while
+saying nothing about ambiguity. The runner-up has to be a genuinely different surface.
+
+*P2 is relieved at image edges.* A kerb is a depth discontinuity, and a smoothness penalty that
+does not yield at edges is a smoothness penalty that erases the feature being measured.
+
+## Validation
+
+Against sparse triangulation on the same pixels of the same image — the sparse path having been
+checked independently by reprojection into a held-out third view:
 
 ```
-row band (top -> bottom of swept region)   accepted   median depth
-  rows  259- 311    27.2%        4.89 m
-  rows  311- 364    20.9%        4.56 m
-  rows  364- 417    17.0%        3.43 m
-  rows  417- 470    15.7%        3.43 m
-  rows  470- 523    14.6%        3.43 m
-  rows  523- 576    18.8%        3.07 m
+92 pixels with both a swept and a triangulated depth
+  triangulated depth        median 37.56 m
+  swept depth               median 41.76 m
+  ratio                     median 1.060   p25 0.999   p75 1.151
 ```
 
-The *sign* is right — depth falls towards the bottom of the frame, as road should. The *range* is
-wrong: it should run from about 3 m at the bottom to twenty or more near the horizon, and instead
-it is compressed into 3–5 m throughout. Depths are systematically too near, which then places the
-reconstructed ground 0.5 m below the camera instead of the ~2.5 m a vehicle camera actually sits
-at, and leaves a 570–630 mm residual against a plane that should be flat to a few centimetres.
+**The sweep agrees with validated triangulation to about 6%.** A road plane fitted by RANSAC to
+the swept ground comes out flat to **25 mm rms** over 4,825 inliers at a 2.5% slope.
 
-The leading explanation is the cost, not the geometry. Winner-take-all ZNCC over 96 hypotheses is
-96 chances for noise to win on a surface with no texture, and plain asphalt is exactly that.
-Semi-global aggregation — a smoothness penalty accumulated along several directions, as in SGM —
-exists for this failure and is the next thing to try.
+Runtime is 3–4 s per reference view on Metal for 325,000 pixels, 96 planes, 4 neighbours.
+
+### What is still open
+
+*Acceptance in the ground band is 14%.* Most ground pixels still get no depth. Usable, since a
+kerb is measured from a run of surface rather than a single pixel, but it should be higher.
+
+*The 6% agreement is measured at 37 m,* because that is where sparse features are. The error at
+5–10 m, where a kerb actually is, is not yet known and cannot be established this way — there are
+no sparse features there to compare against. Only the lidar ground truth can settle it.
+
+*One earlier conclusion here was wrong.* A reconstructed road sitting 0.72 m below the camera was
+read as a systematic depth-scale error, on the assumption that these cameras are vehicle-mounted
+at about 2.5 m. The comparison above shows there is no such scale error. Mapillary's contributors
+shoot from bicycles, helmets and handheld phones, and the mount height is not known per sequence —
+so camera height was never a valid yardstick.

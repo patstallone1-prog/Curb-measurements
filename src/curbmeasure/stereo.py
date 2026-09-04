@@ -52,10 +52,24 @@ class SweepConfig:
     #: Fraction of the frame height, measured from the bottom, that is swept.
     ground_fraction: float = 0.55
     #: Below this correlation the winning depth is not believed and the pixel is dropped.
-    min_score: float = 0.55
-    #: A pixel whose best and second-best depths disagree by less than this are ambiguous --
-    #: typically a repeating texture or a blank surface -- and are dropped.
-    min_margin: float = 0.03
+    min_score: float = 0.5
+    #: How much better the winning depth must be than the best *different* surface. Measured
+    #: against the runner-up outside a neighbourhood of the winner, not against the literal
+    #: second-best plane: after aggregation the cost curve is smooth, so the adjacent plane is
+    #: always a close second and testing against it rejects almost everything -- it drops
+    #: acceptance to 8% while telling you nothing about ambiguity.
+    min_margin: float = 0.02
+    #: Planes within this distance of the winner are the same surface, not a rival for it.
+    margin_exclusion: int = 4
+    #: Semi-global aggregation penalties, on a cost scale of 0..2. P1 is charged for moving one
+    #: depth plane between neighbouring pixels -- cheap, because real surfaces slope. P2 is
+    #: charged for jumping further, and is what stops a textureless patch choosing at random.
+    p1: float = 0.06
+    p2: float = 1.2
+    #: P2 is divided down where the image has a strong edge, so a genuine depth discontinuity is
+    #: not smoothed away. A kerb is precisely such a discontinuity, so this matters here more
+    #: than it does in a typical stereo scene.
+    edge_relief: float = 12.0
 
 
 def intrinsics(camera: Camera) -> torch.Tensor:
@@ -109,13 +123,13 @@ def sweep(
     inverse = torch.linspace(1.0 / config.far_m, 1.0 / config.near_m, config.planes, device=device)
     depths = 1.0 / inverse
 
-    best = torch.full((band_h * band_w,), -2.0, device=device)
-    second = torch.full((band_h * band_w,), -2.0, device=device)
-    best_depth = torch.zeros((band_h * band_w,), device=device)
-
+    # The whole cost volume is kept, because semi-global aggregation needs to look along entire
+    # scanlines and cannot be done as the planes stream past. At 96 planes over a 1024-wide band
+    # it is about 125 MB, which this machine has.
+    volume = torch.empty((config.planes, band_h, band_w), device=device)
     reference_patch = _local_stats(band, config.window)
 
-    for depth in depths:
+    for plane, depth in enumerate(depths):
         accumulated = torch.zeros((band_h * band_w,), device=device)
         counted = torch.zeros((band_h * band_w,), device=device)
         for camera, image in neighbours:
@@ -145,16 +159,104 @@ def sweep(
             accumulated += torch.where(inside.reshape(band_h, band_w), score, torch.zeros_like(score)).reshape(-1)
             counted += inside.float()
 
-        score = torch.where(counted > 0, accumulated / counted.clamp(min=1.0), torch.full_like(accumulated, -2.0))
-        improved = score > best
-        second = torch.where(improved, best, torch.maximum(second, score))
-        best_depth = torch.where(improved, torch.full_like(best_depth, float(depth)), best_depth)
-        best = torch.where(improved, score, best)
+        score = torch.where(counted > 0, accumulated / counted.clamp(min=1.0), torch.full_like(accumulated, -1.0))
+        # Correlation is a similarity; aggregation works on a cost, so it is inverted here once
+        # rather than sprinkling sign flips through the recursion.
+        volume[plane] = (1.0 - score).reshape(band_h, band_w)
 
-    confidence = best - second
-    keep = (best > config.min_score) & (confidence > config.min_margin)
-    depth_map = torch.where(keep, best_depth, torch.zeros_like(best_depth)).reshape(band_h, band_w)
-    return depth_map.cpu().numpy(), best.reshape(band_h, band_w).cpu().numpy(), top
+    aggregated = _semi_global(volume, band, config)
+
+    best, index = aggregated.min(dim=0)
+    planes_axis = torch.arange(config.planes, device=aggregated.device).view(-1, 1, 1)
+    far_enough = (planes_axis - index.unsqueeze(0)).abs() > config.margin_exclusion
+    rival = torch.where(far_enough, aggregated, torch.full_like(aggregated, 1e6))
+    second = rival.min(dim=0).values
+
+    # Sub-pixel refinement by fitting a parabola to the winning cost and its two neighbours. The
+    # planes are uniform in inverse depth, so the correction is applied there and inverted back.
+    offset = _parabola(aggregated, index)
+    refined = index.to(torch.float32) + offset
+    step = (inverse[0] - inverse[-1]) / (config.planes - 1)
+    refined_inverse = inverse[0] - refined * step
+    depth_map = 1.0 / refined_inverse.clamp(min=1.0 / (config.far_m * 2))
+
+    similarity = 1.0 - best
+    keep = (similarity > config.min_score) & ((second - best) > config.min_margin)
+    depth_map = torch.where(keep, depth_map, torch.zeros_like(depth_map))
+    return depth_map.cpu().numpy(), similarity.cpu().numpy(), top
+
+
+def _parabola(volume: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Sub-plane offset of the cost minimum, in [-0.5, 0.5]."""
+    planes = volume.shape[0]
+    lo = (index - 1).clamp(0, planes - 1)
+    hi = (index + 1).clamp(0, planes - 1)
+    c0 = volume.gather(0, lo.unsqueeze(0))[0]
+    c1 = volume.gather(0, index.unsqueeze(0))[0]
+    c2 = volume.gather(0, hi.unsqueeze(0))[0]
+    denominator = (c0 - 2.0 * c1 + c2)
+    offset = torch.where(denominator.abs() > 1e-6, 0.5 * (c0 - c2) / denominator, torch.zeros_like(c1))
+    # At the ends of the range there is no bracket, and an unclamped fit there runs away.
+    interior = (index > 0) & (index < planes - 1)
+    return torch.where(interior, offset.clamp(-0.5, 0.5), torch.zeros_like(offset))
+
+
+def _semi_global(volume: torch.Tensor, band: torch.Tensor, config: SweepConfig) -> torch.Tensor:
+    """Accumulate the cost along four directions with a smoothness penalty.
+
+    Winner-take-all gives noise one chance per hypothesis to beat the signal, and on plain
+    asphalt there is no signal to beat: ninety-six planes is ninety-six lottery tickets. The
+    recursion here makes a pixel's choice depend on its neighbours', so a textureless patch
+    inherits the depth of the textured ground around it instead of choosing at random.
+    """
+    gradient_y = torch.zeros_like(band)
+    gradient_x = torch.zeros_like(band)
+    gradient_y[1:, :] = (band[1:, :] - band[:-1, :]).abs()
+    gradient_x[:, 1:] = (band[:, 1:] - band[:, :-1]).abs()
+
+    total = torch.zeros_like(volume)
+    for axis, reverse, gradient in (
+        (2, False, gradient_x), (2, True, gradient_x),
+        (1, False, gradient_y), (1, True, gradient_y),
+    ):
+        total += _scan(volume, gradient, axis, reverse, config)
+    return total / 4.0
+
+
+def _scan(
+    volume: torch.Tensor, gradient: torch.Tensor, axis: int, reverse: bool, config: SweepConfig
+) -> torch.Tensor:
+    out = torch.empty_like(volume)
+    length = volume.shape[axis]
+    order = range(length - 1, -1, -1) if reverse else range(length)
+    previous = None
+    for position in order:
+        if axis == 1:
+            cost = volume[:, position, :]
+            edge = gradient[position, :]
+        else:
+            cost = volume[:, :, position]
+            edge = gradient[:, position]
+        if previous is None:
+            current = cost
+        else:
+            floor = previous.min(dim=0).values
+            up = torch.roll(previous, 1, dims=0)
+            up[0] = 1e6
+            down = torch.roll(previous, -1, dims=0)
+            down[-1] = 1e6
+            p2 = (config.p2 / (1.0 + config.edge_relief * edge)).clamp(min=config.p1 * 1.5)
+            best = torch.minimum(
+                torch.minimum(previous, up + config.p1),
+                torch.minimum(down + config.p1, floor + p2),
+            )
+            current = cost + best - floor
+        if axis == 1:
+            out[:, position, :] = current
+        else:
+            out[:, :, position] = current
+        previous = current
+    return out
 
 
 def _local_stats(image: torch.Tensor, window: int) -> tuple[torch.Tensor, torch.Tensor]:
