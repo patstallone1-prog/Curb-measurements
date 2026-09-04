@@ -106,3 +106,33 @@ COLMAP's dense stereo is unavailable and anything GPU-bound has to go through MP
 Disk is the harder limit: **13 GB free**. At 1024 px the full 92,834-image catalogue is 32 GB and
 at 2048 px it is 109 GB, so images can never all be resident. The pipeline streams — fetch a
 working set, measure, delete the pixels, keep only the measurements.
+
+## Plane sweep: built, fast, not yet correct
+
+`src/curbmeasure/stereo.py` implements the sweep — inverse-depth plane hypotheses, homography
+warps of each neighbour into the reference, ZNCC cost, winner-take-all with a best-vs-second
+margin test. It runs on Metal: **325,000 pixels over 96 depth planes against 4 neighbours in
+1.4–2.3 s**, which extrapolates to the whole corpus comfortably inside the machine's limits.
+
+The output is not yet usable, and the diagnostic says why:
+
+```
+row band (top -> bottom of swept region)   accepted   median depth
+  rows  259- 311    27.2%        4.89 m
+  rows  311- 364    20.9%        4.56 m
+  rows  364- 417    17.0%        3.43 m
+  rows  417- 470    15.7%        3.43 m
+  rows  470- 523    14.6%        3.43 m
+  rows  523- 576    18.8%        3.07 m
+```
+
+The *sign* is right — depth falls towards the bottom of the frame, as road should. The *range* is
+wrong: it should run from about 3 m at the bottom to twenty or more near the horizon, and instead
+it is compressed into 3–5 m throughout. Depths are systematically too near, which then places the
+reconstructed ground 0.5 m below the camera instead of the ~2.5 m a vehicle camera actually sits
+at, and leaves a 570–630 mm residual against a plane that should be flat to a few centimetres.
+
+The leading explanation is the cost, not the geometry. Winner-take-all ZNCC over 96 hypotheses is
+96 chances for noise to win on a surface with no texture, and plain asphalt is exactly that.
+Semi-global aggregation — a smoothness penalty accumulated along several directions, as in SGM —
+exists for this failure and is the next thing to try.
