@@ -7,3 +7,7 @@ work/
 __pycache__/
 *.pyc
 .env.local
+
+# The published map. The rules above ignore images because the working captures are images;
+# the icons GitHub Pages serves are not captures and have to survive that.
+!docs/*.png
