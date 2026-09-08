@@ -430,6 +430,10 @@ function ribbon(points, width, color, opacity, y, thickness = 1.4, surface = nul
     map: base,
     side: THREE.DoubleSide,
   }));
+  // What this is, carried on the mesh itself. Without it nothing downstream -- the inspection
+  // probe, and the checks that use it -- can tell a footway laid in the road from a footway.
+  mesh.userData.surface = surface || "road";
+  mesh.userData.widthMeters = width;
   return mesh;
 }
 
@@ -612,6 +616,52 @@ function laneOffsets(roadWidth, count) {
 //: a dotted line somebody drew on a map.
 const DASH_M = 3.05;
 const GAP_M = 9.14;
+
+//: Marking widths, in metres. The MUTCD normal width is four inches, and San Francisco paints
+//: its lane lines and its centre lines at it. A double yellow is two of those with four inches
+//: of road between them.
+const MARK_W = 0.102;
+const DOUBLE_GAP_M = 0.102;
+
+function paintedLine(points, width, color, y, { dash = false } = {}) {
+  // A road marking is paint on a surface, with a width, and this used to draw it as a
+  // THREE.Line -- one pixel wide however far away the camera is, and one pixel wide is not a
+  // marking. Two of them 0.36 m apart down the middle of a wide street resolved into a pair of
+  // grey threads with the dark road showing between: which is exactly the "thin black stretch
+  // where the separator should be" that the centre of every two-way street was showing.
+  //
+  // Painted as geometry it has the width it has in the street, it takes the light the road
+  // takes, and it goes away with distance the way paint does rather than staying one pixel.
+  const edges = mitredEdges(points, width);
+  if (!edges) return null;
+  const { left, right, distances } = edges;
+  const position = [];
+  const index = [];
+  const cycle = DASH_M + GAP_M;
+  for (let i = 1; i < left.length; i += 1) {
+    if (dash) {
+      // Broken lines are broken in the world, not in screen space: the dash pattern is measured
+      // along the way in metres, so it stays 3.05 m of paint and 9.14 m of road at any zoom.
+      const mid = (distances[i - 1] + distances[i]) / 2;
+      if (mid % cycle > DASH_M) continue;
+    }
+    const base = position.length / 3;
+    position.push(left[i - 1][0], y, left[i - 1][1], right[i - 1][0], y, right[i - 1][1],
+                  left[i][0], y, left[i][1], right[i][0], y, right[i][1]);
+    index.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+  }
+  if (!index.length) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+    color, roughness: 0.82, metalness: 0.0, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
+  }));
+  mesh.userData.surface = "marking";
+  return mesh;
+}
 
 function dashedLine(points, color, opacity, y) {
   const vertices = points.map((p) => v3(p[0], p[1], y));
@@ -1041,39 +1091,19 @@ function roofTexture(seed, base, archetype) {
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 8, size); ctx.stroke();
   }
 
-  if (archetype === "residential" || archetype === "generic") {
-    if (random(seed + 71) < 0.38) {
-      // Solar modules, dark blue-black with thin metal mullions.
-      const x0 = 12 + Math.floor(random(seed + 72) * 36);
-      const y0 = 14 + Math.floor(random(seed + 73) * 42);
-      ctx.fillStyle = "rgba(12,28,42,0.92)";
-      ctx.fillRect(x0, y0, 50, 28);
-      ctx.strokeStyle = "rgba(125,154,170,0.58)";
-      for (let x = x0 + 10; x < x0 + 50; x += 10) { ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + 28); ctx.stroke(); }
-      for (let y = y0 + 9; y < y0 + 28; y += 9) { ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + 50, y); ctx.stroke(); }
-    } else if (random(seed + 81) < 0.28) {
-      // Roof deck: plank field, pale parapet, a couple of planters.
-      ctx.fillStyle = "rgba(126,96,68,0.58)";
-      ctx.fillRect(18, 18, 54, 34);
-      ctx.strokeStyle = "rgba(60,45,34,0.42)";
-      for (let y = 22; y < 52; y += 6) { ctx.beginPath(); ctx.moveTo(18, y); ctx.lineTo(72, y); ctx.stroke(); }
-      ctx.strokeStyle = "rgba(230,226,214,0.70)";
-      ctx.strokeRect(17.5, 17.5, 55, 35);
-      ctx.fillStyle = "rgba(55,92,50,0.72)";
-      ctx.fillRect(23, 23, 8, 5);
-      ctx.fillRect(58, 42, 8, 5);
-    }
-  } else if (archetype === "office" || archetype === "hotel" || archetype === "industrial") {
-    ctx.fillStyle = "rgba(35,39,40,0.35)";
-    for (let i = 0; i < 3; i += 1) {
-      const x = 18 + random(seed + i * 5) * 72;
-      const y = 16 + random(seed + i * 7) * 74;
-      ctx.fillRect(x, y, 15, 10);
-      ctx.fillStyle = "rgba(255,255,255,0.16)";
-      ctx.fillRect(x + 2, y + 2, 11, 2);
-      ctx.fillStyle = "rgba(35,39,40,0.35)";
-    }
-  }
+  // Nothing else. Roof furniture used to be painted in here, and a roof texture repeats: this
+  // tile was laid two and a half times across every roof, so a house with an array had six
+  // copies of it at arbitrary size, clipped at the tile edges and squared to nothing. Panels,
+  // decks, planters and plant are now geometry in metres -- see addRoofFurniture -- and this is
+  // back to being what it says it is, which is the surface.
+  //
+  // A drain, though: every flat roof in the city has one, it is genuinely part of the surface,
+  // and it is the one thing here that is allowed to repeat.
+  ctx.fillStyle = "rgba(0,0,0,0.30)";
+  ctx.beginPath();
+  ctx.arc(size * 0.5 + (random(seed + 91) - 0.5) * 30, size * 0.5 + (random(seed + 93) - 0.5) * 30,
+          3.5, 0, Math.PI * 2);
+  ctx.fill();
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
@@ -1441,7 +1471,7 @@ function laneCountForWay(way) {
     : (way.lanes_fwd || way.lanes_back ? (forward || 0) + (backward || 0) : tagged);
 }
 
-function renderedRoadWidth(way) {
+function nominalRoadWidth(way) {
   // Keep official width metadata intact, but render one OSM way as one carriageway.
   // Broad right-of-way fallbacks and divided street matches otherwise turn a single mapped
   // way into a plaza-wide slab, which is what covers sidewalks/streets at curved junctions.
@@ -1450,6 +1480,97 @@ function renderedRoadWidth(way) {
   const laneCap = lanes ? Math.max(4.2, lanes * 3.35 + 1.4) : MAX_INFERRED_ROAD_M;
   const sourceCap = way.road_source === "curb_geometry" ? MAX_RENDER_ROAD_M : MAX_INFERRED_ROAD_M;
   return Math.max(MIN_RENDER_ROAD_M, Math.min(raw, laneCap, sourceCap));
+}
+
+function renderedRoadWidth(way) {
+  // A street may not be drawn wider than the room it has.
+  //
+  // Widths come from the recorded right of way where the kerbs were not surveyed, and a right
+  // of way is the whole street -- footways, setbacks and all. Drawn as carriageway it reaches
+  // past its own kerb and over whatever is next to it, and what is next to it is very often
+  // another street: an alley inside the block, a service road beside an avenue, the second
+  // half of a divided road. Trenton Street's pavement sat four metres inside a neighbour's
+  // carriageway; Van Ness's sat inside its own twin. Nothing was wrong with the pavement.
+  //
+  // So no carriageway extends more than halfway to the next street's centreline. That is the
+  // same rule a surveyor would use to divide a shared right of way, it needs no new data, and
+  // it is computed once per way rather than per frame.
+  if (way._renderRoadM === undefined) way._renderRoadM = nominalRoadWidth(way);
+  return way._renderRoadM;
+}
+
+function clampRoadWidthsToNeighbours(ways) {
+  const CELL = 40;
+  const grid = new Map();
+  const streets = ways.filter((w) => w.kind === "street" && w.points && w.points.length > 1);
+  const segments = [];
+  for (const way of streets) {
+    way._renderRoadM = nominalRoadWidth(way);
+    for (let i = 1; i < way.points.length; i += 1) {
+      const [ax, ay] = xy(way.points[i - 1][0], way.points[i - 1][1]);
+      const [bx, by] = xy(way.points[i][0], way.points[i][1]);
+      const seg = [ax, -ay, bx, -by, way];
+      segments.push(seg);
+      const x0 = Math.floor(Math.min(ax, bx) / CELL);
+      const x1 = Math.floor(Math.max(ax, bx) / CELL);
+      const z0 = Math.floor(Math.min(-ay, -by) / CELL);
+      const z1 = Math.floor(Math.max(-ay, -by) / CELL);
+      for (let ix = x0 - 1; ix <= x1 + 1; ix += 1) {
+        for (let iz = z0 - 1; iz <= z1 + 1; iz += 1) {
+          const key = `${ix}:${iz}`;
+          let bucket = grid.get(key);
+          if (!bucket) grid.set(key, bucket = []);
+          bucket.push(seg);
+        }
+      }
+    }
+  }
+  // The nearest other centreline to each way, sampled along it. Junctions are excluded by
+  // ignoring anything that shares an endpoint neighbourhood -- two streets that meet at a
+  // corner are not competing for the same ground, they are the same ground.
+  const nearest = new Map();
+  for (const [ax, az, bx, bz, way] of segments) {
+    const steps = Math.max(1, Math.round(Math.hypot(bx - ax, bz - az) / 8));
+    for (let k = 0; k <= steps; k += 1) {
+      const t = k / steps;
+      const px = ax + (bx - ax) * t;
+      const pz = az + (bz - az) * t;
+      const ix = Math.floor(px / CELL);
+      const iz = Math.floor(pz / CELL);
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dz = -1; dz <= 1; dz += 1) {
+          const bucket = grid.get(`${ix + dx}:${iz + dz}`);
+          if (!bucket) continue;
+          for (const other of bucket) {
+            if (other[4] === way) continue;
+            const d = Math.sqrt(distanceToSegmentSquared(px, pz, other[0], other[1],
+                                                         other[2], other[3]));
+            // Under three metres is a junction or a way drawn on top of another, not a
+            // neighbour to make room for; clamping to that would erase the street.
+            if (d < 3.0) continue;
+            const best = nearest.get(way);
+            if (best === undefined || d < best) nearest.set(way, d);
+          }
+        }
+      }
+    }
+  }
+  let clamped = 0;
+  for (const way of streets) {
+    const gap = nearest.get(way);
+    if (gap === undefined) continue;
+    // A street that says how many lanes it has does not get clamped below them. An avenue with
+    // a service alley four metres off its kerb still has four lanes on it, and the alley is the
+    // thing that is close, not the avenue that is wide.
+    const lanes = laneCountForWay(way);
+    const floor = Math.max(MIN_RENDER_ROAD_M, lanes ? lanes * 3.0 : 0);
+    const room = Math.max(floor, gap);
+    if (room < way._renderRoadM) {
+      way._renderRoadM = room;
+      clamped += 1;
+    }
+  }
+  return clamped;
 }
 
 function renderedWalkWidth(way, fallback = 3.0) {
@@ -1471,6 +1592,8 @@ function addCarriagewaySegment(ax, az, bx, bz, half) {
     }
   }
 }
+
+clampRoadWidthsToNeighbours(DATA.ways);
 
 for (const way of DATA.ways) {
   if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
@@ -1527,7 +1650,15 @@ function pavementRunsOutsideCarriageway(points, width) {
   if (!points || points.length < 2) return [];
   const runs = [];
   let run = [];
-  const guard = Math.max(0.45, Math.min(1.15, width / 2 - 0.2));
+  // What "in the carriageway" means for a footway. It means the footway overlaps the road, and
+  // the test for that is the footway's own edges -- not its centreline pushed outward.
+  //
+  // This guard used to inflate every carriageway by up to 1.15 m and then ask whether the
+  // footway's centreline was inside it. But a footway sits with its inner edge against the
+  // kerb, so its centreline is only half its width clear of the road: inflating the road by a
+  // metre swallowed the centreline of a normal, correctly placed pavement. It suppressed 63 of
+  // the 201 km of mapped footway in this corridor and erased 420 sidewalk ways outright, which
+  // is what the black gaps along the kerb were. The geometry was right and the guard deleted it.
   const edge = Math.max(0.2, width / 2 - 0.12);
   const finish = () => {
     if (run.length >= 2 && wayLength(run) > 0.9) runs.push(run);
@@ -1550,9 +1681,12 @@ function pavementRunsOutsideCarriageway(points, width) {
       const span = Math.hypot(dx, dz) || 1;
       const nx = -dz / span;
       const nz = dx / span;
-      const overlaps = insideCarriageway(x, z, -guard)
-        || insideCarriageway(x + nx * edge, z + nz * edge, 0.12)
-        || insideCarriageway(x - nx * edge, z - nz * edge, 0.12);
+      // Genuinely over the road: the middle of the footway is on the carriageway, or both of
+      // its edges are. One edge inside the kerb line is the normal condition of a pavement
+      // that abuts a street, and is not a reason to delete it.
+      const innerEdge = insideCarriageway(x + nx * edge, z + nz * edge, 0.30);
+      const outerEdge = insideCarriageway(x - nx * edge, z - nz * edge, 0.30);
+      const overlaps = insideCarriageway(x, z, 0.30) || (innerEdge && outerEdge);
       if (overlaps) {
         finish();
       } else {
@@ -1800,6 +1934,60 @@ function footprintMetrics(points) {
     width: Math.max(4, maxX - minX),
     depth: Math.max(4, maxY - minY),
   };
+}
+
+function footprintArea(points) {
+  if (!points || points.length < 4) return 0;
+  const local = points.map((p) => xy(p[0], p[1]));
+  let twice = 0;
+  for (let i = 0; i < local.length - 1; i += 1) {
+    twice += local[i][0] * local[i + 1][1] - local[i + 1][0] * local[i][1];
+  }
+  return Math.abs(twice) / 2;
+}
+
+// ---- what is actually standing there ----
+//
+// Seven hundred and twenty six of these footprints are small and sit deep inside a block, and
+// they were all being drawn as houses: extruded to ten and a half metres, dressed in a window
+// grid, given a shopfront. A forty square metre box ten metres tall with windows on it is not a
+// building anybody would recognise -- it is the thing that reads, from above, as a tiny mystery
+// house in the middle of somebody's garden.
+//
+// Most of them are real. San Francisco blocks are full of rear cottages, workshops and garages,
+// and five hundred of these have a height the city's lidar actually measured. What was invented
+// was the treatment, and in 355 cases the height as well: those carry `inferred_default`, which
+// is the corridor's median building height applied to a garden shed.
+//
+// So the question asked here is not "is it real" but "what is it", and the answer comes from
+// the two things the data does say: how big its footprint is, and where its height came from.
+const OUTBUILDING_TAGS = new Set(["shed", "garage", "garages", "hut", "cabin", "service",
+                                  "toilets", "container", "kiosk", "outbuilding", "greenhouse",
+                                  "carport"]);
+//: A roof is a roof. `building=roof` is OpenStreetMap for a canopy over something -- a petrol
+//: forecourt, a bus stand, a covered walk -- with no walls under it, and there are 57 of them
+//: here. Extruded, each one is a solid ten metre block standing on open ground.
+const CANOPY_TAGS = new Set(["roof", "canopy"]);
+//: Above this a small footprint is a real narrow building -- a tower on a corner lot, a stair
+//: core -- rather than a shed with a made-up height. It is generous: 1.35 times the square root
+//: of the floor area puts a 100 m^2 house at 13.5 m, which is four storeys.
+const SLENDER_LIMIT = 1.35;
+//: What an outbuilding actually is. One storey, or two for a large one, and never more.
+const OUTBUILDING_MAX_M = 6.2;
+
+function structureClass(feature, areaM2) {
+  const tag = (feature.tags || {}).building;
+  if (CANOPY_TAGS.has(tag)) return "canopy";
+  if (OUTBUILDING_TAGS.has(tag)) return "outbuilding";
+  // A height OpenStreetMap states is a statement about this building and is believed. A lidar
+  // median over a forty square metre footprint in a dense block is a measurement of whatever
+  // was tallest in the cell, which is usually the building next door.
+  const stated = feature.height_source === "osm_height" || feature.height_source === "osm_levels";
+  if (stated || areaM2 >= 150) return "building";
+  const height = feature.height_m || 0;
+  if (feature.height_source === "inferred_default" || !feature.height_source) return "outbuilding";
+  if (height > SLENDER_LIMIT * Math.sqrt(Math.max(areaM2, 1))) return "outbuilding";
+  return "building";
 }
 
 function footprintWalls(points) {
@@ -2103,9 +2291,458 @@ function placeArchetypeMesh(feature, seed) {
   return null;
 }
 
+// ---- what is on a roof ----
+//
+// This was painted into the roof texture, and a roof texture repeats: the tile carried one
+// solar array and was tiled two and a half times across the roof, so a house with panels had
+// six copies of the same array at whatever size the tiling happened to give them, scattered
+// across the roof and half cut off at the edges. Nothing was at any particular size and nothing
+// was aligned to anything.
+//
+// A solar array is not a pattern, it is a set of 1.7 by 1.0 metre modules in rows, squared to
+// the roof, set in from the parapet, in one block. A roof deck is a rectangle of decking with
+// furniture on it. Planters are in rows because somebody put them in rows. All of that is
+// geometry at the size it is in the street, placed once, in the building's own footprint.
+//
+// What goes on which roof is decided by the roof: solar wants a flat roof with room for an
+// array, so a narrow or ragged footprint does not get one however common panels are.
+
+//: A module: 1.70 x 1.00 m is the common residential size, and the rails hold them 20 mm apart.
+const SOLAR_MODULE = { long: 1.70, short: 1.00, gap: 0.02, tilt: 12 };
+//: How much of the roof a real install covers before it runs into vents, stairs and setbacks.
+const SOLAR_COVERAGE = 0.42;
+
+//: Roughly how common each of these is on a flat roof in this part of San Francisco. These are
+//: estimates and are labelled as such -- there is no per-building record of roof use, and the
+//: alternative to an estimate here is the previous behaviour, which was a coin flip. Solar is
+//: rare on this side of the city: the housing stock is dense, multi-owner and largely historic,
+//: and the citywide residential figure is single digits before any of that is taken into
+//: account. Decks are the opposite -- a flat roof with a view of the bay usually has one.
+const ROOF_USE = {
+  residential: [["deck", 0.20], ["garden", 0.09], ["solar", 0.06], ["stair", 0.30]],
+  generic:     [["deck", 0.14], ["garden", 0.07], ["solar", 0.05], ["stair", 0.26]],
+  office:      [["plant", 0.72], ["stair", 0.45]],
+  hotel:       [["plant", 0.62], ["deck", 0.12], ["stair", 0.45]],
+  industrial:  [["plant", 0.55], ["solar", 0.11], ["stair", 0.20]],
+  retail:      [["plant", 0.40], ["stair", 0.22]],
+  restaurant:  [["plant", 0.45], ["stair", 0.20]],
+};
+
+function convexHull(points) {
+  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (pts.length < 3) return pts;
+  const half = (seq) => {
+    const out = [];
+    for (const p of seq) {
+      while (out.length >= 2) {
+        const [ax, ay] = out[out.length - 2];
+        const [bx, by] = out[out.length - 1];
+        if ((bx - ax) * (p[1] - ay) - (by - ay) * (p[0] - ax) > 0) break;
+        out.pop();
+      }
+      out.push(p);
+    }
+    return out;
+  };
+  return half(pts).slice(0, -1).concat(half(pts.slice().reverse()).slice(0, -1));
+}
+
+const ROOF_USE_SALT = { deck: 131, garden: 257, solar: 389, plant: 521, stair: 653 };
+
+function roofRectangle(feature) {
+  // The smallest rectangle the roof fits in, at the angle the roof is actually at.
+  //
+  // This used the axis-aligned bounding box, and San Francisco is not aligned to north: the
+  // grid here runs twenty to forty degrees off it, so a plain rectangular building filled only
+  // two thirds of its north-facing box. The median across this corridor was 0.666, the test for
+  // "is this roof a rectangle" was fill > 0.82, and so 681 of the 690 roofs that came up for a
+  // solar array were refused as ragged. Every one of them was a rectangle; the box was crooked.
+  //
+  // A minimum-area rectangle has one side flush with an edge of the convex hull, so trying every
+  // hull edge is exact rather than an approximation, and a footprint hull has a dozen edges.
+  if (!feature.points || feature.points.length < 4) return null;
+  const local = feature.points.map((p) => {
+    const [x, y] = xy(p[0], p[1]);
+    return [x, -y];                                   // world x, world z
+  });
+  const hull = convexHull(local);
+  if (hull.length < 3) return null;
+  let best = null;
+  for (let i = 0; i < hull.length; i += 1) {
+    const [ax, az] = hull[i];
+    const [bx, bz] = hull[(i + 1) % hull.length];
+    const edge = Math.hypot(bx - ax, bz - az);
+    if (edge < 1e-6) continue;
+    const ux = (bx - ax) / edge;
+    const uz = (bz - az) / edge;
+    const vx = -uz;
+    const vz = ux;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const [px, pz] of hull) {
+      const du = (px - ax) * ux + (pz - az) * uz;
+      const dv = (px - ax) * vx + (pz - az) * vz;
+      if (du < u0) u0 = du;
+      if (du > u1) u1 = du;
+      if (dv < v0) v0 = dv;
+      if (dv > v1) v1 = dv;
+    }
+    const area = (u1 - u0) * (v1 - v0);
+    if (best && area >= best.area) continue;
+    const mu = (u0 + u1) / 2;
+    const mv = (v0 + v1) / 2;
+    best = {
+      area,
+      x: ax + ux * mu + vx * mv,
+      z: az + uz * mu + vz * mv,
+      long: u1 - u0,
+      short: v1 - v0,
+      angle: Math.atan2(uz, ux),
+    };
+  }
+  if (!best) return null;
+  const footprint = footprintArea(feature.points);
+  // Long axis first, so "width" is always the longer side and a row runs down it.
+  let { long, short, angle } = best;
+  if (short > long) {
+    [long, short] = [short, long];
+    angle += Math.PI / 2;
+  }
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return {
+    x: best.x,
+    z: best.z,
+    width: long,
+    depth: short,
+    angle,
+    area: footprint,
+    // How much of its own rectangle the footprint fills: 1 for a rectangle, about two thirds
+    // for an L, a half for a triangle. Now that the rectangle is the right one, this measures
+    // the shape of the roof rather than its bearing.
+    fill: best.area > 0 ? footprint / best.area : 0,
+    slim: short,
+    squarish: (best.area > 0 ? footprint / best.area : 0) > 0.82 && short > 5.0,
+    along: "x",
+    // Rect-local (down the roof, across the roof) to world.
+    at(a, b) { return [this.x + cos * a - sin * b, this.z + sin * a + cos * b]; },
+    // What a box aligned to this roof has to be turned by. Three turns +X to (cos, -sin) in xz.
+    rotY: -angle,
+  };
+}
+
+function deckMaterials() {
+  if (!deckMaterials._cache) {
+    const make = (name, options) => {
+      const material = new THREE.MeshStandardMaterial(options);
+      material.__part = name;
+      return material;
+    };
+    deckMaterials._cache = {
+      plank: make("plank", { color: 0x6a5340, roughness: 0.94 }),
+      rail: make("rail", { color: 0x8b8578, roughness: 0.9 }),
+      seat: make("seat", { color: 0x7d6249, roughness: 0.92 }),
+      planter: make("planter", { color: 0x5b4633, roughness: 0.95 }),
+      leaf: make("leaf", { color: 0x3f6b3a, roughness: 0.95 }),
+      panel: make("panel", { color: 0x121d2c, roughness: 0.28, metalness: 0.35 }),
+      rack: make("rack", { color: 0x9aa1a5, roughness: 0.5, metalness: 0.6 }),
+      plant: make("plant", { color: 0x8d9296, roughness: 0.7, metalness: 0.4 }),
+      hut: make("hut", { color: 0x54534c, roughness: 0.94 }),
+    };
+  }
+  return deckMaterials._cache;
+}
+
+// Collected, not added. A roof garden is two dozen planters and a deck is eight pieces of
+// furniture; at fifteen thousand buildings that is tens of thousands of separate meshes and
+// tens of thousands of draw calls, which is no frame rate at all. Every piece is a box, so they
+// go into one instanced mesh per material -- nine draw calls for the roofs of the whole city.
+const ROOF_PARTS = new Map();
+
+function slab(group, x, y, z, w, h, d, material, rotY = 0, tilt = 0, tiltAxis = "x") {
+  const key = material.__part || "plant";
+  if (!ROOF_PARTS.has(key)) ROOF_PARTS.set(key, { material, boxes: [] });
+  ROOF_PARTS.get(key).boxes.push([x, y + h / 2, z, w, h, d, rotY, tilt, tiltAxis === "x" ? 0 : 1]);
+  return null;
+}
+
+function emitRoofParts() {
+  const dummy = new THREE.Object3D();
+  const unit = new THREE.BoxGeometry(1, 1, 1);
+  for (const { material, boxes } of ROOF_PARTS.values()) {
+    if (!boxes.length) continue;
+    const mesh = new THREE.InstancedMesh(unit, material, boxes.length);
+    boxes.forEach(([x, y, z, w, h, d, rotY, tilt, axis], i) => {
+      dummy.position.set(x, y, z);
+      dummy.rotation.set(axis === 0 ? tilt : 0, rotY, axis === 1 ? tilt : 0);
+      dummy.scale.set(w, h, d);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.kind = "roof";
+    groups.mapped3d.add(mesh);
+  }
+  ROOF_PARTS.clear();
+}
+
+function solarArray(group, roof, top, seed, feature_is_big = false) {
+  // Rows of modules squared to the roof's long axis, in one block, inset from the parapet.
+  const M = deckMaterials();
+  const inset = 1.2;
+  const usableW = Math.max(0, roof.width - inset * 2);
+  const usableD = Math.max(0, roof.depth - inset * 2);
+  // Portrait or landscape rows: two of the layouts a real installer would choose from.
+  const landscape = random(seed + 501) < 0.6;
+  const stepA = (landscape ? SOLAR_MODULE.long : SOLAR_MODULE.short) + SOLAR_MODULE.gap;
+  const stepB = (landscape ? SOLAR_MODULE.short : SOLAR_MODULE.long) + SOLAR_MODULE.gap;
+  const spanA = usableW;
+  const spanB = usableD;
+  // A residential array in this city is ten to twenty five modules; a warehouse takes more.
+  // Uncapped, a large roof was getting ninety, which is a commercial power plant.
+  const most = feature_is_big ? 48 : 26;
+  let cols = Math.floor((spanA * Math.sqrt(SOLAR_COVERAGE)) / stepA);
+  let rows = Math.floor((spanB * Math.sqrt(SOLAR_COVERAGE)) / stepB);
+  while (cols * rows > most && (cols > 2 || rows > 2)) {
+    if (cols >= rows) cols -= 1; else rows -= 1;
+  }
+  if (cols < 2 || rows < 2) return false;
+  const blockA = cols * stepA;
+  const blockB = rows * stepB;
+  // Set towards the back of the roof, which is where an installer puts it: away from the street
+  // parapet and off the stair bulkhead.
+  const offA = (random(seed + 503) - 0.5) * Math.max(0, spanA - blockA) * 0.6;
+  const offB = (spanB - blockB) / 2 * 0.55;
+  const tilt = (SOLAR_MODULE.tilt * Math.PI) / 180;
+  for (let c = 0; c < cols; c += 1) {
+    for (let r = 0; r < rows; r += 1) {
+      const a = offA + (c + 0.5) * stepA - blockA / 2;
+      const b = offB + (r + 0.5) * stepB - blockB / 2;
+      const [x, z] = roof.at(a, b);
+      const w = landscape ? SOLAR_MODULE.long : SOLAR_MODULE.short;
+      const d = landscape ? SOLAR_MODULE.short : SOLAR_MODULE.long;
+      // Tilted up across the rows, the way a rack on a flat roof holds them.
+      slab(group, x, top + 0.26, z, w, 0.045, d, M.panel, roof.rotY, tilt, "z");
+      // The rail the module sits on, which is what stops an array reading as paint.
+      slab(group, x, top, z, 0.06, 0.24, 0.06, M.rack, roof.rotY);
+    }
+  }
+  return true;
+}
+
+function roofDeck(group, roof, top, seed) {
+  // Decking, a rail round it, and furniture in the places furniture goes: benches against the
+  // rail, a table in the middle, planters along one edge.
+  const M = deckMaterials();
+  const variant = Math.floor(random(seed + 511) * 3);
+  const w = Math.min(roof.width - 2.4, 4.5 + random(seed + 512) * 5.5);
+  const d = Math.min(roof.depth - 2.4, 3.5 + random(seed + 513) * 4.5);
+  if (w < 2.5 || d < 2.5) return false;
+  const ca = (random(seed + 514) - 0.5) * Math.max(0, roof.width - w - 2.0) * 0.7;
+  const cb = (random(seed + 515) - 0.5) * Math.max(0, roof.depth - d - 2.0) * 0.7;
+  const put = (a, b, bw, bh, bd, material, y) => {
+    const [x, z] = roof.at(ca + a, cb + b);
+    slab(group, x, y, z, bw, bh, bd, material, roof.rotY);
+  };
+  put(0, 0, w, 0.12, d, M.plank, top);
+  // The rail: four thin runs, not a solid box, so it reads as a rail from above and from below.
+  for (const [oa, ob, rw, rd] of [[0, -d / 2, w, 0.06], [0, d / 2, w, 0.06],
+                                  [-w / 2, 0, 0.06, d], [w / 2, 0, 0.06, d]]) {
+    put(oa, ob, rw, 1.05, rd, M.rail, top + 0.12);
+  }
+  if (variant === 0) {
+    // Benches down both long sides.
+    for (const side of [-1, 1]) put(0, side * (d / 2 - 0.45), w * 0.7, 0.44, 0.42, M.seat, top + 0.12);
+  } else if (variant === 1) {
+    // A table with seats either side.
+    put(0, 0, 1.5, 0.72, 0.85, M.seat, top + 0.12);
+    for (const side of [-1, 1]) put(0, side * 0.95, 1.5, 0.42, 0.36, M.seat, top + 0.12);
+  } else {
+    // A bench along one side and planters along the other.
+    put(0, -(d / 2 - 0.45), w * 0.6, 0.44, 0.42, M.seat, top + 0.12);
+    const boxes = Math.max(2, Math.min(8, Math.floor(w / 1.1)));
+    for (let i = 0; i < boxes; i += 1) {
+      const a = -w / 2 + (i + 0.5) * (w / boxes);
+      put(a, d / 2 - 0.4, w / boxes - 0.15, 0.42, 0.42, M.planter, top + 0.12);
+      put(a, d / 2 - 0.4, w / boxes - 0.25, 0.30, 0.30, M.leaf, top + 0.54);
+    }
+  }
+  return true;
+}
+
+function roofGarden(group, roof, top, seed) {
+  // Planter boxes in rows, because that is how a roof garden is built: you cannot put soil on a
+  // roof, you put boxes of soil on a roof, and they line up with the structure underneath.
+  const M = deckMaterials();
+  const variant = Math.floor(random(seed + 521) * 3);
+  const boxW = variant === 0 ? 1.2 : variant === 1 ? 0.8 : 2.2;
+  const boxD = variant === 2 ? 0.7 : 0.9;
+  const gapA = 0.7;
+  const gapB = variant === 1 ? 0.6 : 1.1;
+  const usableW = roof.width - 2.6;
+  const usableD = roof.depth - 2.6;
+  // Two or three rows of planters along part of the roof. Filling the roof with them, which is
+  // what an uncapped grid does, is a nursery rather than somebody's roof garden -- and on a
+  // 20 by 26 metre roof it was laying out 99 of them.
+  const cols = Math.min(9, Math.floor(usableW / (boxW + gapA)));
+  const rows = Math.min(3, Math.floor((usableD * 0.5) / (boxD + gapB)));
+  if (cols < 2 || rows < 1) return false;
+  const blockW = cols * (boxW + gapA) - gapA;
+  const blockD = rows * (boxD + gapB) - gapB;
+  const a0 = -blockW / 2;
+  const b0 = -blockD / 2 + (random(seed + 522) - 0.5) * Math.max(0, usableD - blockD) * 0.5;
+  for (let c = 0; c < cols; c += 1) {
+    for (let r = 0; r < rows; r += 1) {
+      const [x, z] = roof.at(a0 + c * (boxW + gapA) + boxW / 2,
+                             b0 + r * (boxD + gapB) + boxD / 2);
+      slab(group, x, top, z, boxW, 0.45, boxD, M.planter, roof.rotY);
+      slab(group, x, top + 0.45, z, boxW - 0.12, 0.34, boxD - 0.12, M.leaf, roof.rotY);
+    }
+  }
+  return true;
+}
+
+function roofPlant(group, roof, top, seed) {
+  // Condensers and air handlers, in a line along the roof rather than dropped at random: they
+  // are plumbed to a riser and they sit where the riser is.
+  const M = deckMaterials();
+  const span = roof.width - 3.0;
+  const count = Math.max(1, Math.min(6, Math.floor(span / 3.2)));
+  if (count < 1 || span < 3) return false;
+  const off = (random(seed + 531) - 0.5) * Math.max(0, roof.depth - 3.0) * 0.5;
+  for (let i = 0; i < count; i += 1) {
+    const [x, z] = roof.at(-span / 2 + (i + 0.5) * (span / count), off);
+    const big = random(seed + 532 + i) < 0.35;
+    slab(group, x, top, z, big ? 2.4 : 1.3, big ? 1.5 : 0.9, big ? 1.5 : 1.3, M.plant, roof.rotY);
+  }
+  return true;
+}
+
+function roofStair(group, roof, top, seed) {
+  // The bulkhead over the stair. Nearly every flat roof you can walk out onto has one, and it
+  // is the single most common thing standing on a San Francisco roof.
+  const M = deckMaterials();
+  const w = 2.0 + random(seed + 541) * 0.8;
+  const d = 1.6 + random(seed + 542) * 0.8;
+  if (roof.width < w + 2 || roof.depth < d + 2) return false;
+  const [x, z] = roof.at((random(seed + 543) - 0.5) * (roof.width - w - 1.6) * 0.7,
+                         (random(seed + 544) - 0.5) * (roof.depth - d - 1.6) * 0.7);
+  slab(group, x, top, z, w, 2.3, d, M.hut, roof.rotY);
+  return true;
+}
+
+function addRoofFurniture(group, feature, seed, height, areaM2) {
+  // Nothing goes on a roof too small to stand on, and nothing goes on a roof that is not flat
+  // enough to be a rectangle -- which is the check that stopped solar arrays appearing on
+  // L-shaped and triangular footprints.
+  if (areaM2 < 55) return;
+  const roof = roofRectangle(feature);
+  if (!roof || roof.slim < 4.5) return;
+  const uses = ROOF_USE[feature.archetype] || ROOF_USE.generic;
+  const top = height;
+  let placed = 0;
+  for (const [use, chance] of uses) {
+    // A distinct draw per use. Keyed on the name's length, "solar", "stair" and "plant" are all
+    // five letters and drew the same number, so solar and the stair bulkhead were perfectly
+    // correlated -- every roof with panels had a stair hut and no roof had one without.
+    if (random(seed + ROOF_USE_SALT[use] + 601) >= chance) continue;
+    if (use === "solar") {
+      // Only a flat, rectangular roof with room on it. A panel on a ragged footprint is the
+      // thing that looked wrong, and refusing is cheaper than pretending.
+      if (!roof.squarish || areaM2 < 90) continue;
+      if (solarArray(group, roof, top, seed, areaM2 > 900)) placed += 1;
+    } else if (use === "deck") {
+      if (roofDeck(group, roof, top, seed)) placed += 1;
+    } else if (use === "garden") {
+      if (roof.squarish && roofGarden(group, roof, top, seed)) placed += 1;
+    } else if (use === "plant") {
+      if (roofPlant(group, roof, top, seed)) placed += 1;
+    } else if (use === "stair") {
+      if (roofStair(group, roof, top, seed)) placed += 1;
+    }
+    // A roof carries one main use plus a stair, not four at once.
+    if (placed >= 2) break;
+  }
+}
+
+// ---- outbuildings ----
+//
+// Board and batten, corrugated iron, or stucco: what a rear workshop in this city is actually
+// clad in. No window grid -- an outbuilding has a door and maybe one window, and painting a
+// facade of them across a four metre wall is the thing that made these read as houses.
+const OUTBUILDING_CACHE = new Map();
+
+function outbuildingTexture(seed) {
+  const variant = Math.floor(random(seed + 401) * 3);
+  const key = `wall-${variant}`;
+  if (OUTBUILDING_CACHE.has(key)) return OUTBUILDING_CACHE.get(key);
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (variant === 0) {                          // vertical boards with battens
+    ctx.fillStyle = "#4a4238";
+    ctx.fillRect(0, 0, size, size);
+    for (let x = 0; x < size; x += 11) {
+      ctx.fillStyle = random(x * 7) < 0.5 ? "rgba(0,0,0,0.16)" : "rgba(255,255,255,0.07)";
+      ctx.fillRect(x, 0, 10, size);
+      ctx.fillStyle = "rgba(0,0,0,0.34)";
+      ctx.fillRect(x + 10, 0, 1, size);
+    }
+  } else if (variant === 1) {                   // corrugated sheet
+    ctx.fillStyle = "#5a5f60";
+    ctx.fillRect(0, 0, size, size);
+    for (let x = 0; x < size; x += 7) {
+      ctx.fillStyle = "rgba(255,255,255,0.10)";
+      ctx.fillRect(x, 0, 3, size);
+      ctx.fillStyle = "rgba(0,0,0,0.20)";
+      ctx.fillRect(x + 4, 0, 2, size);
+    }
+  } else {                                      // plain stucco
+    ctx.fillStyle = "#6b6459";
+    ctx.fillRect(0, 0, size, size);
+    for (let i = 0; i < size * size * 0.4; i += 1) {
+      ctx.fillStyle = random(i * 3) < 0.5 ? "rgba(0,0,0,0.10)" : "rgba(255,255,255,0.07)";
+      ctx.fillRect(random(i * 5) * size, random(i * 7) * size, 1, 1);
+    }
+  }
+  // One door, low and off to one side, at the scale the wall texture is tiled to.
+  ctx.fillStyle = "rgba(28,26,24,0.72)";
+  ctx.fillRect(size * 0.16, size * 0.42, size * 0.16, size * 0.58);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  OUTBUILDING_CACHE.set(key, texture);
+  return texture;
+}
+
+function outbuildingRoofTexture(seed) {
+  const key = `roof-${Math.floor(random(seed + 403) * 2)}`;
+  if (OUTBUILDING_CACHE.has(key)) return OUTBUILDING_CACHE.get(key);
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = key.endsWith("0") ? "#3b3a36" : "#4a4b46";
+  ctx.fillRect(0, 0, size, size);
+  for (let y = 0; y < size; y += 6) {
+    ctx.fillStyle = "rgba(0,0,0,0.16)";
+    ctx.fillRect(0, y, size, 1);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  OUTBUILDING_CACHE.set(key, texture);
+  return texture;
+}
+
 function buildingMesh(feature) {
   const shape = footprintShape(feature.points);
   if (!shape) return null;
+  const areaM2 = footprintArea(feature.points);
+  const kind = structureClass(feature, areaM2);
+  // A canopy has no walls under it. Drawing nothing leaves the parcel it stands on to the
+  // ground cover, which is grass and a fence -- which is what is there.
+  if (kind === "canopy") return null;
   // No exaggeration. This was multiplied by 1.8 to make massing read from a bird's eye, which
   // put every building eighty per cent taller than OpenStreetMap says it is -- fine as a
   // diagram, wrong the moment somebody walks down the street beside it.
@@ -2115,6 +2752,12 @@ function buildingMesh(feature) {
   const cap = ARCHETYPE_MAX_HEIGHT[feature.archetype];
   if (cap && feature.height_source !== "osm_height" && feature.height_source !== "osm_levels") {
     height = Math.min(height, cap);
+  }
+  if (kind === "outbuilding") {
+    // A rear cottage is one storey, or two if it is a big one. The corridor median that was
+    // being applied to these belongs to the street frontage, not to the garden.
+    height = Math.min(height, Math.max(2.6, Math.min(OUTBUILDING_MAX_M,
+                                                     1.05 * Math.sqrt(Math.max(areaM2, 1)))));
   }
   // Seeded from the footprint, so a building keeps its material and colour between reloads.
   const seed = Math.round((feature.points[0][0] * 1e5) + (feature.points[0][1] * 1e5) * 7919);
@@ -2189,8 +2832,17 @@ function buildingMesh(feature) {
   mesh.userData = feature;
   const group = new THREE.Group();
   group.add(mesh);
-  addGroundFacadeDetail(group, feature, seed, height);
-  addSouthFacadeDetail(group, feature, seed, height);
+  if (kind === "outbuilding") {
+    // No shopfront, no bay windows, no balconies. A garden workshop has a door and a roof, and
+    // the detail passes are what made these read as houses in the first place.
+    walls.map = outbuildingTexture(seed);
+    walls.envMapIntensity = 0.25;
+    roof.map = outbuildingRoofTexture(seed);
+  } else {
+    addGroundFacadeDetail(group, feature, seed, height);
+    addSouthFacadeDetail(group, feature, seed, height);
+    addRoofFurniture(group, feature, seed, height, areaM2);
+  }
   group.userData = feature;
   return group;
 }
@@ -2476,8 +3128,9 @@ for (const way of DATA.ways) {
           if (opposing && i === (backward || Math.floor(total / 2))) continue;
           const offset = road / 2 - i * laneWidth;
           if (Math.abs(offset) >= road / 2 - 0.35) continue;
-          groups.streets.add(dashedLine(offsetWay(renderPoints, offset), 0xdfe3e0, 0.7,
-                                        roadTop + 0.015));
+          const divider = paintedLine(offsetWay(renderPoints, offset), MARK_W, 0xdfe3e0,
+                                      roadTop + 0.015, { dash: true });
+          if (divider) groups.streets.add(divider);
         }
       }
     }
@@ -2486,9 +3139,11 @@ for (const way of DATA.ways) {
       // street. A broken line means overtaking is allowed and is the exception here, not the
       // rule -- and drawn as one dashed thread it read as a dotted line on a map rather than as
       // a road marking.
+      const apart = (MARK_W + DOUBLE_GAP_M) / 2;
       for (const side of [1, -1]) {
-        groups.streets.add(line(offsetWay(renderPoints, side * 0.18), 0xf0c33c, 0.95,
-                                roadTop + 0.02));
+        const yellow = paintedLine(offsetWay(renderPoints, side * apart), MARK_W, 0xd8a92e,
+                                   roadTop + 0.02);
+        if (yellow) groups.streets.add(yellow);
       }
     }
   }
@@ -2585,29 +3240,65 @@ const COURT_Y = 0.028;
 const COURT_LINE_Y = 0.040;
 
 function grassTexture() {
-  const size = 128;
+  // Strands, not a wash. This was a field of single pixels at 40% opacity over a flat green,
+  // tiled every four metres, and single pixels at low opacity average out -- from anything
+  // further than a few metres it was one continuous sheet of pale green with no grain in it at
+  // all. Grass reads as grass because it is thousands of separate blades lying in slightly
+  // different directions and catching the light differently, so these are drawn as short
+  // strokes with real contrast between them and a base dark enough to survive the exposure.
+  const size = 256;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#3b5230";
+  ctx.fillStyle = "#2c3d21";
   ctx.fillRect(0, 0, size, size);
-  for (let i = 0; i < size * size * 0.7; i += 1) {
-    const shade = random(i * 7);
-    ctx.fillStyle = shade < 0.4 ? "rgba(31,44,24,0.45)"
-      : shade < 0.78 ? "rgba(86,110,62,0.45)" : "rgba(114,131,80,0.32)";
-    ctx.fillRect(random(i * 3) * size, random(i * 5) * size, 1, random(i * 11) < 0.5 ? 2 : 1);
+
+  // Patchiness first: the underlying unevenness of a lawn, so the blades are not scattered over
+  // a uniform ground.
+  for (let i = 0; i < 90; i += 1) {
+    const r = 12 + random(i * 17) * 46;
+    ctx.fillStyle = random(i * 5) < 0.5 ? "rgba(20,29,15,0.42)" : "rgba(64,84,42,0.30)";
+    ctx.beginPath();
+    ctx.arc(random(i * 3) * size, random(i * 7) * size, r, 0, Math.PI * 2);
+    ctx.fill();
   }
+
+  // The blades. Four passes from dark to light so the field has depth rather than one tone of
+  // speckle; each blade is a stroke two to five pixels long leaning a random way.
+  const passes = [
+    ["rgba(18,26,13,0.85)", 5200, 2.4],
+    ["rgba(46,64,30,0.80)", 4600, 2.2],
+    ["rgba(74,100,45,0.72)", 3200, 2.0],
+    ["rgba(112,138,66,0.55)", 1500, 1.8],
+  ];
+  let n = 0;
+  for (const [colour, count, len] of passes) {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 1;
+    for (let i = 0; i < count; i += 1) {
+      n += 1;
+      const x = random(n * 3.1) * size;
+      const y = random(n * 5.7) * size;
+      const angle = (random(n * 7.3) - 0.5) * 1.5 - Math.PI / 2;
+      const l = len + random(n * 11.9) * len;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(angle) * l, y + Math.sin(angle) * l);
+      ctx.stroke();
+    }
+  }
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  // The ground meshes carry their own UVs at one tile per eight metres. Repeating twenty-four
-  // times on top of that is a tile every thirty centimetres, which minifies to a flat wash --
-  // which is why a park read as a sheet of pale green rather than as grass.
-  texture.repeat.set(2, 2);
+  // The ground meshes carry their own UVs at one tile per eight metres. A tile of this is about
+  // a metre and a half of lawn, which is the scale the blades are drawn at.
+  texture.repeat.set(5, 5);
   texture.anisotropy = 8;
+  texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
 
-function ringGeometry(rings, y) {
+function ringGeometry(rings, y, clipToRoad = true) {
   // One geometry for every ring handed in, triangulated by ear clipping through THREE.Shape.
   const positions = [];
   const uvs = [];
@@ -2634,7 +3325,37 @@ function ringGeometry(rings, y) {
       uvs.push(pos.getX(i) / 8, pos.getY(i) / 8);
     }
     const index = geom.getIndex();
-    if (index) {
+    if (clipToRoad) {
+      // The backstop. Ground cover is laid from parcels and park polygons, and a parcel
+      // boundary is surveyed to the property line rather than to the kerb -- so a thousand of
+      // these rings reach into the carriageway, and 753 of them are front paths that draw with
+      // the pavement texture. Drawn unclipped they are the concrete slabs in the middle of the
+      // road. A triangle whose centre is on the carriageway is not laid.
+      const drop = new Set();
+      const count = index ? index.count : pos.count;
+      for (let t = 0; t + 2 < count; t += 3) {
+        const [ia, ib, ic] = index
+          ? [index.getX(t), index.getX(t + 1), index.getX(t + 2)]
+          : [t, t + 1, t + 2];
+        const cx = (pos.getX(ia) + pos.getX(ib) + pos.getX(ic)) / 3;
+        const cy = (pos.getY(ia) + pos.getY(ib) + pos.getY(ic)) / 3;
+        if (!insideCarriageway(cx, -cy, 0.15)) continue;
+        // The centre alone is not enough. A park is a handful of very large triangles, and one
+        // of those can have its centre over a road that clips a corner of the park while the
+        // park itself is nowhere near it -- dropping that triangle takes out the park. Two
+        // corners on the carriageway as well means the triangle really is lying in the street.
+        const corners = (insideCarriageway(pos.getX(ia), -pos.getY(ia), 0.15) ? 1 : 0)
+          + (insideCarriageway(pos.getX(ib), -pos.getY(ib), 0.15) ? 1 : 0)
+          + (insideCarriageway(pos.getX(ic), -pos.getY(ic), 0.15) ? 1 : 0);
+        if (corners >= 2) drop.add(t);
+      }
+      for (let t = 0; t + 2 < count; t += 3) {
+        if (drop.has(t)) continue;
+        if (index) indices.push(base + index.getX(t), base + index.getX(t + 1),
+                                base + index.getX(t + 2));
+        else indices.push(base + t, base + t + 1, base + t + 2);
+      }
+    } else if (index) {
       for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
     } else {
       // A non-indexed geometry lists its triangles as consecutive vertices. Only handling the
@@ -2805,6 +3526,12 @@ function fenceMaterial(style) {
   });
 }
 
+function addGround(mesh, what) {
+  mesh.userData.surface = what;
+  groups.ground.add(mesh);
+  return mesh;
+}
+
 function buildFences(ground) {
   // Segments arrive as flat metres in the same frame the world is laid out in, grouped by the
   // kind their block was assigned. One merged mesh per kind, so five draw calls for the city.
@@ -2821,10 +3548,21 @@ function buildFences(ground) {
       const bx = flat[i + 2], bz = -flat[i + 3];
       const span = Math.hypot(bx - ax, bz - az);
       if (span < 0.4) continue;
-      // A last check against the one authority on where the road is. The build already tested
-      // these against the road band, and this costs nothing, and between the two of them a
-      // fence across a carriageway cannot survive.
-      if (insideCarriageway(ax, az, -1.0) || insideCarriageway(bx, bz, -1.0)) continue;
+      // A last check against the one authority on where the road is. Along the run, not at its
+      // two ends: a boundary fence can have both of its posts on somebody's lawn and pass clean
+      // through the street in between, and testing only the endpoints let 35 of them do exactly
+      // that. The build tests these too; between the two a fence across a carriageway cannot
+      // survive either of them.
+      let crosses = false;
+      const checks = Math.max(2, Math.ceil(span / 2.0));
+      for (let c = 0; c <= checks; c += 1) {
+        const t = c / checks;
+        if (insideCarriageway(ax + (bx - ax) * t, az + (bz - az) * t, 0.15)) {
+          crosses = true;
+          break;
+        }
+      }
+      if (crosses) continue;
       const base = positions.length / 3;
       const top = YARD_Y + style.h;
       positions.push(ax, YARD_Y, az, ax, top, az, bx, YARD_Y, bz, bx, top, bz);
@@ -2839,7 +3577,7 @@ function buildFences(ground) {
     geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
     geom.setIndex(indices);
     geom.computeVertexNormals();
-    groups.ground.add(new THREE.Mesh(geom, fenceMaterial(style)));
+    addGround(new THREE.Mesh(geom, fenceMaterial(style)), "fence:" + kind);
   }
 }
 
@@ -3346,10 +4084,10 @@ function buildCourts(ground) {
   // plane and the top of the roadway (0.06), so they cover the black without climbing the kerb.
   const parkGeom = ringGeometry((ground.parks || []).map((p) => p.p), PARK_Y);
   if (parkGeom) {
-    groups.ground.add(new THREE.Mesh(parkGeom, new THREE.MeshStandardMaterial({
+    addGround(new THREE.Mesh(parkGeom, new THREE.MeshStandardMaterial({
       map: grassTexture(), color: 0xffffff, roughness: 0.97, metalness: 0.0,
       side: THREE.DoubleSide,
-    })));
+    })), "park");
   }
 
   const classifiedGround = ground.lawns || ground.backyards || ground.front_walks || ground.service_yards;
@@ -3358,25 +4096,25 @@ function buildCourts(ground) {
     : (ground.yards || []);
   const yardGeom = ringGeometry(grassRings.map((y) => y.p), YARD_Y);
   if (yardGeom) {
-    groups.ground.add(new THREE.Mesh(yardGeom, new THREE.MeshStandardMaterial({
+    addGround(new THREE.Mesh(yardGeom, new THREE.MeshStandardMaterial({
       map: grassTexture(), color: 0xffffff, roughness: 0.98, metalness: 0.0,
       side: THREE.DoubleSide,
-    })));
+    })), "yard");
   }
 
   const frontWalkGeom = ringGeometry((ground.front_walks || []).map((y) => y.p), YARD_Y + 0.004);
   if (frontWalkGeom) {
-    groups.ground.add(new THREE.Mesh(frontWalkGeom, new THREE.MeshStandardMaterial({
+    addGround(new THREE.Mesh(frontWalkGeom, new THREE.MeshStandardMaterial({
       map: SIDEWALK, color: 0xffffff, roughness: 0.96, metalness: 0.0,
       side: THREE.DoubleSide,
-    })));
+    })), "front_walk");
   }
 
   const serviceGeom = ringGeometry((ground.service_yards || []).map((y) => y.p), YARD_Y + 0.002);
   if (serviceGeom) {
-    groups.ground.add(new THREE.Mesh(serviceGeom, new THREE.MeshStandardMaterial({
+    addGround(new THREE.Mesh(serviceGeom, new THREE.MeshStandardMaterial({
       color: 0x3d403d, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
-    })));
+    })), "service_yard");
   }
 
   buildFences(ground);
@@ -3413,6 +4151,9 @@ function buildCourts(ground) {
 
   buildCourts(ground);
 })();
+
+// Everything collected off the roofs while the buildings were being built, in nine meshes.
+emitRoofParts();
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
@@ -3856,6 +4597,178 @@ function animate(now) {
   renderer.render(scene, camera);
 }
 animate();
+
+// ---- inspection ----
+//
+// Everything above is written to be looked at, and for a long stretch of this build there was
+// nobody able to look: the window was not being composited, so every screenshot came back
+// empty and the only evidence a fix had worked was that the code said it should have. That is
+// how the crosswalks and the kerbs regressed twice without anyone noticing.
+//
+// Rendering does not need a visible window -- only compositing does -- so this takes its own
+// picture into its own buffer, and answers what is actually standing at a given point on the
+// ground. Between them a caller with no screen can both see the model and measure it.
+window.kerbside = {
+  scene, camera, renderer, groups, DATA, xy, insideCarriageway,
+
+  /** A photograph of one place, from a camera this call positions. */
+  shoot({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
+          quality = 0.72 } = {}) {
+    const [x, y] = xy(lon, lat);
+    const target = new THREE.Vector3(x, 0, -y);
+    const yaw = (heading * Math.PI) / 180;
+    const pitch = (tilt * Math.PI) / 180;
+    const cam = new THREE.PerspectiveCamera(fov, w / h, 0.5, 6000);
+    cam.position.set(target.x + Math.sin(yaw) * Math.cos(pitch) * from,
+                     Math.sin(pitch) * from,
+                     target.z + Math.cos(yaw) * Math.cos(pitch) * from);
+    cam.lookAt(target);
+    // One renderer, kept. A browser gives a page about sixteen WebGL contexts and does not
+    // hand them back on dispose() as promptly as the next call needs them: building a fresh
+    // renderer per photograph exhausted them after a dozen shots, and the page that came up
+    // next could not get a context for the map itself. That failure looks exactly like a
+    // build that has broken.
+    if (!this._shot) {
+      this._shot = new THREE.WebGLRenderer({
+        antialias: true, alpha: false, logarithmicDepthBuffer: true,
+        preserveDrawingBuffer: true,
+      });
+      this._shot.setPixelRatio(1);
+      this._shot.outputColorSpace = renderer.outputColorSpace;
+      this._shot.toneMapping = renderer.toneMapping;
+      this._shot.toneMappingExposure = renderer.toneMappingExposure;
+    }
+    this._shot.setSize(w, h, false);
+    this._shot.render(scene, cam);
+    return this._shot.domElement.toDataURL("image/jpeg", quality);
+  },
+
+  /** What is standing at a point on the ground, straight down from above.
+   *
+   * Only what is being drawn. The survey layers -- coverage cells at ninety metres, sequence
+   * paths at thirty-two -- are in the scene and switched off, and a raycast does not care that
+   * a thing is invisible. Counting those as "what is on the ground here" is how an audit comes
+   * back saying half the corridor is covered in something it cannot name.
+   */
+  probe(lon, lat) {
+    const [x, y] = xy(lon, lat);
+    const down = new THREE.Raycaster(new THREE.Vector3(x, 400, -y),
+                                     new THREE.Vector3(0, -1, 0), 0.1, 900);
+    // Sprites ask the raycaster which camera is looking at them, and there is no answer unless
+    // one is handed over -- the street labels are sprites, so without this the probe throws
+    // before it reaches the first piece of ground.
+    down.camera = camera;
+    const stack = [];
+    for (const hit of down.intersectObject(root, true)) {
+      let node = hit.object;
+      let hidden = false;
+      let label = null;
+      let kind = null;
+      while (node) {
+        if (node.visible === false) { hidden = true; break; }
+        if (!label && node.userData && node.userData.surface) label = node.userData.surface;
+        if (!kind && node.userData && node.userData.kind) kind = node.userData.kind;
+        node = node.parent;
+      }
+      if (hidden) continue;
+      if (hit.object.type === "Sprite") continue;
+      stack.push({ what: label || kind || "unnamed", y: +hit.point.y.toFixed(3) });
+      if (stack.length >= 6) break;
+    }
+    return { x: +x.toFixed(2), z: +(-y).toFixed(2), road: insideCarriageway(x, -y, 0), stack };
+  },
+
+  /** The two things that keep going wrong, counted rather than eyeballed.
+   *
+   * Nothing may stand on the carriageway that is not carriageway, and there must be pavement
+   * where a pavement belongs. Both have regressed more than once from opposite directions -- a
+   * guard so tight it deleted 63 km of footway, and ground cover so loose it laid front paths
+   * down the middle of the road -- and neither shows up in any test that reads the source.
+   * This walks the streets themselves and reports what is actually drawn.
+   */
+  audit({ every = 5, alongEvery = 25.0 } = {}) {
+    const streets = DATA.ways.filter((w) => w.kind === "street" && w.points
+                                            && w.points.length > 1);
+    const PAVED = new Set(["road", "crossing", "crossing_edges", "marking", "apron"]);
+    const intruders = {};
+    const missing = { sampled: 0, bare: 0, examples: [] };
+    let onRoad = 0;
+    for (let s = 0; s < streets.length; s += every) {
+      const way = streets[s];
+      const half = (way.road_m || 8.0) / 2;
+      for (let i = 1; i < way.points.length; i += 1) {
+        const a = way.points[i - 1];
+        const b = way.points[i];
+        const [ax, ay] = xy(a[0], a[1]);
+        const [bx, by] = xy(b[0], b[1]);
+        const span = Math.hypot(bx - ax, by - ay);
+        const steps = Math.max(1, Math.round(span / alongEvery));
+        const nx = -(by - ay) / (span || 1);
+        const ny = (bx - ax) / (span || 1);
+        for (let k = 0; k < steps; k += 1) {
+          const t = (k + 0.5) / steps;
+          const lon = a[0] + (b[0] - a[0]) * t;
+          const lat = a[1] + (b[1] - a[1]) * t;
+          const [px, py] = xy(lon, lat);
+          // In the roadway: whatever is on top had better be roadway.
+          for (const across of [-half * 0.55, 0, half * 0.55]) {
+            const qx = px + nx * across;
+            const qy = py + ny * across;
+            if (!insideCarriageway(qx, -qy, 0.6)) continue;
+            onRoad += 1;
+            const top = this.probeXY(qx, qy)[0];
+            if (top && !PAVED.has(top.what)) {
+              intruders[top.what] = (intruders[top.what] || 0) + 1;
+            }
+          }
+          // Just outside the kerb: there had better be a footway.
+          for (const side of [1, -1]) {
+            const qx = px + nx * side * (half + 1.4);
+            const qy = py + ny * side * (half + 1.4);
+            if (insideCarriageway(qx, -qy, 0.2)) continue;
+            missing.sampled += 1;
+            const top = this.probeXY(qx, qy)[0];
+            if (!top || top.y < 0.02) {
+              missing.bare += 1;
+              if (missing.examples.length < 12) {
+                missing.examples.push({ street: way.name || way.osm_id, lon, lat });
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      inRoadway: { sampled: onRoad, intruders },
+      besideKerb: { sampled: missing.sampled, bare: missing.bare,
+                    share: missing.sampled ? +(missing.bare / missing.sampled).toFixed(3) : 0,
+                    examples: missing.examples },
+    };
+  },
+
+  probeXY(x, y) {
+    const down = new THREE.Raycaster(new THREE.Vector3(x, 400, -y),
+                                     new THREE.Vector3(0, -1, 0), 0.1, 900);
+    down.camera = camera;
+    const stack = [];
+    for (const hit of down.intersectObject(root, true)) {
+      let node = hit.object;
+      let hidden = false;
+      let label = null;
+      let kind = null;
+      while (node) {
+        if (node.visible === false) { hidden = true; break; }
+        if (!label && node.userData && node.userData.surface) label = node.userData.surface;
+        if (!kind && node.userData && node.userData.kind) kind = node.userData.kind;
+        node = node.parent;
+      }
+      if (hidden || hit.object.type === "Sprite") continue;
+      stack.push({ what: label || kind || "unnamed", y: +hit.point.y.toFixed(3) });
+      if (stack.length >= 6) break;
+    }
+    return stack;
+  },
+};
 </script>
 </body>
 </html>
