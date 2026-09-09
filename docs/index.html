@@ -160,12 +160,14 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 const scene = new THREE.Scene();
 // Haze, not ink. The fog took everything past 1,900 m to 0x071013, which is near black, so the
-// bay and the far side of the city faded into the same darkness whatever was drawn there --
-// extending the water would have bought nothing while the air past two blocks was opaque. It
-// now clears to a pale marine haze at a distance you could actually see across on a good day
-// in this city, which is most of what makes the water read as water.
-const HORIZON = new THREE.Color(0x8fa8b4);
-scene.background = HORIZON;
+// bay and the far side of the city faded into the same darkness whatever was drawn there. It
+// clears to the sky's own horizon band now, so the far city fades into the sky rather than into
+// a colour of its own.
+//: The horizon's colour, which the fog clears to. Taken from the sky texture's own horizon band
+//: so that the far city fades into the sky rather than into a colour of its own. Declared here
+//: rather than beside the sky itself: the fog is set up with the scene, long before the sky
+//: texture is drawn, and a const cannot be read before it is reached.
+const HORIZON = new THREE.Color(0xbcd0dc);
 scene.fog = new THREE.Fog(HORIZON, 2400, 16000);
 
 // The near plane is the other half of the depth problem: precision scales with it, and 0.1 m
@@ -203,6 +205,21 @@ for (const off of ["coverage", "observations", "sequences", "gaps", "kerbs", "ch
 }
 Object.values(groups).forEach((g) => root.add(g));
 
+const lazyLayerBuilders = new Map();
+function registerLazyLayer(layer, builder) {
+  lazyLayerBuilders.set(layer, { builder, promise: null });
+}
+function ensureLazyLayer(layer) {
+  const entry = lazyLayerBuilders.get(layer);
+  if (!entry || entry.promise) return;
+  entry.promise = Promise.resolve()
+    .then(entry.builder)
+    .catch((err) => {
+      console.warn(`Could not build ${layer} layer`, err);
+      entry.promise = null;
+    });
+}
+
 const bbox = DATA.bbox;
 const midLat = (bbox.south + bbox.north) / 2;
 const midLon = (bbox.west + bbox.east) / 2;
@@ -214,34 +231,128 @@ function v3(lon, lat, z = 0) { const [x, y] = xy(lon, lat); return new THREE.Vec
 // A procedural sky, generated once into an environment map. Without one, a metallic material
 // reflects nothing and renders black -- which is why "make it look like glass" is really "give
 // it something to be a mirror of".
-function skyEnvironment(renderer) {
-  const size = 128;
+//: Where the sun stands. One place, so that the disc painted in the sky and the light that
+//: casts the shadows are the same sun -- a scene where they disagree reads as wrong long before
+//: anybody can say why.
+const SUN_AZIMUTH_DEG = 305;
+const SUN_ELEVATION_DEG = 52;
+
+function sunDirection() {
+  const az = (SUN_AZIMUTH_DEG * Math.PI) / 180;
+  const el = (SUN_ELEVATION_DEG * Math.PI) / 180;
+  return new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+}
+
+function skyTexture() {
+  // An equirectangular sky: blue overhead falling to a pale band at the horizon, the sun where
+  // the light says it is, and cirrus drawn in bands that thin out towards the top.
+  //
+  // This was a 128 pixel vertical gradient from near-black to grey, used only as an environment
+  // map, with a flat colour behind it for the background. It reflected as sludge and the sky
+  // read as an overcast ceiling at any hour.
+  const w = 2048;
+  const h = 1024;
   const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
+  canvas.width = w;
+  canvas.height = h;
   const ctx = canvas.getContext("2d");
-  const sky = ctx.createLinearGradient(0, 0, 0, size);
-  sky.addColorStop(0.0, "#0a1620");
-  sky.addColorStop(0.45, "#38566a");
-  sky.addColorStop(0.52, "#8fa9b8");
-  sky.addColorStop(1.0, "#141c20");
+
+  // The dome. Rayleigh scattering makes the zenith deep and the horizon pale and warm, and the
+  // gradient below is that, flattened into a vertical ramp.
+  const sky = ctx.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0.00, "#1d4e86");
+  sky.addColorStop(0.22, "#2f6ba4");
+  sky.addColorStop(0.40, "#5b93c2");
+  sky.addColorStop(0.49, "#a8c8dc");
+  sky.addColorStop(0.52, "#c8d8e0");
+  // Below the horizon is haze over water and hills rather than more sky.
+  sky.addColorStop(0.60, "#8fa4ac");
+  sky.addColorStop(1.00, "#5d6d72");
   ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, size, size);
+  ctx.fillRect(0, 0, w, h);
+
+  const sunU = ((SUN_AZIMUTH_DEG / 360) + 0.5) % 1;
+  const sunX = sunU * w;
+  const sunY = (0.5 - SUN_ELEVATION_DEG / 180) * h;
+
+  // The glow first, wide and faint, then the disc. A sun with no glow is a hole punched in the
+  // sky; the glow is most of what makes it read as light rather than as a decal.
+  const glow = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, w * 0.30);
+  glow.addColorStop(0.00, "rgba(255,247,224,0.95)");
+  glow.addColorStop(0.04, "rgba(255,240,206,0.55)");
+  glow.addColorStop(0.14, "rgba(255,236,200,0.18)");
+  glow.addColorStop(0.40, "rgba(255,240,214,0.05)");
+  glow.addColorStop(1.00, "rgba(255,240,214,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, h);
+
+  // Cirrus. Drawn as long soft streaks stretched along the horizon's direction and thinned with
+  // height, because that is how a high cloud deck looks from underneath: dense near the horizon
+  // where you see through more of it, sparse overhead where you see through less.
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (let band = 0; band < 130; band += 1) {
+    // Bias towards the upper half: below 0.5 is sky, and the very top thins out again.
+    const t = Math.pow(random(band * 5.1), 0.7);
+    const y = t * h * 0.46;
+    const thin = 1 - Math.abs(y / (h * 0.46) - 0.55) * 1.1;
+    if (thin <= 0.05) continue;
+    const x = random(band * 7.3) * w;
+    const long = (180 + random(band * 11.7) * 620) * (0.5 + thin);
+    const tall = 5 + random(band * 3.3) * 22;
+    const strength = 0.05 + random(band * 13.9) * 0.16 * thin;
+    const streak = ctx.createRadialGradient(x, y, 0, x, y, long / 2);
+    streak.addColorStop(0.0, `rgba(255,255,255,${strength.toFixed(3)})`);
+    streak.addColorStop(0.55, `rgba(255,255,255,${(strength * 0.4).toFixed(3)})`);
+    streak.addColorStop(1.0, "rgba(255,255,255,0)");
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1, Math.max(0.04, tall / long));
+    ctx.translate(-x, -y);
+    ctx.fillStyle = streak;
+    ctx.beginPath();
+    ctx.arc(x, y, long / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Wisps: a few finer strands trailing off each band, which is what makes cirrus cirrus
+    // rather than a smudge.
+    for (let wisp = 0; wisp < 3; wisp += 1) {
+      const wy = y + (random(band * 17 + wisp) - 0.5) * tall * 2.2;
+      const wl = long * (0.3 + random(band * 19 + wisp) * 0.5);
+      const wx = x + (random(band * 23 + wisp) - 0.5) * long * 0.5;
+      ctx.strokeStyle = `rgba(255,255,255,${(strength * 0.5).toFixed(3)})`;
+      ctx.lineWidth = 1 + random(band * 29 + wisp) * 2.5;
+      ctx.beginPath();
+      ctx.moveTo(wx - wl / 2, wy);
+      ctx.bezierCurveTo(wx - wl / 6, wy - tall * 0.4, wx + wl / 6, wy + tall * 0.4,
+                        wx + wl / 2, wy);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function skyEnvironment(renderer, texture) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   const environment = pmrem.fromEquirectangular(texture).texture;
   pmrem.dispose();
-  texture.dispose();
   return environment;
 }
 
-scene.environment = skyEnvironment(renderer);
+const SKY = skyTexture();
+scene.environment = skyEnvironment(renderer, SKY);
+scene.background = SKY;
 // Turned down with the tone mapper in place: the old pair were set to be bright enough to read
 // through the clipping, and left as they were they simply saturate a wider part of the scene.
 const amb = new THREE.HemisphereLight(0xb7f5ff, 0x071013, 1.15);
 scene.add(amb);
 const sun = new THREE.DirectionalLight(0xfff4e2, 2.0);
-sun.position.set(-420, 700, 300);
+sun.position.copy(sunDirection()).multiplyScalar(900);
 scene.add(sun);
 
 const [westX, northY] = xy(bbox.west, bbox.north);
@@ -1937,11 +2048,182 @@ function pavementRunsOutsideCarriageway(points, width) {
   return runs;
 }
 
+//: Where pavement was actually laid, as a coarse grid. A tree pit belongs in a footway and
+//: nowhere else -- not in a park, not on a lawn, and certainly not in the road -- and the only
+//: thing that knows where the footway ended up is the code that put it there.
+const PAVED_CELL = 1.5;
+const pavedGrid = new Map();
+
+function stampPaved(run, width, top) {
+  // The ribbon's actual footprint, walked along its length and across its width.
+  //
+  // Dilating by whole cells instead put every tree within six metres of a footway on pavement,
+  // which is 23,888 of the corridor's 25,123 street trees -- including the ones standing in
+  // parks and back gardens next to one. A tree pit is a hole cut in a pavement, so the test has
+  // to be whether the pavement is under the tree rather than near it.
+  const half = Math.max(0.5, width / 2);
+  for (let i = 1; i < run.length; i += 1) {
+    const [ax, ay] = xy(run[i - 1][0], run[i - 1][1]);
+    const [bx, by] = xy(run[i][0], run[i][1]);
+    const az = -ay;
+    const bz = -by;
+    const span = Math.hypot(bx - ax, bz - az);
+    if (span < 1e-6) continue;
+    const nx = -(bz - az) / span;
+    const nz = (bx - ax) / span;
+    const along = Math.max(1, Math.ceil(span / (PAVED_CELL * 0.6)));
+    const across = Math.max(1, Math.ceil((half * 2) / (PAVED_CELL * 0.6)));
+    for (let k = 0; k <= along; k += 1) {
+      const t = k / along;
+      const x = ax + (bx - ax) * t;
+      const z = az + (bz - az) * t;
+      for (let j = 0; j <= across; j += 1) {
+        const off = -half + (2 * half * j) / across;
+        // The pavement's own top surface, kept per cell. Kerb heights here run from 60 mm to
+        // 445 mm, so a pit at one fixed height is buried under half the pavements in the city
+        // and floating a hand's breadth above the other half.
+        const key = `${Math.floor((x + nx * off) / PAVED_CELL)}:`
+          + `${Math.floor((z + nz * off) / PAVED_CELL)}`;
+        const known = pavedGrid.get(key);
+        if (known === undefined || top > known) pavedGrid.set(key, top);
+      }
+    }
+  }
+}
+
+function pavementTopAt(x, z) {
+  return pavedGrid.get(`${Math.floor(x / PAVED_CELL)}:${Math.floor(z / PAVED_CELL)}`);
+}
+
 function addPavementRibbon(points, width, color, opacity, y, thickness, surface) {
+  let laid = 0;
   for (const run of pavementRunsOutsideCarriageway(points, width)) {
+    stampPaved(run, width, y + thickness / 2);
     addMerged(`walk:${surface}:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
               ribbon(run, width, color, opacity, y, thickness, surface), surface);
+    laid += wayLength(run);
   }
+  return laid;
+}
+
+//: Widths to try for a kerbside footway, widest first, before giving up on one. The inner edge
+//: stays on the kerb at every width, so a narrower attempt is the same pavement with less of it
+//: rather than a pavement somewhere else.
+const WALK_FALLBACK_WIDTHS_M = [1.0, 0.72, 0.52, 0.36, 0.24];
+//: Below this share of the block face surviving, the width is too wide for the room there is.
+const WALK_ENOUGH = 0.55;
+
+// ---- where OpenStreetMap says there is no pavement ----
+//
+// 988 of this corridor's 4,219 street ways carry `sidewalk=no` or `sidewalk:both=no`, and the
+// renderer believed all of them: 41.6 km, 13.2% of the street network, drawn with no footway on
+// either side. Polk Street is one. Sacramento Street is another. They have pavements.
+//
+// What the tag usually means on a street like those is "the pavement is mapped as its own way",
+// which is what `sidewalk=separate` is for and what a great many mappers write `no` for instead.
+// It is only worth believing when it is true, and whether it is true is checkable: if a mapped
+// footway runs along that side, the tag is right and the derived pavement would double it. If
+// nothing runs there, the tag is describing a mapping decision rather than a street, and
+// believing it leaves bare ground between the kerb and the shopfronts.
+const MAPPED_WALK_CELL = 40;
+const mappedWalkGrid = new Map();
+//: How far from the kerb line a mapped footway counts as being this street's pavement.
+const MAPPED_WALK_REACH_M = 11.0;
+
+for (const way of DATA.ways) {
+  if ((way.kind !== "sidewalk" && way.kind !== "path") || !way.points || way.points.length < 2) {
+    continue;
+  }
+  for (let i = 1; i < way.points.length; i += 1) {
+    const [ax, ay] = xy(way.points[i - 1][0], way.points[i - 1][1]);
+    const [bx, by] = xy(way.points[i][0], way.points[i][1]);
+    const segment = [ax, -ay, bx, -by];
+    const x0 = Math.floor(Math.min(ax, bx) / MAPPED_WALK_CELL);
+    const x1 = Math.floor(Math.max(ax, bx) / MAPPED_WALK_CELL);
+    const z0 = Math.floor(Math.min(-ay, -by) / MAPPED_WALK_CELL);
+    const z1 = Math.floor(Math.max(-ay, -by) / MAPPED_WALK_CELL);
+    for (let ix = x0 - 1; ix <= x1 + 1; ix += 1) {
+      for (let iz = z0 - 1; iz <= z1 + 1; iz += 1) {
+        const key = `${ix}:${iz}`;
+        let bucket = mappedWalkGrid.get(key);
+        if (!bucket) mappedWalkGrid.set(key, bucket = []);
+        bucket.push(segment);
+      }
+    }
+  }
+}
+
+function mappedWalkNear(x, z) {
+  const ix = Math.floor(x / MAPPED_WALK_CELL);
+  const iz = Math.floor(z / MAPPED_WALK_CELL);
+  const limit = MAPPED_WALK_REACH_M * MAPPED_WALK_REACH_M;
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      const bucket = mappedWalkGrid.get(`${ix + dx}:${iz + dz}`);
+      if (!bucket) continue;
+      for (const [ax, az, bx, bz] of bucket) {
+        if (distanceToSegmentSquared(x, z, ax, az, bx, bz) < limit) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function walkSidesToDraw(way, renderPoints, inner) {
+  // Both sides unless OpenStreetMap says otherwise and the ground agrees with it.
+  const stated = way.walk_sides;
+  if (stated === undefined) return [1, -1];
+  const drawn = [];
+  for (const side of [1, -1]) {
+    if (stated.includes(side)) {
+      drawn.push(side);
+      continue;
+    }
+    // The tag excludes this side. Believe it only where a mapped footway is standing there.
+    const kerb = offsetWay(renderPoints, side * (inner + 1.6));
+    let sampled = 0;
+    let covered = 0;
+    for (let i = 0; i < kerb.length; i += Math.max(1, Math.floor(kerb.length / 6))) {
+      const [x, y] = xy(kerb[i][0], kerb[i][1]);
+      sampled += 1;
+      if (mappedWalkNear(x, -y)) covered += 1;
+    }
+    if (!sampled || covered < sampled * 0.5) drawn.push(side);
+  }
+  return drawn;
+}
+
+function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y, thickness) {
+  // Pavement on one side of one street, at the widest width that fits.
+  //
+  // This used to lay it at one width and drop whatever did not survive, which left 237 of the
+  // corridor's 4,890 kerb sides with no pavement at all -- bare ground between the kerb and the
+  // buildings, which is the black strip along the shopfronts. Almost none of those sides had no
+  // room; they had less room than four metres, because the neighbouring carriageway starts
+  // sooner than four metres away. An alley beside an avenue is the common case.
+  //
+  // So the width gives way rather than the pavement. The inner edge is pinned to the kerb and
+  // the outer edge comes in until the strip fits, which is what the pavement does in the street.
+  const wanted = wayLength(renderPoints);
+  if (!(wanted > 0)) return 0;
+  for (const share of [1.0, ...WALK_FALLBACK_WIDTHS_M]) {
+    const width = Math.max(MIN_RENDER_WALK_M * 0.55, walk * share);
+    const centre = offsetWay(renderPoints, side * (inner + width / 2));
+    // The ends are trimmed back so a footway does not run out across the junction it meets.
+    // How far back cannot be a fixed distance: `inner + 0.7w` is over seven metres on an
+    // ordinary street, and on the thirteen metre stubs between two junctions that is more than
+    // the whole way -- so the trim took all of it and the side came out bare. It is capped at a
+    // third of the run from either end, which leaves a stub with a short pavement rather than
+    // with none.
+    const back = Math.min(Math.max(1.2, inner + width * 0.7), wanted * 0.32);
+    const trimmed = trimWay(centre, back);
+    const laid = addPavementRibbon(trimmed, width, color, opacity, y, thickness,
+                                   width <= NARROW_WALK_M ? "walk_narrow" : "walk");
+    if (laid >= wanted * WALK_ENOUGH) return laid;
+    // Nothing usable at this width; the ribbons already added are the partial cover, and the
+    // next width down will lay the rest of the face beside them.
+  }
+  return 0;
 }
 
 function apronSlab(opening) {
@@ -3853,25 +4135,49 @@ for (const wall of FACADES.walls) {
 // Textures are fetched after the city is on screen and a few at a time. Two hundred and twenty
 // JPEGs is several megabytes, and blocking the first frame on them would trade the whole map
 // for one block of it.
+const FACADE_TEXTURE_CONCURRENCY = 3;
+const FACADE_TEXTURE_YIELD_EVERY = 8;
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function facadeLoadPriority(panel) {
+  const dx = panel.position.x - camera.position.x;
+  const dz = panel.position.z - camera.position.z;
+  const wall = panel.userData.facade || {};
+  const usefulArea = (wall.h || 0) * Math.max(1, wall.w || wall.l || 1);
+  return dx * dx + dz * dz - usefulArea * 4;
+}
+
+async function loadFacadeTexture(panel) {
+  const wall = panel.userData.facade;
+  try {
+    const texture = await facadeLoader.loadAsync(`facades/${wall.c}/${wall.t}`);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    panel.material.map = texture;
+    panel.material.opacity = 1;
+    panel.material.needsUpdate = true;
+  } catch (err) {
+    panel.visible = false;
+  }
+}
+
 async function loadFacadeTextures() {
-  const queue = facadePanels.slice();
+  const queue = facadePanels.slice().sort((a, b) => facadeLoadPriority(a) - facadeLoadPriority(b));
   const worker = async () => {
+    let loaded = 0;
     while (queue.length) {
-      const panel = queue.pop();
-      const wall = panel.userData.facade;
-      try {
-        const texture = await facadeLoader.loadAsync(`facades/${wall.c}/${wall.t}`);
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-        panel.material.map = texture;
-        panel.material.opacity = 1;
-        panel.material.needsUpdate = true;
-      } catch (err) {
-        panel.visible = false;
-      }
+      await loadFacadeTexture(queue.shift());
+      loaded += 1;
+      if (loaded % FACADE_TEXTURE_YIELD_EVERY === 0) await nextFrame();
     }
   };
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  await Promise.all(Array.from(
+    { length: Math.min(FACADE_TEXTURE_CONCURRENCY, queue.length) },
+    () => worker()
+  ));
 }
 requestAnimationFrame(() => { loadFacadeTextures(); });
 
@@ -3881,7 +4187,7 @@ requestAnimationFrame(() => { loadFacadeTextures(); });
 // two can be compared by eye. This is not a prettier version of the streets layer: it is a
 // different claim about the same ground, from a different source, and where the two disagree
 // that is worth being able to see.
-(async () => {
+registerLazyLayer("official", async () => {
   let official;
   try {
     official = await fetch("sf-corridor-official.json", { cache: "no-cache" }).then((r) => r.json());
@@ -3926,11 +4232,12 @@ requestAnimationFrame(() => { loadFacadeTextures(); });
               `n=${walk.n.toLocaleString()}). ` : "") +
       `The right-of-way layer is a 2014 analysis the city says is not at engineering accuracy.`;
   }
-})();
+});
 
 // The grid the facade work is done in: 250 m squares, the one that has been photographed
 // picked out from the ones that have not. A square with a lot of buildings and a lot of frames
 // and no textures is simply the next one to run.
+registerLazyLayer("chunks", () => {
 for (const chunk of FACADES.grid || []) {
   const corners = [[chunk.w, chunk.s], [chunk.e, chunk.s], [chunk.e, chunk.n],
                    [chunk.w, chunk.n], [chunk.w, chunk.s]];
@@ -3945,6 +4252,7 @@ for (const chunk of FACADES.grid || []) {
   const points = corners.map(([lon, lat]) => v3(lon, lat, 3));
   groups.chunks.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material));
 }
+});
 
 const streetNames = new Set();
 let streetLabelCount = 0;
@@ -4079,11 +4387,9 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
     const inner = widthMeters / 2;
     // Both sides unless one of them is inside another street's carriageway, which happens
     // wherever a divided road is drawn as two ways.
-    for (const side of (way.walk_sides !== undefined ? way.walk_sides : [1, -1])) {
-addPavementRibbon(
-trimWay(offsetWay(renderPoints, side * (inner + walk / 2)), Math.max(2.0, inner + walk * 0.7)),
-walk, color, opacity, roadTop + KERB / 2 - 0.015, KERB,
-walk <= NARROW_WALK_M ? "walk_narrow" : "walk");
+    for (const side of walkSidesToDraw(way, renderPoints, inner)) {
+addKerbsidePavement(renderPoints, side, inner, walk, color, opacity,
+                        roadTop + KERB / 2 - 0.015, KERB);
 }
 }
   // A centreline belongs on a roadway, not on a footway: drawn on everything it read as a
@@ -4217,6 +4523,56 @@ const PARK_Y = 0.020;
 const YARD_Y = 0.016;
 const COURT_Y = 0.028;
 const COURT_LINE_Y = 0.040;
+
+//: How far above the pavement's own top the pit sits: enough that the two do not fight for the
+//: same plane, and little enough that it still reads as an opening cut in it.
+const PIT_LIFT_M = 0.004;
+
+function soilTexture() {
+  // Bare soil in a tree pit: dark, damp, uneven, with grit and leaf litter in it. Flat brown
+  // reads as a painted square, which is the failure this has to avoid -- what makes it ground is
+  // that no two square inches of it are the same colour.
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#3b2c1e";
+  ctx.fillRect(0, 0, size, size);
+  // Damp and dry patches first, so the grit below sits on something uneven.
+  for (let i = 0; i < 60; i += 1) {
+    const r = 6 + random(i * 17) * 26;
+    ctx.fillStyle = random(i * 5) < 0.5 ? "rgba(26,18,11,0.45)" : "rgba(96,74,50,0.35)";
+    ctx.beginPath();
+    ctx.arc(random(i * 3) * size, random(i * 7) * size, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Grit, bark and the odd leaf.
+  const grains = [
+    ["rgba(20,14,9,0.60)", 2600, 1.5],
+    ["rgba(74,56,36,0.50)", 2000, 1.2],
+    ["rgba(120,96,64,0.45)", 1200, 1.0],
+    ["rgba(150,128,86,0.35)", 500, 0.9],
+  ];
+  let n = 0;
+  for (const [colour, count, radius] of grains) {
+    ctx.fillStyle = colour;
+    for (let i = 0; i < count; i += 1) {
+      n += 1;
+      ctx.beginPath();
+      ctx.arc(random(n * 2.9) * size, random(n * 4.7) * size,
+              radius * (0.5 + random(n * 6.3) * 0.9), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // The kerb of the pit: the cut edge of the pavement round it, which is what says "opening".
+  ctx.strokeStyle = "rgba(150,150,142,0.55)";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, size - 4, size - 4);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
 
 function grassTexture() {
   // Strands, not a wash. This was a field of single pixels at 40% opacity over a flat green,
@@ -5104,6 +5460,50 @@ function buildCourts(ground) {
 
   buildFences(ground);
 
+  // ---- tree pits ----
+  //
+  // A street tree in San Francisco stands in a square cut out of the pavement, and the pavement
+  // is what makes it a pit: the same tree on a lawn is just a tree, and a brown square under it
+  // would be a hole in the grass. So this asks where the footways actually ended up rather than
+  // where they were meant to be, and cuts a pit only where one of them is underfoot.
+  //
+  // The city's own standard is a four foot by four foot minimum opening and six by six on a
+  // wider sidewalk, which is what the size below is; the bigger the trunk the bigger the pit,
+  // because a tree that outgrows its opening gets the opening enlarged.
+  const pits = { positions: [], uvs: [], indices: [] };
+  let pitCount = 0;
+  for (const tree of ground.trees || []) {
+    const [tx, ty] = xy(tree.p[0], tree.p[1]);
+    const tz = -ty;
+    const top = pavementTopAt(tx, tz);
+    if (top === undefined) continue;
+    if (insideCarriageway(tx, tz, 0.2)) continue;
+    const side = Math.max(1.22, Math.min(1.9, 1.05 + (tree.d || 6) * 0.035));
+    const half = side / 2;
+    const turn = (random(tx * 0.37 + tz * 0.91) - 0.5) * 0.16;
+    const cos = Math.cos(turn);
+    const sin = Math.sin(turn);
+    const base = pits.positions.length / 3;
+    for (const [dx, dz] of [[-half, -half], [half, -half], [half, half], [-half, half]]) {
+      pits.positions.push(tx + dx * cos - dz * sin, top + PIT_LIFT_M,
+                          tz + dx * sin + dz * cos);
+      pits.uvs.push((dx + half) / side, (dz + half) / side);
+    }
+    pits.indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
+    pitCount += 1;
+  }
+  if (pits.indices.length) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(pits.positions, 3));
+    geom.setAttribute("uv", new THREE.Float32BufferAttribute(pits.uvs, 2));
+    geom.setIndex(pits.indices);
+    geom.computeVertexNormals();
+    addGround(new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+      map: soilTexture(), color: 0xffffff, roughness: 1.0, metalness: 0.0,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -6,
+    })), "tree_pit");
+  }
+
   // Trees, one instanced mesh per variant. The trunk diameter the city recorded sets the size:
   // a three inch stem is a sapling and a thirty inch one has a crown over the roadway.
   const byVariant = new Map();
@@ -5179,6 +5579,7 @@ DATA.districts.forEach((d, i) => {
   labelAt(d.name, (d.west + d.east) / 2, (d.south + d.north) / 2, 54, groups.districts, "#ffffff", 145);
 });
 
+registerLazyLayer("coverage", () => {
 for (const c of DATA.coverage) {
   const height = 10 + 92 * Math.min(1, c.score || 0);
   const radius = 9 + Math.min(26, c.eligible * 1.1);
@@ -5192,7 +5593,9 @@ for (const c of DATA.coverage) {
   mesh.userData = c;
   groups.coverage.add(mesh);
 }
+});
 
+registerLazyLayer("observations", () => {
 for (const o of DATA.observations) {
   const geom = new THREE.ConeGeometry(o.eligible ? 5 : 3.5, o.eligible ? 24 : 12, 8);
   const mat = new THREE.MeshStandardMaterial({ color: o.provider === "kartaview" ? 0xff4d8f : 0x54c8e8, transparent: true, opacity: o.eligible ? 0.85 : 0.35 });
@@ -5203,10 +5606,13 @@ for (const o of DATA.observations) {
   cone.rotation.y = ((o.heading || 0) * Math.PI) / 180;
   groups.observations.add(cone);
 }
+});
 
+registerLazyLayer("sequences", () => {
 for (const s of DATA.sequence_paths) {
   groups.sequences.add(line(s.points, s.provider === "kartaview" ? 0xff4d8f : 0x54c8e8, 0.52, 32));
 }
+});
 
 const state = { yaw: -0.45, pitch: 0.95, dist: 1180, target: new THREE.Vector3(0, 0, 0) };
 function placeCamera() {
@@ -5393,7 +5799,9 @@ document.querySelectorAll("button[data-layer]").forEach((button) => {
   button.setAttribute("aria-pressed", String(groups[button.dataset.layer].visible));
   button.addEventListener("click", () => {
     const layer = button.dataset.layer;
-    groups[layer].visible = !groups[layer].visible;
+    const opening = !groups[layer].visible;
+    if (opening) ensureLazyLayer(layer);
+    groups[layer].visible = opening;
     button.setAttribute("aria-pressed", String(groups[layer].visible));
   });
 });
