@@ -284,6 +284,8 @@ function tiledMap(base, name, repeatU, repeatV) {
 //: shape of the run.
 function surfaceScale(surface, width) {
   if (surface === "walk") return [SLAB_M, SLAB_M];
+  if (surface === "walk_narrow") return [NARROW_SLAB_M, width];
+  if (surface === "bike") return [5.5, BIKE_LANE_M];
   if (surface === "road") return [8.0, 8.0];
   // A crossing way runs in the direction a person walks. Continental bars cut across that
   // width, one after another along the walking direction, so the repeat is on u, not v.
@@ -294,6 +296,8 @@ function surfaceScale(surface, width) {
 
 function surfaceBase(surface) {
   if (surface === "walk") return SIDEWALK;
+  if (surface === "walk_narrow") return NARROW_SIDEWALK;
+  if (surface === "bike") return BIKE_LANE;
   if (surface === "road") return ROAD;
   if (surface === "crossing") return CROSSING;
   if (surface === "crossing_edges") return CROSSING_EDGES;
@@ -435,6 +439,115 @@ function ribbon(points, width, color, opacity, y, thickness = 1.4, surface = nul
   mesh.userData.surface = surface || "road";
   mesh.userData.widthMeters = width;
   return mesh;
+}
+
+// ---- one draw call per material, not per thing ----
+//
+// The map was issuing 65,985 draw calls a frame. Not 2.4 million triangles' worth of geometry --
+// the triangles were fine -- but a hundred and twenty thousand separate objects, each with its
+// own matrix to update, its own frustum test and its own state change. That is several seconds
+// of processor per frame before a pixel is drawn, and it is the whole of what the map feels
+// like when it is slow.
+//
+// Almost none of it needed to be separate. Thirty-six thousand street ribbons share eight
+// materials between them; they never move, never toggle individually, and nothing picks them.
+// So they are collected by material and merged, and the eight that come out draw the same
+// pixels as the thirty-six thousand that went in.
+//
+// What stays separate is what has to: a building is picked by right-clicking it and carries its
+// own address, so it keeps its own mesh.
+const MERGED = new Map();
+
+function materialKey(material) {
+  // By what it draws, not by which object it is. Every one of these meshes builds its own
+  // MeshStandardMaterial, so there were 50,279 distinct material objects across the facade
+  // detail and 1,732 across the streets -- and nothing could share a draw call with anything.
+  // Fingerprinted on the properties that actually change the pixels, the same fifty thousand
+  // collapse to a couple of dozen.
+  if (!material) return "none";
+  if (Array.isArray(material)) return "multi:" + material.map(materialKey).join("|");
+  return [
+    material.type,
+    material.map ? material.map.uuid : "-",
+    material.color ? material.color.getHexString() : "-",
+    (material.roughness ?? 0).toFixed(2),
+    (material.metalness ?? 0).toFixed(2),
+    material.transparent ? "t" : "o",
+    (material.opacity ?? 1).toFixed(2),
+    (material.alphaTest ?? 0).toFixed(2),
+    material.side,
+    material.polygonOffset ? `${material.polygonOffsetFactor}/${material.polygonOffsetUnits}` : "-",
+  ].join(":");
+}
+
+function addMerged(key, mesh, surface) {
+  if (!mesh || !mesh.geometry) return;
+  const full = `${key}|${materialKey(mesh.material)}`;
+  let bucket = MERGED.get(full);
+  if (!bucket) MERGED.set(full, bucket = { material: mesh.material, surface, parts: [] });
+  // The mesh's own placement has to be baked in: a merged geometry has no transform of its own,
+  // and every one of these was positioned rather than built where it stands.
+  mesh.updateMatrix();
+  if (!mesh.matrix.equals(IDENTITY)) mesh.geometry.applyMatrix4(mesh.matrix);
+  bucket.parts.push(mesh.geometry);
+}
+
+const IDENTITY = new THREE.Matrix4();
+
+function flushMerged(group, match = () => true) {
+  let saved = 0;
+  for (const [key, bucket] of [...MERGED]) {
+    if (!match(key)) continue;
+    MERGED.delete(key);
+    const positions = [];
+    const uvs = [];
+    const normals = [];
+    const colours = [];
+    const indices = [];
+    for (const geometry of bucket.parts) {
+      const position = geometry.getAttribute("position");
+      if (!position) continue;
+      const uv = geometry.getAttribute("uv");
+      const normal = geometry.getAttribute("normal");
+      // The colour a building carries on its vertices, because its tint can no longer live on
+      // its material -- there is one material now for a hundred and fifty buildings. Dropping
+      // this attribute in the merge, which is what happened first, leaves the shader reading a
+      // colour that is not there: every building in the city came out black.
+      const colour = geometry.getAttribute("color");
+      const base = positions.length / 3;
+      for (let i = 0; i < position.count; i += 1) {
+        positions.push(position.getX(i), position.getY(i), position.getZ(i));
+        // A merged geometry has one attribute set or none, so a part without UVs still has to
+        // contribute two numbers per vertex or every vertex after it reads the wrong pair.
+        uvs.push(uv ? uv.getX(i) : 0, uv ? uv.getY(i) : 0);
+        normals.push(normal ? normal.getX(i) : 0, normal ? normal.getY(i) : 1,
+                     normal ? normal.getZ(i) : 0);
+        colours.push(colour ? colour.getX(i) : 1, colour ? colour.getY(i) : 1,
+                     colour ? colour.getZ(i) : 1);
+      }
+      const index = geometry.getIndex();
+      if (index) {
+        for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
+      } else {
+        for (let i = 0; i < position.count; i += 1) indices.push(base + i);
+      }
+      geometry.dispose();
+      saved += 1;
+    }
+    if (!indices.length) continue;
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    merged.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    merged.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    merged.setAttribute("color", new THREE.Float32BufferAttribute(colours, 3));
+    merged.setIndex(indices);
+    const mesh = new THREE.Mesh(merged, bucket.material);
+    // The class survives the merge, so the probe and the audit can still say what is underfoot.
+    mesh.userData.surface = bucket.surface;
+    mesh.frustumCulled = false;      // one mesh spanning the corridor is always on screen
+    group.add(mesh);
+  }
+  return saved;
 }
 
 function offsetWay(points, metres) {
@@ -661,6 +774,49 @@ function paintedLine(points, width, color, y, { dash = false } = {}) {
   }));
   mesh.userData.surface = "marking";
   return mesh;
+}
+
+function cyclewayIsLane(value) {
+  if (!value) return false;
+  const text = String(value).toLowerCase();
+  if (text.includes("no") || text.includes("none") || text.includes("shared_lane")) return false;
+  return text.includes("lane") || text.includes("track") || text.includes("opposite");
+}
+
+function cyclewaySides(way) {
+  const sides = [];
+  const add = (side) => { if (!sides.includes(side)) sides.push(side); };
+  if (cyclewayIsLane(way.cycleway_both)) { add(1); add(-1); }
+  if (cyclewayIsLane(way.cycleway_left)) add(1);
+  if (cyclewayIsLane(way.cycleway_right)) add(-1);
+  if (!sides.length && cyclewayIsLane(way.cycleway)) {
+    if (way.oneway || way.osm_oneway) add(-1);
+    else { add(1); add(-1); }
+  }
+  return sides;
+}
+
+function addBikeLaneMarkings(way, renderPoints, roadWidth, roadTop) {
+  const sides = cyclewaySides(way);
+  if (!sides.length || roadWidth < BIKE_LANE_M + 2.2) return;
+  const hasTurn = Boolean(way.turn || way.turn_fwd || way.turn_back);
+  const linePoints = trimWay(renderPoints, hasTurn ? 12.0 : 3.5);
+  const lanePoints = trimWay(renderPoints, hasTurn ? 9.0 : 2.5);
+  if (!linePoints || linePoints.length < 2 || !lanePoints || lanePoints.length < 2) return;
+  for (const side of sides) {
+    const laneCentre = side * Math.max(0.8, roadWidth / 2 - BIKE_LANE_M / 2 - 0.18);
+    const shiftedFill = ribbon(offsetWay(lanePoints, laneCentre), BIKE_LANE_M, 0xffffff, 1.0,
+      roadTop + 0.010, 0.012, "bike");
+    if (shiftedFill) addMerged("bike:fill", shiftedFill, "bike");
+    const outerOffset = side * (roadWidth / 2 - 0.12);
+    const innerOffset = side * Math.max(0.45, roadWidth / 2 - BIKE_LANE_M);
+    const outer = paintedLine(offsetWay(linePoints, outerOffset), BIKE_EDGE_W_M, 0xf2f5ef,
+      roadTop + 0.030, { dash: hasTurn });
+    const inner = paintedLine(offsetWay(linePoints, innerOffset), BIKE_EDGE_W_M, 0xf2f5ef,
+      roadTop + 0.032, { dash: hasTurn });
+    if (outer) addMerged("bike:edge", outer, "marking");
+    if (inner) addMerged("bike:edge", inner, "marking");
+  }
 }
 
 function dashedLine(points, color, opacity, y) {
@@ -1114,13 +1270,12 @@ function roofTexture(seed, base, archetype) {
 
 const ROOF_CACHE = new Map();
 function roofTextureFor(tint, seed, archetype) {
-  const colour = new THREE.Color(tint).multiplyScalar(0.80);
-  const hsl = {};
-  colour.getHSL(hsl);
-  if (hsl.l < 0.22) colour.setHSL(hsl.h, hsl.s, 0.22);
-  const bucket = colour.getHex();
-  const key = `${archetype || "generic"}-${bucket}-${Math.floor(random(seed + 13) * 4)}`;
-  if (!ROOF_CACHE.has(key)) ROOF_CACHE.set(key, roofTexture(seed, bucket, archetype));
+  // The colour used to be baked into the texture, which gave 2,891 distinct roof textures --
+  // one per building colour -- and 2,891 things that could not share a draw call. The texture
+  // is now neutral and the building's own colour arrives as a vertex colour, so four archetypes
+  // times four variants is the whole set.
+  const key = `${archetype || "generic"}-${Math.floor(random(seed + 13) * 4)}`;
+  if (!ROOF_CACHE.has(key)) ROOF_CACHE.set(key, roofTexture(seed, 0xd8d8d8, archetype));
   return ROOF_CACHE.get(key);
 }
 
@@ -1704,7 +1859,8 @@ function pavementRunsOutsideCarriageway(points, width) {
 
 function addPavementRibbon(points, width, color, opacity, y, thickness, surface) {
   for (const run of pavementRunsOutsideCarriageway(points, width)) {
-    groups.streets.add(ribbon(run, width, color, opacity, y, thickness, surface));
+    addMerged(`walk:${surface}:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
+              ribbon(run, width, color, opacity, y, thickness, surface), surface);
   }
 }
 
@@ -1806,7 +1962,7 @@ const CROSSING = crossingTexture();
 //: held only three and they read as long lines across the road rather than as a ladder.
 const CROSSING_PERIOD_M = 0.86;
 
-function sidewalkTexture() {
+function sidewalkTexture(variant = "square") {
   // Scored concrete, as San Francisco actually pours it: a mid grey rather than a pale one,
   // with exposed aggregate speckle at two scales, the fine parallel striations a broom leaves
   // across a fresh slab, and a scored joint every five feet. The joints are most of what tells
@@ -1848,10 +2004,27 @@ function sidewalkTexture() {
   // The score itself: a groove, so a dark line with a bright lip below it.
   ctx.strokeStyle = "rgba(38,40,38,0.62)";
   ctx.lineWidth = 3.0;
-  ctx.strokeRect(1.5, 1.5, size - 3, size - 3);
+  if (variant === "narrow") {
+    ctx.beginPath();
+    ctx.moveTo(1.5, 1.5);
+    ctx.lineTo(size - 1.5, 1.5);
+    ctx.moveTo(1.5, size - 1.5);
+    ctx.lineTo(size - 1.5, size - 1.5);
+    ctx.moveTo(size * 0.16, size * 0.82);
+    ctx.lineTo(size * 0.84, size * 0.18);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(200,202,194,0.13)";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.moveTo(size * 0.20, size * 0.86);
+    ctx.lineTo(size * 0.88, size * 0.22);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(1.5, 1.5, size - 3, size - 3);
+  }
   ctx.strokeStyle = "rgba(200,202,194,0.14)";
   ctx.lineWidth = 1.2;
-  ctx.strokeRect(4.0, 4.0, size - 8, size - 8);
+  if (variant !== "narrow") ctx.strokeRect(4.0, 4.0, size - 8, size - 8);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
@@ -1859,8 +2032,56 @@ function sidewalkTexture() {
 }
 
 const SIDEWALK = sidewalkTexture();
+const NARROW_SIDEWALK = sidewalkTexture("narrow");
 //: One scored square, in metres. Five feet is the usual San Francisco pour.
 const SLAB_M = 1.52;
+const NARROW_SLAB_M = 2.75;
+const NARROW_WALK_M = 1.8;
+
+function bikeLaneTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#7fb99b";
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < size * size * 0.18; i += 1) {
+    const shade = random(i * 19);
+    ctx.fillStyle = shade < 0.55 ? "rgba(28,74,58,0.16)" : "rgba(225,246,232,0.13)";
+    ctx.fillRect(random(i * 3) * size, random(i * 7) * size, 1, 1);
+  }
+  ctx.fillStyle = "rgba(255,255,255,0.24)";
+  ctx.fillRect(0, 0, size, 2);
+  ctx.fillRect(0, size - 2, size, 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function sandTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#b8a77d";
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < size * size * 0.35; i += 1) {
+    const shade = random(i * 23);
+    ctx.fillStyle = shade < 0.45 ? "rgba(83,72,49,0.15)"
+      : shade < 0.82 ? "rgba(238,222,172,0.20)" : "rgba(150,129,82,0.18)";
+    ctx.fillRect(random(i * 5) * size, random(i * 11) * size, 1, 1);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+const BIKE_LANE = bikeLaneTexture();
+const SAND = sandTexture();
+const BIKE_LANE_M = 1.75;
+const BIKE_EDGE_W_M = 0.18;
 
 //: Storey height and bay width in metres, so one tile of the facade covers one real storey.
 const STOREY_M = 3.2;
@@ -2034,19 +2255,31 @@ function placeSlab(metrics, color, y = 0.075) {
   return mesh;
 }
 
-function boxPart(group, x, y, z, w, h, d, color, roughness = 0.82) {
+// Balconies, sills, bollards, pumps, shopfront trim: fifty thousand small parts across the
+// corridor, each its own mesh and its own material, and none of them picked or moved. They go
+// into the merge like the streets do -- a balcony is still there, it is simply drawn in the
+// same call as every other balcony that shares its colour.
+function makeBox(x, y, z, w, h, d, color, roughness) {
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(w, h, d),
     new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.04 })
   );
   mesh.position.set(x, y + h / 2, z);
-  group.add(mesh);
+  return mesh;
+}
+
+function boxPart(group, x, y, z, w, h, d, color, roughness = 0.82) {
+  const mesh = makeBox(x, y, z, w, h, d, color, roughness);
+  addMerged("part", mesh, "detail");
   return mesh;
 }
 
 function rotatedBoxPart(group, x, y, z, w, h, d, color, roughness = 0.82, rotationY = 0) {
-  const mesh = boxPart(group, x, y, z, w, h, d, color, roughness);
+  // Turned before it is merged: the merge bakes the transform in, so a rotation set afterwards
+  // would be applied to nothing.
+  const mesh = makeBox(x, y, z, w, h, d, color, roughness);
   mesh.rotation.y = rotationY;
+  addMerged("part", mesh, "detail");
   return mesh;
 }
 
@@ -2060,7 +2293,9 @@ function planePart(group, x, y, z, w, h, map, rotationY = 0) {
   );
   mesh.position.set(x, y + h / 2, z);
   mesh.rotation.y = rotationY;
-  group.add(mesh);
+  // Shopfronts, windows, signage: 38,256 of these, sharing a few dozen cached textures between
+  // them. Keyed on the texture rather than on the material object, they merge down to those.
+  addMerged("plane", mesh, "detail");
   return mesh;
 }
 
@@ -2813,12 +3048,13 @@ function buildingMesh(feature) {
     if (hsl.l < 0.22) roofTint.setHSL(hsl.h, hsl.s, 0.22);
   }
   const roof = new THREE.MeshStandardMaterial({
-    map: roofTextureFor(tint, seed, feature.archetype),
+    map: kind === "outbuilding" ? outbuildingRoofTexture(seed)
+      : roofTextureFor(tint, seed, feature.archetype),
     color: 0xffffff, transparent: opacity < 1, opacity,
     roughness: 0.97, metalness: material.name === "metal" ? 0.5 : 0.03,
   });
   const walls = new THREE.MeshStandardMaterial({
-    map: facadeTextureFor(material, seed),
+    map: kind === "outbuilding" ? outbuildingTexture(seed) : facadeTextureFor(material, seed),
     color: tint,
     transparent: opacity < 1,
     opacity,
@@ -2828,23 +3064,58 @@ function buildingMesh(feature) {
     // gives a flat blue rectangle; the environment map is what makes it read as a window.
     envMapIntensity: material.name === "glass" ? 1.6 : material.name === "metal" ? 1.1 : 0.35,
   });
-  const mesh = new THREE.Mesh(geom, [roof, walls]);
-  mesh.userData = feature;
+  // Fifteen thousand seven hundred buildings were fifteen thousand seven hundred draw calls.
+  // They share a hundred and fifty three wall textures between them and, now that the roof is
+  // neutral, sixteen roof textures -- so what actually differs between two buildings with the
+  // same cladding is their colour, and a colour can travel on the vertices. Merged by texture
+  // they are about a hundred and seventy meshes with the same pixels.
+  //
+  // What that costs is the ability to raycast a building and get the building. Picking is done
+  // against the footprints instead, which is better anyway: it works when you click the roof.
   const group = new THREE.Group();
-  group.add(mesh);
+  const capColour = new THREE.Color(roofTint.getHex());
+  const wallColour = new THREE.Color(tint);
+  roof.color.setHex(0xffffff);
+  walls.color.setHex(0xffffff);
+  roof.vertexColors = true;
+  walls.vertexColors = true;
+  for (const part of geom.groups) {
+    const slice = geom.clone();
+    slice.clearGroups();
+    // ExtrudeGeometry comes back non-indexed, in which case a group's start and count are a
+    // straight run of vertices rather than a run of indices into them.
+    const index = geom.getIndex();
+    const taken = [];
+    for (let i = part.start; i < part.start + part.count; i += 1) {
+      taken.push(index ? index.getX(i) : i);
+    }
+    slice.setIndex(taken);
+    const colour = part.materialIndex === 0 ? capColour : wallColour;
+    const count = slice.getAttribute("position").count;
+    const colours = new Float32Array(count * 3);
+    for (let i = 0; i < count; i += 1) {
+      colours[i * 3] = colour.r;
+      colours[i * 3 + 1] = colour.g;
+      colours[i * 3 + 2] = colour.b;
+    }
+    slice.setAttribute("color", new THREE.BufferAttribute(colours, 3));
+    addMerged(part.materialIndex === 0 ? "roof" : "wall",
+              new THREE.Mesh(slice, part.materialIndex === 0 ? roof : walls), "building");
+  }
+  geom.dispose();
   if (kind === "outbuilding") {
     // No shopfront, no bay windows, no balconies. A garden workshop has a door and a roof, and
     // the detail passes are what made these read as houses in the first place.
-    walls.map = outbuildingTexture(seed);
-    walls.envMapIntensity = 0.25;
-    roof.map = outbuildingRoofTexture(seed);
   } else {
     addGroundFacadeDetail(group, feature, seed, height);
     addSouthFacadeDetail(group, feature, seed, height);
     addRoofFurniture(group, feature, seed, height, areaM2);
   }
   group.userData = feature;
-  return group;
+  // The building itself is merged, so this group holds only whatever detail stayed separate.
+  // Returning an empty one adds fifteen thousand objects to the scene graph that draw nothing
+  // and are walked on every frame.
+  return group.children.length ? group : null;
 }
 
 // ---- photographed facades ----
@@ -2998,7 +3269,21 @@ for (const chunk of FACADES.grid || []) {
 const streetNames = new Set();
 let streetLabelCount = 0;
 for (const way of DATA.ways) {
-  if (way.kind === "water") {
+ if (way.kind === "beach") {
+ const shape = footprintShape(way.points);
+ if (shape) {
+ const geom = new THREE.ShapeGeometry(shape);
+ geom.rotateX(-Math.PI / 2);
+ const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+ map: SAND, color: 0xffffff, roughness: 0.96, metalness: 0.0,
+ side: THREE.DoubleSide,
+ }));
+ mesh.position.y = -0.075;
+ groups.ground.add(mesh);
+ }
+ continue;
+ }
+ if (way.kind === "water") {
     // The bay, the lagoon and Aquatic Park. Nothing in the query reached them before, so the
     // whole northern edge of the corridor was drawn as ground.
     const shape = footprintShape(way.points);
@@ -3018,20 +3303,28 @@ for (const way of DATA.ways) {
   if (way.kind === "building") {
     // On the ground, where a footprint is. At 1.8 m it was a plate floating at head height
     // through the middle of every building.
-    const base = footprintMesh(way.points, way.covered ? 0x2b4148 : 0x1b2a2f,
-                               way.covered ? 0.42 : 0.18, 0.04);
-    if (base) groups.streets.add(base);
+    // The flat footprint under a building is the fallback for one that has no 3D mesh. Drawn
+    // for the covered ones too it is 15,213 slabs lying under 15,213 buildings, entirely hidden
+    // and entirely paid for: sixteen thousand draw calls a frame that cannot be seen.
+    const building = way.covered ? buildingMesh(way) : null;
+    if (!building) {
+      const base = footprintMesh(way.points, way.covered ? 0x2b4148 : 0x1b2a2f,
+                                 way.covered ? 0.42 : 0.18, 0.04);
+      if (base) addMerged("footprint", base, "footprint");
+    }
     if (way.covered) {
-      const building = buildingMesh(way);
       if (building) groups.mapped3d.add(building);
       // A dropped kerb outside means a way in. The city records 14,130 of these against
       // buildings in this corridor, with the width of each.
       for (const opening of way.garages || []) {
         const panel = garagePanel(opening, way.colour !== undefined
           ? new THREE.Color(way.colour).getHex() : 0x9aa0a4);
-        if (panel) groups.mapped3d.add(panel);
+        // Fourteen thousand garage doors, six styles between them, tinted to their building.
+        // The tint is already in the texture, so keying on that merges them down to the number
+        // of distinct doors the city actually has rather than the number of openings.
+        if (panel) addMerged("garage", panel, "garage");
         const apron = apronSlab(opening);
-        if (apron) groups.streets.add(apron);
+        if (apron) addMerged("apron", apron, "apron");
       }
     }
     continue;
@@ -3072,8 +3365,8 @@ for (const way of DATA.ways) {
   const surfaceY = isCrossing ? roadTop + 0.02
     : (isSidewalk || isPath) ? roadTop + KERB / 2 : roadTop / 2;
   const surfaceThickness = isCrossing ? 0.02 : (isSidewalk || isPath) ? KERB : roadTop;
-  const surfaceKind = isCrossing ? ((way.continental || way.alley_mouth) ? "crossing" : "crossing_edges")
-    : (isSidewalk || isPath) ? "walk" : "road";
+const surfaceKind = isCrossing ? ((way.continental || way.alley_mouth) ? "crossing" : "crossing_edges")
+: (isSidewalk || isPath) ? (widthMeters <= NARROW_WALK_M ? "walk_narrow" : "walk") : "road";
     // Continental unless we positively know otherwise. San Francisco has been converting its
     // marked crossings to ladders for years, and the inventory is demonstrably incomplete --
     // 598 of its points sit near no mapped crossing at all, which is the two datasets
@@ -3081,9 +3374,14 @@ for (const way of DATA.ways) {
     // ``continental`` flag still records the 817 the city confirms.
   if (isSidewalk || isPath) {
     addPavementRibbon(surfacePoints, widthMeters, color, opacity, surfaceY, surfaceThickness, surfaceKind);
-  } else {
-    groups.streets.add(ribbon(surfacePoints, widthMeters, color, opacity, surfaceY, surfaceThickness, surfaceKind));
-  }
+} else {
+addMerged(`ribbon:${surfaceKind}:${(Math.round(surfaceThickness / 0.05) * 0.05).toFixed(2)}`,
+            ribbon(surfacePoints, widthMeters, color, opacity, surfaceY, surfaceThickness, surfaceKind),
+            surfaceKind);
+}
+if (!isSidewalk && !isCrossing && !isPath) {
+addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
+}
   // The footways, laid from the kerb outward on both sides. Drawn a centimetre below the
   // mapped sidewalk ways so that where OpenStreetMap has one the two do not fight, and so
   // that where it has none there is still pavement rather than a hole.
@@ -3093,11 +3391,12 @@ for (const way of DATA.ways) {
     // Both sides unless one of them is inside another street's carriageway, which happens
     // wherever a divided road is drawn as two ways.
     for (const side of (way.walk_sides !== undefined ? way.walk_sides : [1, -1])) {
-      addPavementRibbon(
-        trimWay(offsetWay(renderPoints, side * (inner + walk / 2)), Math.max(2.0, inner + walk * 0.7)),
-        walk, color, opacity, roadTop + KERB / 2 - 0.015, KERB, "walk");
-    }
-  }
+addPavementRibbon(
+trimWay(offsetWay(renderPoints, side * (inner + walk / 2)), Math.max(2.0, inner + walk * 0.7)),
+walk, color, opacity, roadTop + KERB / 2 - 0.015, KERB,
+walk <= NARROW_WALK_M ? "walk_narrow" : "walk");
+}
+}
   // A centreline belongs on a roadway, not on a footway: drawn on everything it read as a
   // white thread stitched over the whole city, and on a 3.6 m pavement it was simply wrong.
   // It does not belong on a crossing either -- a crosswalk has bars painted across it and no
@@ -3130,7 +3429,7 @@ for (const way of DATA.ways) {
           if (Math.abs(offset) >= road / 2 - 0.35) continue;
           const divider = paintedLine(offsetWay(renderPoints, offset), MARK_W, 0xdfe3e0,
                                       roadTop + 0.015, { dash: true });
-          if (divider) groups.streets.add(divider);
+          if (divider) addMerged("marking:lane", divider, "marking");
         }
       }
     }
@@ -3143,7 +3442,7 @@ for (const way of DATA.ways) {
       for (const side of [1, -1]) {
         const yellow = paintedLine(offsetWay(renderPoints, side * apart), MARK_W, 0xd8a92e,
                                    roadTop + 0.02);
-        if (yellow) groups.streets.add(yellow);
+        if (yellow) addMerged("marking:centre", yellow, "marking");
       }
     }
   }
@@ -3175,7 +3474,7 @@ for (const way of DATA.ways) {
       mesh.rotation.x = -Math.PI / 2;
       mesh.rotation.z = -bearing;
       mesh.position.set(x2, roadTop + 0.02, -y2);
-      groups.streets.add(mesh);
+      addMerged("arrow", mesh, "marking");
     }
   }
 
@@ -4154,6 +4453,14 @@ function buildCourts(ground) {
 
 // Everything collected off the roofs while the buildings were being built, in nine meshes.
 emitRoofParts();
+// And every street surface, marking and piece of facade detail, by material. The detail is
+// merged into the same group the buildings are in so that it sits under the same layer toggle.
+// Streets keep their own layer, so the surfaces and markings flush there and the facade
+// detail flushes in with the buildings it belongs to.
+const isBuilt = (key) => key.startsWith("part|") || key.startsWith("plane|")
+  || key.startsWith("roof|") || key.startsWith("wall|") || key.startsWith("garage|");
+flushMerged(groups.streets, (key) => !isBuilt(key));
+flushMerged(groups.mapped3d, isBuilt);
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
@@ -4477,17 +4784,68 @@ function featureSummary(feature) {
   return lines.join("<br>");
 }
 
-function pickedFeature(clientX, clientY) {
-  pointer.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
-  ray.setFromCamera(pointer, camera);
-  const hits = ray.intersectObjects(groups.mapped3d.children, true);
-  for (const hit of hits) {
-    let node = hit.object;
-    while (node) {
-      if (node.userData && node.userData.kind === "building") return node.userData;
-      node = node.parent;
+// Which building is under the cursor, from the footprints rather than from the meshes.
+//
+// The meshes are merged now, so a ray that hits one comes back with "the buildings" rather than
+// with a building. The footprints are the identity, they are already in the payload, and asking
+// them is both cheaper than a raycast through fifteen thousand objects and more forgiving: a
+// click on a roof lands inside the footprint under it, which is the building you meant.
+const FOOTPRINT_CELL = 60;
+const footprintGrid = new Map();
+for (const way of DATA.ways) {
+  if (way.kind !== "building" || !way.points || way.points.length < 4) continue;
+  const local = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [x, z] of local) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const entry = { way, local, minX, maxX, minZ, maxZ };
+  for (let ix = Math.floor(minX / FOOTPRINT_CELL); ix <= Math.floor(maxX / FOOTPRINT_CELL); ix += 1) {
+    for (let iz = Math.floor(minZ / FOOTPRINT_CELL); iz <= Math.floor(maxZ / FOOTPRINT_CELL); iz += 1) {
+      const key = `${ix}:${iz}`;
+      let bucket = footprintGrid.get(key);
+      if (!bucket) footprintGrid.set(key, bucket = []);
+      bucket.push(entry);
     }
   }
+}
+
+function insideFootprint(entry, x, z) {
+  if (x < entry.minX || x > entry.maxX || z < entry.minZ || z > entry.maxZ) return false;
+  let inside = false;
+  const ring = entry.local;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const [xi, zi] = ring[i];
+    const [xj, zj] = ring[j];
+    if ((zi > z) !== (zj > z)
+        && x < ((xj - xi) * (z - zi)) / ((zj - zi) || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function buildingAt(x, z) {
+  const bucket = footprintGrid.get(`${Math.floor(x / FOOTPRINT_CELL)}:${Math.floor(z / FOOTPRINT_CELL)}`);
+  if (!bucket) return null;
+  for (const entry of bucket) if (insideFootprint(entry, x, z)) return entry.way;
+  return null;
+}
+
+function pickedFeature(clientX, clientY) {
+  // Where the ray meets the roofs, and where it meets the ground. A tall building is picked by
+  // the first, a low one or a gap between them by the second, and taking whichever is nearer
+  // the camera is what makes clicking a facade from street level pick that facade's building.
+  pointer.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const hit = ray.intersectObjects(groups.mapped3d.children, false)[0];
+  if (hit) {
+    const found = buildingAt(hit.point.x, hit.point.z);
+    if (found) return found;
+  }
+  const landing = new THREE.Vector3();
+  if (ray.ray.intersectPlane(groundPlane, landing)) return buildingAt(landing.x, landing.z);
   return null;
 }
 
@@ -4609,7 +4967,8 @@ animate();
 // picture into its own buffer, and answers what is actually standing at a given point on the
 // ground. Between them a caller with no screen can both see the model and measure it.
 window.kerbside = {
-  scene, camera, renderer, groups, DATA, xy, insideCarriageway,
+  scene, camera, renderer, groups, DATA, xy, insideCarriageway, buildingAt,
+  pickedFeature,
 
   /** A photograph of one place, from a camera this call positions. */
   shoot({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
