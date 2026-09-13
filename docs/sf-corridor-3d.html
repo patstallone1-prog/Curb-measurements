@@ -211,8 +211,12 @@ const groups = {
 // were taken, which cells are covered, which sequences ran, which ways are missing -- are all
 // about the state of the dataset rather than about the place, and starting with them lit turns
 // a map of San Francisco into a progress chart. They are one click away and they stay.
+// Street furniture is not in this list. Signs, kerb paint and bus stops are the place, not the
+// dataset -- a San Francisco block without its signs is not the block -- so they open with the
+// city. The layer is still lazy: it is fetched once the ground has landed, so the first paint is
+// not held up by it.
 for (const off of ["coverage", "observations", "sequences", "gaps", "kerbs", "chunks",
-                   "furniture", "official"]) {
+                   "official"]) {
   groups[off].visible = false;
 }
 Object.values(groups).forEach((g) => root.add(g));
@@ -487,6 +491,7 @@ function tiledMap(base, name, repeatU, repeatV) {
 //: shape of the run.
 function surfaceScale(surface, width) {
   if (surface === "walk") return [SLAB_M, SLAB_M];
+  if (surface === "kerb") return [SLAB_M, SLAB_M];
   if (surface === "walk_underlay") return [SLAB_M, SLAB_M];
   if (surface === "walk_narrow") return [NARROW_SLAB_M, width];
   if (surface === "bike") return [5.5, BIKE_LANE_M];
@@ -501,6 +506,7 @@ function surfaceScale(surface, width) {
 
 function surfaceBase(surface) {
   if (surface === "walk") return SIDEWALK;
+  if (surface === "kerb") return SIDEWALK;
   if (surface === "walk_underlay") return SIDEWALK;
   if (surface === "walk_narrow") return NARROW_SIDEWALK;
   if (surface === "bike") return BIKE_LANE;
@@ -644,20 +650,30 @@ function ribbon(points, width, color, opacity, y, thickness = 1.4, surface = nul
   geometry.setIndex(index);
   geometry.computeVertexNormals();
 
-  const painted = surface === "crossing" || surface === "crossing_edges";
-  const base = surfaceBase(surface);
-  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    color, opacity, roughness: surface === "road" ? 0.86 : 0.94, metalness: 0.02,
-    transparent: opacity < 1 || painted,
-    alphaTest: painted ? 0.35 : 0,
-    map: base,
-    side: THREE.DoubleSide,
-  }));
+  const mesh = new THREE.Mesh(geometry, surfaceMaterial(surface, color, opacity));
   // What this is, carried on the mesh itself. Without it nothing downstream -- the inspection
   // probe, and the checks that use it -- can tell a footway laid in the road from a footway.
   mesh.userData.surface = surface || "road";
   mesh.userData.widthMeters = width;
   return mesh;
+}
+
+function surfaceMaterial(surface, color, opacity) {
+  // One material per surface, so a corner piece and the ribbons it joins share a draw call
+  // and, more to the point, a texture and a shade: the fingerprint that merges them is built
+  // from these properties.
+  const painted = surface === "crossing" || surface === "crossing_edges";
+  return new THREE.MeshStandardMaterial({
+    color, opacity, roughness: surface === "road" ? 0.86 : 0.94, metalness: 0.02,
+    transparent: opacity < 1 || painted,
+    alphaTest: painted ? 0.35 : 0,
+    map: surfaceBase(surface),
+    side: THREE.DoubleSide,
+    // The kerb carries its paint on its own vertices: red, yellow, white, green or blue over the
+    // same concrete texture, which is what painted concrete looks like. The colour is put on
+    // when the curb policy loads, and it is in the tile rather than laid over it.
+    vertexColors: surface === "kerb",
+  });
 }
 
 // ---- one draw call per material, not per thing ----
@@ -2580,6 +2596,14 @@ function roadSurfaceTop() { return 0.06 + KERB_FALLBACK; }
 const CARRIAGEWAY_CELL = 30;
 const carriagewayGrid = new Map();
 const MIN_RENDER_ROAD_M = 2.8;
+//: Widths a service road is drawn at when nothing measured it. A driveway is one car wide; a
+//: parking aisle outside any mapped lot is two, so cars pass. Alleys keep the street default.
+const SERVICE_ROAD_M = { driveway: 3.4, "drive-through": 3.4, parking_aisle: 6.0 };
+//: And none of them has a footway down each side or paint down the middle. A driveway runs
+//: from the kerb to a garage across the pavement; a parking aisle runs between two rows of
+//: stalls. Drawn as streets they each grew two pavements and a yellow centreline.
+const UNMARKED_SERVICE = new Set(Object.keys(SERVICE_ROAD_M));
+function isUnmarkedService(way) { return UNMARKED_SERVICE.has(way.service); }
 const MAX_RENDER_ROAD_M = 24.0;
 const MAX_INFERRED_ROAD_M = 16.5;
 const MIN_RENDER_WALK_M = 0.9;
@@ -2602,7 +2626,10 @@ function nominalRoadWidth(way) {
   const lanes = laneCountForWay(way);
   const laneCap = lanes ? Math.max(4.2, lanes * 3.35 + 1.4) : MAX_INFERRED_ROAD_M;
   const sourceCap = way.road_source === "curb_geometry" ? MAX_RENDER_ROAD_M : MAX_INFERRED_ROAD_M;
-  return Math.max(MIN_RENDER_ROAD_M, Math.min(raw, laneCap, sourceCap));
+  // A driveway or a parking aisle has no right of way of its own to fall back on: the eight
+  // metre default is a street's, and drawn that wide beside a house it is the front garden.
+  const serviceCap = SERVICE_ROAD_M[way.service] || Infinity;
+  return Math.max(MIN_RENDER_ROAD_M, Math.min(raw, laneCap, sourceCap, serviceCap));
 }
 
 function renderedRoadWidth(way) {
@@ -2931,6 +2958,9 @@ function addPavementRibbon(points, width, color, opacity, y, thickness, surface,
 //: Widths to try for a kerbside footway, widest first, before giving up on one. The inner edge
 //: stays on the kerb at every width, so a narrower attempt is the same pavement with less of it
 //: rather than a pavement somewhere else.
+//: The kerb's own tile: four inches of the top of the pavement at the street edge, and the face
+//: down to the gutter. It is what curb paint is painted on.
+const KERB_LIP_M = 0.1016;
 const WALK_FALLBACK_WIDTHS_M = [1.0, 0.72, 0.52, 0.36, 0.24];
 //: Below this share of the block face surviving, the width is too wide for the room there is.
 const WALK_ENOUGH = 0.55;
@@ -2941,6 +2971,11 @@ const WALK_WIDTH_RUN_M = 6.0;
 //: front-yard surfaces, so lawns still win, but exposed slivers become concrete instead of the
 //: black base plane.
 const PROPERTY_LINE_PAVEMENT_WIDTH_M = 8.6;
+//: The narrowest strip of made ground worth drawing between a kerb and a building. Below this
+//: it is a survey sliver, not somewhere anybody walks.
+const UNDERLAY_MIN_WIDTH_M = 0.8;
+//: How far a width is held before the underlay is allowed to change it.
+const UNDERLAY_RUN_M = 5.0;
 const PROPERTY_LINE_PAVEMENT_Y = 0.012;
 const PROPERTY_LINE_PAVEMENT_THICKNESS_M = 0.004;
 
@@ -3004,30 +3039,29 @@ function mappedWalkNear(x, z, reach = MAPPED_WALK_REACH_M) {
   return false;
 }
 
-function sideBlockedByCarriageway(renderPoints, side, inner) {
-  // Fallback pavement belongs outside the street, not in the slot between two divided
-  // carriageways. Sample just beyond the kerb line: if that strip is inside some other
-  // carriageway, drawing sidewalk tiles there makes the middle of the road look paved.
-  const probe = inner + 1.8;
-  let sampled = 0;
-  let blocked = 0;
-  for (let i = 0; i < renderPoints.length; i += Math.max(1, Math.floor(renderPoints.length / 7))) {
-    const centre = offsetWay([renderPoints[Math.max(0, i - 1)], renderPoints[i],
-                              renderPoints[Math.min(renderPoints.length - 1, i + 1)]],
-                             side * probe)[1];
-    const [x, y] = xy(centre[0], centre[1]);
-    sampled += 1;
-    if (insideCarriageway(x, -y, 0.15)) blocked += 1;
-  }
-  return sampled > 0 && blocked >= sampled * 0.45;
+//: How far beyond the kerb to look for another carriageway. Pavement belongs outside the street,
+//: not in the slot between the two halves of a divided road.
+const KERBSIDE_BLOCK_PROBE_M = 1.8;
+
+function kerbsideBlockedAt(before, here, after, side, inner) {
+  // Is the ground just beyond this kerb, at this point, inside some other carriageway?
+  //
+  // This used to be asked of the side as a whole: seven samples, and if three of them were
+  // blocked the entire side lost its pavement -- including the stretches that were clear. A side
+  // blocked for half its length came out bare for all of it, which is where 673 kerb stations
+  // with room and nothing said against them were going. The question is a fact about a place,
+  // so it is asked about each place.
+  const centre = offsetWay([before, here, after], side * (inner + KERBSIDE_BLOCK_PROBE_M))[1];
+  const [x, y] = xy(centre[0], centre[1]);
+  return insideCarriageway(x, -y, 0.15);
 }
 
 function walkSidesToDraw(way, renderPoints, inner) {
   // Both sides unless OpenStreetMap says otherwise and the ground agrees with it.
   const stated = way.walk_sides;
   const drawn = [];
+  if (isUnmarkedService(way)) return drawn;
   for (const side of [1, -1]) {
-    if (sideBlockedByCarriageway(renderPoints, side, inner)) continue;
     if (stated === undefined) {
       drawn.push(side);
       continue;
@@ -3109,9 +3143,17 @@ function streetCarriesOn(way, x, z, bearing) {
   return streetContinuationsAt(way, x, z, bearing).length > 0;
 }
 
-function kerbsideTrims(renderPoints, back) {
+function kerbsideTrims(renderPoints, back, side = 0) {
   // How far to pull the pavement back from each end of this way: the full trim where the street
   // really stops at a junction, and nothing where it simply carries on into the next way.
+  //
+  // With a side given, the trim at a junction is the corner's own: exactly as far as the
+  // crossing street's pavement reaches, so the two meet edge to edge with the corner piece
+  // between them. That is asked before whether the street carries on, because at a crossroads
+  // it does both -- the way continues straight through, and there is still a street coming in
+  // on this side. Carrying on only means no cut where nothing comes in on that side, which is
+  // a split in the tagging or the far side of a T. Without a side (the underlay asks that
+  // way) it is the flat pull-back.
   const n = renderPoints.length;
   const [sx, sy] = xy(renderPoints[0][0], renderPoints[0][1]);
   const [s2x, s2y] = xy(renderPoints[1][0], renderPoints[1][1]);
@@ -3119,10 +3161,361 @@ function kerbsideTrims(renderPoints, back) {
   const [e2x, e2y] = xy(renderPoints[n - 2][0], renderPoints[n - 2][1]);
   const startBearing = Math.atan2(-s2y + sy, s2x - sx);
   const endBearing = Math.atan2(-e2y + ey, e2x - ex);
+  const cornerCut = (x, y, dx, dy, awaySide) => {
+    if (!awaySide) return undefined;
+    const leg = cornerLegAt(x, y, dx, dy);
+    const corner = leg && pavementCornerCuts.get(`${leg.id}:${awaySide}`);
+    return corner && corner.valid ? corner.cut : undefined;
+  };
+  const start = cornerCut(sx, sy, s2x - sx, s2y - sy, side);
+  // Leaving the far end the way runs backwards, so the pavement on its left is on the right.
+  const end = cornerCut(ex, ey, e2x - ex, e2y - ey, -side);
   return [
-    streetCarriesOn(null, sx, -sy, startBearing) ? 0 : back,
-    streetCarriesOn(null, ex, -ey, endBearing) ? 0 : back,
+    start !== undefined ? start : (streetCarriesOn(null, sx, -sy, startBearing) ? 0 : back),
+    end !== undefined ? end : (streetCarriesOn(null, ex, -ey, endBearing) ? 0 : back),
   ];
+}
+
+// ---- the corners ----
+//
+// A kerbside pavement is pulled back from each junction so that it does not run on into the
+// crossing street, and both pavements that meet at a corner were pulled back by seven tenths
+// of their own width past the other's kerb. That left two faults at every corner in the
+// corridor, and they are the same fault seen from both sides: the square between the two
+// kerb lines -- the one a person stands on to wait for the light -- had nothing on it, and
+// the small square outside it, where both pull-backs had not reached, had both pavements on
+// it, fighting for depth. "A single square missing at the corners", and the broken tiles
+// beside it.
+//
+// The corner is its own piece of ground, bounded by the two kerb lines and the two lines
+// where the pavements start. So each pavement is now cut where the crossing street's pavement
+// ends -- the point where the two outer edges meet -- and the corner between the cuts and the
+// kerbs is laid once, with its own kerb round the curb return. Nothing overlaps and nothing is
+// left out. The cuts are decided before any pavement is laid, from the same widths the
+// pavements use, so the pieces are made to meet rather than checked afterwards.
+//: Way ends within this distance are one junction. A junction is a shared node, so this is
+//: rounding, not tolerance.
+const CORNER_JOIN_M = 1.0;
+//: The angle between two legs for the ground between them to be a corner. Below the minimum it
+//: is a sliver two pavements already cover between them; above the maximum it is one street
+//: bending, which is what streetCarriesOn says and the pavement runs straight through.
+const CORNER_MIN_DEG = 20;
+const CORNER_MAX_DEG = 150;
+const CORNER_CELL_M = 4.0;
+const cornerLegGrid = new Map();
+const cornerLegs = [];
+//: `${leg.id}:${side}` -> { cut, corner geometry } for the pavement on that side of that leg,
+//: side being left (+1) or right (-1) of the leg as it leaves the junction.
+const pavementCornerCuts = new Map();
+//: What was actually laid at each cut, recorded by addKerbsidePavement so the corner piece is
+//: only put down between two pavements that exist.
+const pavementCornerLaid = new Map();
+
+function cornerLegAt(x, y, dx, dy) {
+  // The indexed leg leaving this point in this direction, if any.
+  const span = Math.hypot(dx, dy) || 1;
+  const ux = dx / span;
+  const uy = dy / span;
+  const cx = Math.floor(x / CORNER_CELL_M);
+  const cy = Math.floor(y / CORNER_CELL_M);
+  let best = null;
+  let bestScore = -1;
+  for (let ix = cx - 1; ix <= cx + 1; ix += 1) {
+    for (let iy = cy - 1; iy <= cy + 1; iy += 1) {
+      const bucket = cornerLegGrid.get(`${ix}:${iy}`);
+      if (!bucket) continue;
+      for (const leg of bucket) {
+        if (Math.hypot(leg.x - x, leg.y - y) > CORNER_JOIN_M) continue;
+        const score = leg.dx * ux + leg.dy * uy;
+        if (score > 0.985 && score > bestScore) { best = leg; bestScore = score; }
+      }
+    }
+  }
+  return best;
+}
+
+function cornerLegsAt(leg) {
+  const cx = Math.floor(leg.x / CORNER_CELL_M);
+  const cy = Math.floor(leg.y / CORNER_CELL_M);
+  const out = [];
+  for (let ix = cx - 1; ix <= cx + 1; ix += 1) {
+    for (let iy = cy - 1; iy <= cy + 1; iy += 1) {
+      const bucket = cornerLegGrid.get(`${ix}:${iy}`);
+      if (!bucket) continue;
+      for (const other of bucket) {
+        if (other === leg) continue;
+        if (Math.hypot(other.x - leg.x, other.y - leg.y) <= CORNER_JOIN_M) out.push(other);
+      }
+    }
+  }
+  return out;
+}
+
+function cornerNeighbour(leg, side) {
+  // The next leg round the junction on this side of this one: anticlockwise for the left.
+  let best = null;
+  let bestTurn = Infinity;
+  for (const other of cornerLegsAt(leg)) {
+    let turn = other.bearing - leg.bearing;
+    turn = ((turn % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    if (side < 0) turn = (2 * Math.PI - turn) % (2 * Math.PI);
+    if (turn < 1e-6) continue;
+    if (turn < bestTurn) { best = other; bestTurn = turn; }
+  }
+  if (!best) return null;
+  const degrees = (bestTurn * 180) / Math.PI;
+  if (degrees < CORNER_MIN_DEG || degrees > CORNER_MAX_DEG) return null;
+  // Two legs of one street forking apart are a divided road, not a crossroads: the wedge
+  // between Columbus's two carriageways is a gore in the roadway, not a pavement corner.
+  if (leg.way.name && best.way.name === leg.way.name) return null;
+  return best;
+}
+
+function cornerFrame(A, B, side) {
+  // The two kerb-side normals: A's toward its pavement on `side`, B's toward the same corner.
+  const s = side;
+  const a = [A.dx, A.dy];
+  const b = [B.dx, B.dy];
+  const na = [-s * a[1], s * a[0]];
+  const nb = [s * b[1], -s * b[0]];
+  const den = a[0] * b[1] - a[1] * b[0];
+  if (Math.abs(den) < 1e-6) return null;
+  const P = [A.x, A.y];
+  // Where the line `offA` out from A's centreline meets the line `offB` out from B's, as the
+  // distances along each leg from the junction.
+  const meet = (offA, offB) => {
+    const rx = nb[0] * offB - na[0] * offA;
+    const ry = nb[1] * offB - na[1] * offA;
+    return [(rx * b[1] - ry * b[0]) / den, (rx * a[1] - ry * a[0]) / den];
+  };
+  const alongA = (t, off) => [P[0] + a[0] * t + na[0] * off, P[1] + a[1] * t + na[1] * off];
+  const alongB = (u, off) => [P[0] + b[0] * u + nb[0] * off, P[1] + b[1] * u + nb[1] * off];
+  // Where A's cut line (across A at `cutA`) meets B's, as the offsets out from each centreline.
+  const meetCuts = (cutA, cutB) => {
+    const r2x = b[0] * cutB - a[0] * cutA;
+    const r2y = b[1] * cutB - a[1] * cutA;
+    const d2 = na[0] * nb[1] - na[1] * nb[0];
+    if (Math.abs(d2) < 1e-6) return null;
+    return [(r2x * nb[1] - r2y * nb[0]) / d2, (r2x * na[1] - r2y * na[0]) / d2];
+  };
+  return { a, b, na, nb, P, meet, alongA, alongB, meetCuts };
+}
+
+function cornerCutFor(A, side) {
+  // How far along A its pavement on `side` is cut back at this junction: to where its outer
+  // edge meets the outer edge of the next pavement round the corner. Capped as the flat
+  // pull-back was, so a short way between two junctions keeps some pavement.
+  const B = cornerNeighbour(A, side);
+  if (!B) return null;
+  const frame = cornerFrame(A, B, side);
+  if (!frame) return null;
+  const [tK, uK] = frame.meet(A.inner, B.inner);
+  const [tO, uO] = frame.meet(A.inner + A.walk, B.inner + B.walk);
+  // The kerb lines must meet in front of the junction on both legs, and the outer edges
+  // further out than the kerbs. Where they do not -- a wide street meeting a narrow one at an
+  // obtuse angle -- there is no corner square, and the flat pull-back stands.
+  if (!(tK > 0 && uK > 0 && tO > tK && uO > uK)) return null;
+  // The cut is not capped the way the flat pull-back was. The corner piece covers the ground
+  // between the kerb corner and the cut, so nothing is lost to a long one -- and at an acute
+  // corner on a wide street it is long: seventeen metres along Broadway where Columbus comes
+  // in at fifty degrees. Only a way too short for the corners at both its ends is scaled, in
+  // reconcilePavementCorners.
+  return { B, frame, cut: tO, tK, uK, tO, uO, valid: false };
+}
+
+function reconcilePavementCorners() {
+  // Two passes over the decided cuts. First, a way whose two corners between them want more
+  // than its length gives both up proportionally, so they meet rather than overlap. Then each corner is checked as the piece that will be laid -- its kerb
+  // meeting before its cut, the two cut lines meeting outside both kerbs -- and only a corner
+  // that passes makes a cut. A cut without the piece that fills up to it is the hole.
+  // The whole of it: a nine metre stub of Broadway between Columbus and the next street is
+  // two corners and nothing else, and that is what it is drawn as.
+  const SHARE = 1.0;
+  for (const leg of cornerLegs) {
+    if (leg.end !== 0 || !leg.far) continue;
+    for (const side of [1, -1]) {
+      const near = pavementCornerCuts.get(`${leg.id}:${side}`);
+      const far = pavementCornerCuts.get(`${leg.far.id}:${-side}`);
+      const room = leg.length * SHARE;
+      const want = (near ? near.cut : 0) + (far ? far.cut : 0);
+      if (want <= room) continue;
+      // Each corner keeps at least its kerb corner, and what room is left beyond the two kerb
+      // corners is shared in proportion to how much each wanted past its own.
+      const floorOf = (c) => (c ? c.tK + KERB_LIP_M + 0.25 : 0);
+      const floors = floorOf(near) + floorOf(far);
+      const beyond = (c) => (c ? Math.max(0, c.tO - floorOf(c)) : 0);
+      const wanted = beyond(near) + beyond(far);
+      const spare = Math.max(0, room - floors);
+      const factor = wanted > 0 ? Math.min(1, spare / wanted) : 0;
+      if (near) near.cut = floorOf(near) + beyond(near) * factor;
+      if (far) far.cut = floorOf(far) + beyond(far) * factor;
+    }
+  }
+  const lip = KERB_LIP_M;
+  for (const leg of cornerLegs) {
+    for (const side of [1, -1]) {
+      const corner = pavementCornerCuts.get(`${leg.id}:${side}`);
+      if (!corner) continue;
+      const other = pavementCornerCuts.get(`${corner.B.id}:${-side}`);
+      if (!other || other.B !== leg) continue;
+      const [tKl, uKl] = corner.frame.meet(leg.inner + lip, corner.B.inner + lip);
+      const cuts = corner.frame.meetCuts(corner.cut, other.cut);
+      if (!cuts) continue;
+      const [vC, wC] = cuts;
+      if (!(corner.cut > tKl + 0.05 && other.cut > uKl + 0.05)) continue;
+      if (!(vC > leg.inner + lip + 0.2 && wC > corner.B.inner + lip + 0.2)) continue;
+      corner.valid = true;
+    }
+  }
+  let valid = 0;
+  for (const corner of pavementCornerCuts.values()) if (corner.valid) valid += 1;
+  return valid;
+}
+
+function indexPavementCorners(ways) {
+  cornerLegGrid.clear();
+  cornerLegs.length = 0;
+  pavementCornerCuts.clear();
+  pavementCornerLaid.clear();
+  for (const way of ways) {
+    if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
+    // A driveway has no pavement of its own; the street's runs across its mouth as an apron.
+    if (isUnmarkedService(way)) continue;
+    const n = way.points.length;
+    const inner = renderedRoadWidth(way) / 2;
+    const walk = renderedWalkWidth(way, 4.0);
+    const length = wayLength(way.points);
+    for (const [end, next] of [[0, 1], [n - 1, n - 2]]) {
+      const [ex, ey] = xy(way.points[end][0], way.points[end][1]);
+      const [nx2, ny2] = xy(way.points[next][0], way.points[next][1]);
+      const span = Math.hypot(nx2 - ex, ny2 - ey);
+      if (span < 1e-6) continue;
+      const leg = {
+        id: cornerLegs.length, x: ex, y: ey, dx: (nx2 - ex) / span, dy: (ny2 - ey) / span,
+        bearing: Math.atan2(ny2 - ey, nx2 - ex), inner, walk, length, way, end, far: null,
+      };
+      // The leg at the other end of the same way, so a short way can share itself out.
+      if (end !== 0) {
+        const start = cornerLegs[cornerLegs.length - 1];
+        if (start && start.way === way && start.end === 0) { start.far = leg; leg.far = start; }
+      }
+      cornerLegs.push(leg);
+      const key = `${Math.floor(ex / CORNER_CELL_M)}:${Math.floor(ey / CORNER_CELL_M)}`;
+      let bucket = cornerLegGrid.get(key);
+      if (!bucket) cornerLegGrid.set(key, bucket = []);
+      bucket.push(leg);
+    }
+  }
+  for (const leg of cornerLegs) {
+    for (const side of [1, -1]) {
+      const corner = cornerCutFor(leg, side);
+      if (corner) pavementCornerCuts.set(`${leg.id}:${side}`, corner);
+    }
+  }
+  return reconcilePavementCorners();
+}
+
+function cornerQuad(leg, side) {
+  // The corner piece for the pavement on this side of this leg, inset by the kerb tile: the
+  // kerb-line meeting point, this pavement's cut on the kerb line, the meeting of the two cut
+  // lines, and the other pavement's cut on its kerb line. Plus the kerb tile's own centreline
+  // round the curb return. All in metres east and north of the origin.
+  const corner = pavementCornerCuts.get(`${leg.id}:${side}`);
+  if (!corner || !corner.valid) return null;
+  const { B, frame } = corner;
+  const other = pavementCornerCuts.get(`${B.id}:${-side}`);
+  if (!other || !other.valid || other.B !== leg) return null;
+  const cutA = corner.cut;
+  const cutB = other.cut;
+  const lip = KERB_LIP_M;
+  const [tK] = frame.meet(leg.inner + lip, B.inner + lip);
+  const cuts = frame.meetCuts(cutA, cutB);
+  if (!cuts) return null;
+  const [vC] = cuts;
+  const K = frame.alongA(tK, leg.inner + lip);
+  const A1 = frame.alongA(cutA, leg.inner + lip);
+  const C = frame.alongA(cutA, vC);
+  const B1 = frame.alongB(cutB, B.inner + lip);
+  const [tk2] = frame.meet(leg.inner + lip / 2, B.inner + lip / 2);
+  const kerb = [frame.alongA(cutA, leg.inner + lip / 2), frame.alongA(tk2, leg.inner + lip / 2),
+                frame.alongB(cutB, B.inner + lip / 2)];
+  return { K, A1, C, B1, kerb, frame, cutA, vC };
+}
+
+function addPavementCorners() {
+  // Every corner between two pavements that were both laid up to their cuts.
+  let laid = 0;
+  const seen = new Set();
+  // Why a cut got no piece, kept for the audit: each is a place to look.
+  const skipped = { unlaid: 0, shape: 0, onRoad: 0 };
+  addPavementCorners.skipped = skipped;
+  for (const leg of cornerLegs) {
+    for (const side of [1, -1]) {
+      const corner = pavementCornerCuts.get(`${leg.id}:${side}`);
+      if (!corner || !corner.valid) continue;
+      const pairKey = side > 0 ? `${leg.id}:${corner.B.id}` : `${corner.B.id}:${leg.id}`;
+      if (seen.has(pairKey)) continue;
+      seen.add(pairKey);
+      // The corner is a piece of ground in its own right: it is laid whenever its shape is
+      // sound and it is off the road, whether or not the pavement beside it survived its
+      // own fit -- a corner with a blocked pavement behind it is still a corner. The side
+      // that was drawn lends its height, thickness and colour; if neither was, there is no
+      // pavement here to be the corner of.
+      // Neither side had a derived pavement -- OpenStreetMap maps both as footways of their
+      // own, and the derived one stands down -- so the corner is laid as those are: the
+      // fallback kerb, a centimetre and a half under the mapped footway, in the same white.
+      const mine = pavementCornerLaid.get(`${leg.id}:${side}`)
+        || pavementCornerLaid.get(`${corner.B.id}:${-side}`)
+        || { width: 0, y: ROAD_TOP_M + KERB_FALLBACK / 2 - 0.015, thickness: KERB_FALLBACK,
+             color: 0xffffff, opacity: 1.0 };
+      if (!mine) { skipped.unlaid += 1; continue; }
+      const quad = cornerQuad(leg, side);
+      if (!quad) { skipped.shape += 1; continue; }
+      const { K, A1, C, B1, kerb, frame, cutA, vC } = quad;
+      // On the road after all -- a slip lane, a third carriageway through the wedge, a
+      // junction box drawn wider than its legs. Asked of the middle and of each corner of the
+      // piece pulled a little way in, since a piece can be clear at its centre and still have
+      // a carriageway across one end of it.
+      const mid = [(K[0] + A1[0] + C[0] + B1[0]) / 4, (K[1] + A1[1] + C[1] + B1[1]) / 4];
+      const samples = [mid];
+      for (const q of [K, A1, C, B1]) {
+        samples.push([q[0] + (mid[0] - q[0]) * 0.2, q[1] + (mid[1] - q[1]) * 0.2]);
+      }
+      if (samples.some(([sx, sy]) => insideCarriageway(sx, -sy, 0.15))) {
+        skipped.onRoad += 1;
+        continue;
+      }
+      const y = mine.y;
+      const thickness = mine.thickness;
+      const top = y + thickness / 2;
+      // The slab, tiled in the pavement's own frame so its flags continue round the corner:
+      // u runs along the leg from the cut, v across from the outer edge, as the ribbon's do.
+      const uOf = (q) => ((q[0] - frame.P[0]) * frame.a[0] + (q[1] - frame.P[1]) * frame.a[1] - cutA) / SLAB_M;
+      const vOf = (q) => (vC - ((q[0] - frame.P[0]) * frame.na[0] + (q[1] - frame.P[1]) * frame.na[1])) / SLAB_M;
+      const ring = side > 0 ? [K, A1, C, B1] : [K, B1, C, A1];
+      const position = [];
+      const uv = [];
+      for (const q of ring) {
+        position.push(q[0], top, -q[1]);
+        uv.push(uOf(q), vOf(q));
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+      geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+      geometry.setIndex([0, 2, 1, 0, 3, 2]);
+      geometry.computeVertexNormals();
+      const mesh = new THREE.Mesh(geometry, surfaceMaterial("walk", mine.color, mine.opacity));
+      mesh.userData.surface = "walk";
+      addMerged(`walk:walk:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`, mesh, "walk");
+      // Its kerb, round the curb return, the same tile the pavements' kerbs are.
+      addPavementRibbon(kerb.map((q) => lonLatFromXZ(q[0], -q[1])), KERB_LIP_M,
+                        mine.color, mine.opacity, y, thickness, "kerb");
+      stampPaved([lonLatFromXZ(K[0], -K[1]), lonLatFromXZ(C[0], -C[1])],
+                 Math.hypot(A1[0] - K[0], A1[1] - K[1]), top);
+      laid += 1;
+    }
+  }
+  return laid;
 }
 
 function laneMarkingProfile(way, road = renderedRoadWidth(way)) {
@@ -3454,9 +3847,28 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
   // trimming both ends of every way put a fifteen metre hole in the middle of a block at every
   // invisible split. Where the street carries on, so does the pavement.
   const back = Math.min(Math.max(1.2, inner + widths[0] * 0.7), wanted * 0.32);
-  const [cutStart, cutEnd] = kerbsideTrims(renderPoints, back);
+  const [cutStart, cutEnd] = kerbsideTrims(renderPoints, back, side);
+  // What reaches each cut, for the corner piece to meet: the pavement's height, thickness and
+  // colour, and whether anything was laid at the cut. The far end runs backwards, so the
+  // pavement on this way's left is on the right of the leg leaving that junction.
+  const n = renderPoints.length;
+  const recordEnd = (cut, end, next, awaySide, laidWidth) => {
+    if (!(cut > 0)) return;
+    const [ex, ey] = xy(renderPoints[end][0], renderPoints[end][1]);
+    const [nx2, ny2] = xy(renderPoints[next][0], renderPoints[next][1]);
+    const leg = cornerLegAt(ex, ey, nx2 - ex, ny2 - ey);
+    if (leg) {
+      pavementCornerLaid.set(`${leg.id}:${awaySide}`,
+                             { width: laidWidth, y, thickness, color, opacity });
+    }
+  };
   const spine = densifyWay(trimWayEnds(renderPoints, cutStart, cutEnd), 2.0);
-  if (spine.length < 2) return 0;
+  if (spine.length < 2) {
+    // A way short enough that its two corners are the whole of its pavement.
+    recordEnd(cutStart, 0, 1, side, widths[0]);
+    recordEnd(cutEnd, n - 1, n - 2, -side, widths[0]);
+    return 0;
+  }
 
   const fits = widths.map(() => []);
   for (let i = 0; i < spine.length; i += 1) {
@@ -3469,10 +3881,11 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
     const span = Math.hypot(dx, dz) || 1;
     const nx = -dz / span;
     const nz = dx / span;
+    const blocked = kerbsideBlockedAt(before, spine[i], after, side, inner);
     for (let w = 0; w < widths.length; w += 1) {
       const centre = offsetWay([before, spine[i], after], side * (inner + widths[w] / 2))[1];
       const [cx, cy] = xy(centre[0], centre[1]);
-      fits[w].push(walkFitsAt(cx, -cy, nx, nz, widths[w]));
+      fits[w].push(!blocked && walkFitsAt(cx, -cy, nx, nz, widths[w]));
     }
   }
 
@@ -3497,6 +3910,10 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
   if (pick < 0 || bestCoverage <= 0) return 0;
   const chosen = fits[pick].map((ok) => ok ? pick : -1);
 
+  recordEnd(cutStart, 0, 1, side, chosen[0] >= 0 ? widths[chosen[0]] : 0);
+  recordEnd(cutEnd, n - 1, n - 2, -side,
+            chosen[chosen.length - 1] >= 0 ? widths[chosen[chosen.length - 1]] : 0);
+
   let laid = 0;
   const emit = (from, to) => {
     const pick = chosen[from];
@@ -3506,9 +3923,18 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
     const stretch = spine.slice(from, Math.min(to + 2, spine.length));
     if (stretch.length < 2) return;
     const width = widths[pick];
-    laid += addPavementRibbon(offsetWay(stretch, side * (inner + width / 2)), width,
-                              color, opacity, y, thickness,
-                              width <= NARROW_WALK_M ? "walk_narrow" : "walk");
+    // The kerb first: four inches of the top and the whole face, as its own tile along the
+    // street edge. It is laid with the pavement rather than over it -- the same concrete, the
+    // same height, the same merge -- and it is the thing the curb policy paints. Four inches is
+    // the default where nothing was measured; SFMTA paints the face and the top edge of the kerb.
+    addPavementRibbon(offsetWay(stretch, side * (inner + KERB_LIP_M / 2)), KERB_LIP_M,
+                      color, opacity, y, thickness, "kerb");
+    const inset = width - KERB_LIP_M;
+    if (inset > 0.2) {
+      laid += addPavementRibbon(offsetWay(stretch, side * (inner + KERB_LIP_M + inset / 2)), inset,
+                                color, opacity, y, thickness,
+                                inset <= NARROW_WALK_M ? "walk_narrow" : "walk");
+    }
   };
   let start = 0;
   for (let i = 1; i < chosen.length; i += 1) {
@@ -3522,22 +3948,89 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
 }
 
 function addPropertyLinePavementUnderlay(renderPoints, side, inner, walk, color, opacity) {
+  // The ground between the kerb and the property line, at whatever width will actually fit.
+  //
+  // The sidewalk proper is laid at one width for the whole side, because changing width
+  // mid-block reads as two slabs with a mistake between them. That leaves gaps wherever the
+  // chosen width does not fit -- a neighbouring carriageway close in, a corner, a pinch -- and
+  // this is what fills them. It used to be laid at a fixed 8.6 m, which is wider than any
+  // sidewalk in the corridor, so it was clipped by the carriageway guard in all the same places
+  // the sidewalk was and then some: 720 kerb stations with room and nothing said against them
+  // still came out bare. A gap-filler has to be narrower than the thing it is filling for, not
+  // wider.
+  //
+  // Width may vary here in a way it may not above, because this is flat neutral ground under the
+  // sidewalk rather than the sidewalk itself -- a step in it is not a step in a kerb.
   const wanted = wayLength(renderPoints);
   if (!(wanted > 0)) return 0;
-  const width = Math.max(PROPERTY_LINE_PAVEMENT_WIDTH_M, walk);
+  const widest = Math.max(PROPERTY_LINE_PAVEMENT_WIDTH_M, walk);
+  const ladder = [];
+  for (let w = widest; w >= UNDERLAY_MIN_WIDTH_M; w *= 0.72) ladder.push(w);
+  ladder.push(UNDERLAY_MIN_WIDTH_M);
   const back = Math.min(Math.max(1.6, inner + 2.4), wanted * 0.32);
   const [cutStart, cutEnd] = kerbsideTrims(renderPoints, back);
   const spine = densifyWay(trimWayEnds(renderPoints, cutStart, cutEnd), 2.0);
   if (spine.length < 2) return 0;
-  let laid = 0;
-  const centre = offsetWay(spine, side * (inner + width / 2));
-  for (const run of pavementRunsOutsideCarriageway(centre, width)) {
-    addMerged("walk:property-underlay",
-              ribbon(run, width, color, opacity, PROPERTY_LINE_PAVEMENT_Y,
-                     PROPERTY_LINE_PAVEMENT_THICKNESS_M, "walk_underlay"),
-              "walk_underlay");
-    laid += wayLength(run);
+
+  // The widest that fits at each station.
+  const chosen = [];
+  for (let i = 0; i < spine.length; i += 1) {
+    const before = spine[Math.max(0, i - 1)];
+    const after = spine[Math.min(spine.length - 1, i + 1)];
+    const [bx, by] = xy(before[0], before[1]);
+    const [ax, ay] = xy(after[0], after[1]);
+    const dx = ax - bx;
+    const dz = by - ay;
+    const run = Math.hypot(dx, dz) || 1;
+    const nx = -dz / run;
+    const nz = dx / run;
+    let pick = -1;
+    if (!kerbsideBlockedAt(before, spine[i], after, side, inner)) {
+      for (let w = 0; w < ladder.length; w += 1) {
+        const centre = offsetWay([before, spine[i], after], side * (inner + ladder[w] / 2))[1];
+        const [cx, cy] = xy(centre[0], centre[1]);
+        if (walkFitsAt(cx, -cy, nx, nz, ladder[w])) { pick = w; break; }
+      }
+    }
+    chosen.push(pick);
   }
+  // Hold a width for a few metres so the underlay is not rebuilt every two.
+  const station = [0];
+  for (let i = 1; i < spine.length; i += 1) {
+    const [ax, ay] = xy(spine[i - 1][0], spine[i - 1][1]);
+    const [bx, by] = xy(spine[i][0], spine[i][1]);
+    station.push(station[i - 1] + Math.hypot(bx - ax, by - ay));
+  }
+  for (let i = 1; i < chosen.length; i += 1) {
+    if (chosen[i] === chosen[i - 1] || chosen[i] < 0 || chosen[i - 1] < 0) continue;
+    let j = i;
+    while (j < chosen.length && chosen[j] === chosen[i]) j += 1;
+    if (station[Math.min(j, chosen.length - 1)] - station[i] < UNDERLAY_RUN_M) {
+      for (let c = i; c < j; c += 1) chosen[c] = chosen[i - 1];
+    }
+  }
+
+  let laid = 0;
+  const emit = (from, to) => {
+    const pick = chosen[from];
+    if (pick < 0 || to <= from) return;
+    const stretch = spine.slice(from, Math.min(to + 2, spine.length));
+    if (stretch.length < 2) return;
+    const width = ladder[pick];
+    for (const run of pavementRunsOutsideCarriageway(
+           offsetWay(stretch, side * (inner + width / 2)), width)) {
+      addMerged("walk:property-underlay",
+                ribbon(run, width, color, opacity, PROPERTY_LINE_PAVEMENT_Y,
+                       PROPERTY_LINE_PAVEMENT_THICKNESS_M, "walk_underlay"),
+                "walk_underlay");
+      laid += wayLength(run);
+    }
+  };
+  let start = 0;
+  for (let i = 1; i < chosen.length; i += 1) {
+    if (chosen[i] !== chosen[start]) { emit(start, i - 1); start = i; }
+  }
+  emit(start, chosen.length - 1);
   return laid;
 }
 
@@ -3667,8 +4160,8 @@ function tactileWarningTexture() {
     ctx.fillStyle = shade < 0.55 ? "rgba(95,75,17,0.16)" : "rgba(255,238,128,0.15)";
     ctx.fillRect(random(i * 7) * size, random(i * 11) * size, 1.2, 1.2);
   }
-  const pitch = 24;
-  const radius = 6.2;
+  const pitch = 32;                                          // 50 mm centres: ADA's 1.6-2.4 in
+  const radius = 5.6;
   for (let y = 12; y < size; y += pitch) {
     for (let x = 12; x < size; x += pitch) {
       const dome = ctx.createRadialGradient(x - 2.0, y - 2.4, 1.0, x, y, radius + 3.0);
@@ -3700,7 +4193,11 @@ function tactileWarningTexture() {
 }
 
 const TACTILE_WARNING = tactileWarningTexture();
-const TACTILE_PAD_DEPTH_M = 0.72;
+const TACTILE_PAD_DEPTH_M = 0.61;   // 24 in, the ADA detectable-warning depth
+//: The ramp the pad sits on: from the kerb back into the footway, with the flared sides San
+//: Francisco pours. The pad is the first 24 in of it at the street; the rest is smooth concrete.
+const CURB_RAMP_DEPTH_M = 1.55;
+const CURB_RAMP_FLARE_M = 0.45;
 const TACTILE_PAD_SETBACK_M = 0.18;
 const TACTILE_PAD_MIN_W_M = 1.35;
 const TACTILE_PAD_MAX_W_M = 3.20;
@@ -3829,9 +4326,66 @@ function addCrossingAsphaltBackstop(points, crossingWidth, roadTop) {
   return true;
 }
 
+let CURB_RAMP_TEXTURE = null;
+function curbRampTexture() {
+  // Smooth-floated concrete, paler than the broom-finished footway round it: a ramp is poured
+  // separately and later, and reads as its own slab.
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#8c8e88";
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < size * size * 0.3; i += 1) {
+    ctx.fillStyle = random(i * 7) < 0.5 ? "rgba(0,0,0,0.10)" : "rgba(255,255,255,0.07)";
+    ctx.fillRect(random(i * 3) * size, random(i * 5) * size, 1, 1);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 function addTactileWarningPad(endpoint, intoCrossing, crossingWidth, y) {
   const pad = tactilePadCorners(endpoint, intoCrossing, crossingWidth);
   if (!pad) return false;
+  // The ramp under the pad: a full rectangle back from the kerb with flared sides, so the pad
+  // is the front edge of a ramp rather than a yellow stripe on its own. Corners 0-1 are the
+  // street edge, 2-3 the footway edge of the pad; the ramp carries on from 2-3.
+  {
+    const [c0, c1, c2, c3] = pad.corners;
+    const outX = (c3[0] - c0[0]) / pad.depth;
+    const outZ = (c3[1] - c0[1]) / pad.depth;
+    const acrossX = (c1[0] - c0[0]) / pad.width;
+    const acrossZ = (c1[1] - c0[1]) / pad.width;
+    const back = CURB_RAMP_DEPTH_M - pad.depth;
+    const flare = CURB_RAMP_FLARE_M;
+    const r = [
+      [c3[0] - acrossX * flare, c3[1] - acrossZ * flare],
+      [c2[0] + acrossX * flare, c2[1] + acrossZ * flare],
+      [c2[0] + acrossX * flare + outX * back, c2[1] + acrossZ * flare + outZ * back],
+      [c3[0] - acrossX * flare + outX * back, c3[1] - acrossZ * flare + outZ * back],
+    ];
+    if (!r.some(([x, z]) => insideCarriageway(x, z, -0.05))) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+        r[0][0], y - 0.002, r[0][1], r[1][0], y - 0.002, r[1][1],
+        r[2][0], y - 0.002, r[2][1], r[3][0], y - 0.002, r[3][1],
+      ], 3));
+      geometry.setAttribute("uv", new THREE.Float32BufferAttribute([
+        0, 0, (pad.width + 2 * flare) / 1.2, 0, (pad.width + 2 * flare) / 1.2, back / 1.2, 0, back / 1.2,
+      ], 2));
+      geometry.setIndex([0, 1, 2, 0, 2, 3]);
+      geometry.computeVertexNormals();
+      if (!CURB_RAMP_TEXTURE) CURB_RAMP_TEXTURE = curbRampTexture();
+      const ramp = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        map: CURB_RAMP_TEXTURE, color: 0xffffff, roughness: 0.9, metalness: 0.0,
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -9, polygonOffsetUnits: -18,
+      }));
+      ramp.userData.surface = "curb_ramp";
+      addMerged("crossing:ramp", ramp, "curb_ramp");
+    }
+  }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute([
     pad.corners[0][0], y, pad.corners[0][1],
@@ -4083,6 +4637,10 @@ indexBikeLaneEnds(DATA.ways);
 // And which street ends are junctions rather than splits in the tagging, so the pavement is
 // pulled back from the first and carries straight through the second.
 indexStreetEnds(DATA.ways);
+
+// And the corners: where each pavement is cut at a junction, decided from the crossing
+// street's pavement so that the two meet with the corner piece between them.
+indexPavementCorners(DATA.ways);
 
 // The junction boxes themselves, so no paint is carried across one.
 indexIntersections(DATA.intersections);
@@ -5664,9 +6222,19 @@ function buildingMesh(feature) {
   let height = Math.max(3, Math.min(260, feature.height_m || 10.5));
   // A default height on a building whose type has a real one is worse than no default. Only
   // the inferred heights are capped; a measured one is left exactly as recorded.
+  // Only a guessed height is capped by the type. A height somebody measured -- lidar over the
+  // roof, or a mapper's tag -- outranks a type that was itself inferred from a point of interest
+  // inside the building. 601 California Street is a 96 m office tower with a public garage in
+  // its base; the garage made it "parking", and the parking cap made a 96 m tower sixteen
+  // metres tall.
   const cap = ARCHETYPE_MAX_HEIGHT[feature.archetype];
-  if (cap && feature.height_source !== "osm_height" && feature.height_source !== "osm_levels") {
+  if (cap && (feature.height_source === "inferred_default" || !feature.height_source)) {
     height = Math.min(height, cap);
+  }
+  // And a "parking" building that is measured well above any parking structure is not one: it
+  // is a tower with a garage in it, and gets a tower's cladding rather than a car park's.
+  if (feature.archetype === "parking" && height > 24 && feature.height_source !== "inferred_default") {
+    feature.archetype = feature.land_use && /OFFICE/i.test(feature.land_use) ? "office" : "generic";
   }
   if (kind === "outbuilding") {
     // A rear cottage is one storey, or two if it is a big one. The corridor median that was
@@ -5975,6 +6543,330 @@ for (const chunk of FACADES.grid || []) {
 }
 });
 
+
+// ---- walls, tunnels and car parks ----
+//
+// Three things the corridor has that the map did not draw. A wall is not a fence: the fences
+// come from the city's property lines and are wood and chainlink, and the Presidio's walls are
+// coursed stone and brick that hold back a bank. A tunnel is not a dim road: Broadway and
+// Stockton go through Russian Hill and Nob Hill in a bore with a portal at each end. A car park
+// is not a building and not a point: it is a slab of asphalt with bays painted on it.
+
+//: The ground under a point, whichever surface that is. Pavement knows its own top; anything
+//: else is at the base. A wall standing on a footway starts at the footway.
+function groundTopAt(x, z) {
+  const top = pavementTopAt(x, z);
+  return top === undefined ? 0.0 : top;
+}
+
+//: Coursed rubble: irregular blocks in staggered rows, mortar between, the Presidio's kind.
+function stoneWallTexture() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#6e6a62";                                // the mortar
+  ctx.fillRect(0, 0, size, size);
+  const rows = 6;
+  const rowH = size / rows;
+  for (let r = 0; r < rows; r += 1) {
+    let x = -random(r * 17) * 40;
+    while (x < size) {
+      const w = 28 + random(r * 31 + x) * 40;
+      const tone = 150 + random(r * 7 + x * 3) * 50;
+      ctx.fillStyle = `rgb(${tone + 8},${tone},${tone - 10})`;
+      ctx.fillRect(x + 2, r * rowH + 2, w - 4, rowH - 4);
+      // A face that is not flat: a darker lower edge and a lit top edge on each block.
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.fillRect(x + 2, r * rowH + rowH - 6, w - 4, 3);
+      ctx.fillStyle = "rgba(255,255,255,0.14)";
+      ctx.fillRect(x + 2, r * rowH + 2, w - 4, 2);
+      x += w;
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+//: Running bond brick: 215 x 65 mm bricks, half-offset per course.
+function brickWallTexture() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#b9ac98";                                // the mortar
+  ctx.fillRect(0, 0, size, size);
+  const courses = 12;
+  const h = size / courses;
+  const w = size / 4;
+  for (let c = 0; c < courses; c += 1) {
+    const offset = c % 2 ? w / 2 : 0;
+    for (let x = -w; x < size + w; x += w) {
+      const tone = random(c * 13 + x) ;
+      ctx.fillStyle = tone < 0.5 ? "#8d4a3a" : tone < 0.8 ? "#9a5744" : "#7d4033";
+      ctx.fillRect(x + offset + 2, c * h + 2, w - 4, h - 3);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+const WALL_TEXTURES = { stone: null, brick: null };
+function wallMaterialFor(way) {
+  const brick = /brick/i.test(way.material || "");
+  const key = brick ? "brick" : "stone";
+  if (!WALL_TEXTURES[key]) WALL_TEXTURES[key] = brick ? brickWallTexture() : stoneWallTexture();
+  return new THREE.MeshStandardMaterial({
+    map: WALL_TEXTURES[key], color: 0xffffff, roughness: 0.94, metalness: 0.0,
+    side: THREE.DoubleSide,
+  });
+}
+
+//: How thick a wall is drawn. A retaining wall in the Presidio is a good deal thicker than
+//: this at its base, but the map sees only its face.
+const WALL_THICKNESS_M = 0.36;
+
+function addWall(way) {
+  // A wall is a vertical strip that follows the ground, with a face on each side and a coping
+  // along the top. Each vertex takes the ground under it, so a wall that runs from a footway
+  // onto grass steps with the surface rather than floating over one or sinking into the other.
+  const pts = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  if (pts.length < 2) return null;
+  const h = way.height_m || 1.2;
+  const positions = [];
+  const uvs = [];
+  const index = [];
+  let along = 0;
+  const push = (x, y, z, u, v) => { positions.push(x, y, z); uvs.push(u, v); };
+  for (let i = 1; i < pts.length; i += 1) {
+    const [ax, az] = pts[i - 1];
+    const [bx, bz] = pts[i];
+    const span = Math.hypot(bx - ax, bz - az);
+    if (span < 0.05) continue;
+    const nx = -(bz - az) / span * WALL_THICKNESS_M / 2;
+    const nz = (bx - ax) / span * WALL_THICKNESS_M / 2;
+    const ga = groundTopAt(ax, az);
+    const gb = groundTopAt(bx, bz);
+    const u0 = along / 1.0;
+    const u1 = (along + span) / 1.0;
+    // Two faces and the top, as quads; the metres along the wall are the texture's u.
+    for (const sgn of [1, -1]) {
+      const base = positions.length / 3;
+      push(ax + nx * sgn, ga, az + nz * sgn, u0, 0);
+      push(bx + nx * sgn, gb, bz + nz * sgn, u1, 0);
+      push(bx + nx * sgn, gb + h, bz + nz * sgn, u1, h);
+      push(ax + nx * sgn, ga + h, az + nz * sgn, u0, h);
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const base = positions.length / 3;
+    push(ax + nx, ga + h, az + nz, u0, 0);
+    push(bx + nx, gb + h, bz + nz, u1, 0);
+    push(bx - nx, gb + h, bz - nz, u1, 0.4);
+    push(ax - nx, ga + h, az - nz, u0, 0.4);
+    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    along += span;
+  }
+  if (!index.length) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, wallMaterialFor(way));
+  mesh.userData.surface = "wall";
+  return mesh;
+}
+
+//: A tunnel bore: an arch over the carriageway, and a portal face at each end.
+const TUNNEL_CROWN_M = 6.4;         // road surface to the crown of the arch
+const TUNNEL_WALL_M = 4.2;          // the vertical wall before the arch springs
+const TUNNEL_SHELL_M = 0.6;         // the lining's thickness
+const TUNNEL_PORTAL_DEPTH_M = 1.4;  // the headwall at each mouth
+const TUNNEL_PORTAL_MARGIN_M = 4.0; // how far the headwall reaches past the bore each side
+
+function tunnelArchShape(halfWidth, outer) {
+  // The bore cross-section in the plane across the road: vertical sides up to TUNNEL_WALL_M,
+  // then a semicircle-ish arch to the crown. `outer` adds the lining thickness.
+  const w = halfWidth + (outer ? TUNNEL_SHELL_M : 0);
+  const wall = TUNNEL_WALL_M + (outer ? TUNNEL_SHELL_M : 0);
+  const crown = TUNNEL_CROWN_M + (outer ? TUNNEL_SHELL_M : 0);
+  const shape = new THREE.Shape();
+  shape.moveTo(-w, 0);
+  shape.lineTo(w, 0);
+  shape.lineTo(w, wall);
+  const rise = crown - wall;
+  const steps = 12;
+  for (let i = 1; i <= steps; i += 1) {
+    const t = Math.PI - (i / steps) * Math.PI;          // from the right springing to the left
+    shape.lineTo(Math.cos(t) * -w, wall + Math.sin(t) * rise);
+  }
+  shape.lineTo(-w, 0);
+  return shape;
+}
+
+function addTunnel(way, renderPoints, roadWidth, roadTop) {
+  // The bore is the outer arch minus the inner arch, swept along the carriageway. What the
+  // camera sees from the street is the lining's inner face overhead and the headwall at the
+  // mouth; from above it sees the shell. Both are the real shape of the thing rather than a road
+  // drawn a little darker.
+  const pts = renderPoints.map((p) => { const [x, y] = xy(p[0], p[1]); return new THREE.Vector3(x, roadTop, -y); });
+  if (pts.length < 2) return null;
+  const half = roadWidth / 2;
+  const group = new THREE.Group();
+  const path = new THREE.CatmullRomCurve3(pts, false, "centripetal");
+  const outer = tunnelArchShape(half, true);
+  outer.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
+  const shell = new THREE.ExtrudeGeometry(outer, {
+    steps: Math.max(4, Math.round(path.getLength() / 4)), bevelEnabled: false, extrudePath: path,
+  });
+  const lining = new THREE.MeshStandardMaterial({
+    color: 0x5f6266, roughness: 0.92, metalness: 0.02, side: THREE.DoubleSide,
+  });
+  const bore = new THREE.Mesh(shell, lining);
+  bore.userData.surface = "tunnel";
+  group.add(bore);
+  // The headwalls: a slab across each mouth with the bore's own opening cut through it.
+  for (const end of [0, pts.length - 1]) {
+    const here = pts[end];
+    const next = pts[end === 0 ? 1 : pts.length - 2];
+    const yaw = Math.atan2(next.x - here.x, next.z - here.z);
+    const face = new THREE.Shape();
+    const W = half + TUNNEL_PORTAL_MARGIN_M;
+    const H = TUNNEL_CROWN_M + TUNNEL_SHELL_M + 1.2;
+    face.moveTo(-W, 0); face.lineTo(W, 0); face.lineTo(W, H); face.lineTo(-W, H); face.lineTo(-W, 0);
+    face.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
+    const slab = new THREE.ExtrudeGeometry(face, { depth: TUNNEL_PORTAL_DEPTH_M, bevelEnabled: false });
+    const portal = new THREE.Mesh(slab, new THREE.MeshStandardMaterial({
+      map: WALL_TEXTURES.stone || (WALL_TEXTURES.stone = stoneWallTexture()),
+      color: 0xd8d4cc, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide,
+    }));
+    portal.position.set(here.x, roadTop, here.z);
+    portal.rotation.y = yaw;
+    portal.userData.surface = "tunnel_portal";
+    group.add(portal);
+  }
+  return group;
+}
+
+//: A surface car park: asphalt, and bays 2.5 m by 5.0 m painted in rows along its long axis.
+//: Its two heights sit in the ground stack (see GROUND_STACK) and are declared here because the
+//: street loop that draws car parks runs before that block does.
+const PARKING_Y = 0.0275;      // a surface car park's asphalt, between the frontages and the courts
+const PARKING_LINE_Y = 0.046;  // the bays painted on it
+const PARKING_BAY_W_M = 2.5;
+const PARKING_BAY_L_M = 5.0;
+const PARKING_AISLE_M = 6.0;
+
+function parkingAsphaltTexture() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#4a4c4e";                                 // paler than the roadway: it sees less traffic
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < size * size * 0.22; i += 1) {
+    ctx.fillStyle = random(i * 19) < 0.5 ? "rgba(0,0,0,0.16)" : "rgba(255,255,255,0.08)";
+    ctx.fillRect(random(i * 3) * size, random(i * 7) * size, 1, 1);
+  }
+  // Patching and oil: a car park is where cars sit.
+  for (let i = 0; i < 24; i += 1) {
+    ctx.fillStyle = "rgba(20,20,22,0.18)";
+    ctx.beginPath();
+    ctx.ellipse(random(i * 11) * size, random(i * 13) * size, 4 + random(i * 17) * 10, 3 + random(i * 23) * 6, random(i) * 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(1 / 6, 1 / 6);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+let PARKING_ASPHALT = null;
+
+function addParkingLot(way) {
+  const ring = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  if (ring.length < 4) return null;
+  const group = new THREE.Group();
+  // The slab.
+  const shape = new THREE.Shape(ring.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const slab = new THREE.ShapeGeometry(shape);
+  slab.rotateX(-Math.PI / 2);
+  // Planar UVs in metres, so the texture repeat is the texture's own scale.
+  const uv = slab.getAttribute("uv");
+  const pos = slab.getAttribute("position");
+  for (let i = 0; i < uv.count; i += 1) uv.setXY(i, pos.getX(i), pos.getZ(i));
+  slab.translate(0, PARKING_Y, 0);
+  if (!PARKING_ASPHALT) PARKING_ASPHALT = parkingAsphaltTexture();
+  const ground = new THREE.Mesh(slab, new THREE.MeshStandardMaterial({
+    map: PARKING_ASPHALT, color: 0xffffff, roughness: 0.96, metalness: 0.0,
+  }));
+  ground.userData.surface = "parking_lot";
+  group.add(ground);
+
+  // The bays: rows along the lot's long axis, from its minimum-area rectangle. Each row is a
+  // line of stalls PARKING_BAY_L_M deep with an aisle between facing rows, which is how a lot is
+  // laid out, and the stalls stop where the polygon does.
+  const rect = roofRectangle(way);
+  if (!rect) return group;
+  // roofRectangle's "width" is the long side and "depth" the short one, at "angle".
+  const { x: cx, z: cz, angle, width: length, depth: width } = rect;
+  const ux = Math.cos(angle), uz = Math.sin(angle);          // along the long axis
+  const vx = -uz, vz = ux;                                   // across it
+  const inside = (x, z) => {
+    // Even-odd, on the lot's own ring: a stall is only painted where there is lot under it.
+    let hit = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, zi] = ring[i];
+      const [xj, zj] = ring[j];
+      if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) hit = !hit;
+    }
+    return hit;
+  };
+  const stripes = [];
+  const period = PARKING_BAY_L_M * 2 + PARKING_AISLE_M;      // two facing rows and an aisle
+  for (let v = -width / 2 + PARKING_BAY_L_M; v <= width / 2 - PARKING_BAY_L_M; v += period) {
+    // Two rows back to back across v: stalls from v-L to v, and from v to v+L, when there is
+    // room on both; the separating line is shared.
+    for (const [v0, v1] of [[v - PARKING_BAY_L_M, v], [v, v + PARKING_BAY_L_M]]) {
+      if (v0 < -width / 2 || v1 > width / 2) continue;
+      for (let u = -length / 2 + 1.0; u <= length / 2 - 1.0; u += PARKING_BAY_W_M) {
+        const ax = cx + ux * u + vx * v0, az = cz + uz * u + vz * v0;
+        const bx = cx + ux * u + vx * v1, bz = cz + uz * u + vz * v1;
+        if (!inside(ax, az) || !inside(bx, bz)) continue;
+        stripes.push([ax, az, bx, bz]);
+      }
+    }
+  }
+  if (stripes.length) {
+    const positions = [];
+    const index = [];
+    for (const [ax, az, bx, bz] of stripes) {
+      const dx = bx - ax, dz = bz - az;
+      const len = Math.hypot(dx, dz) || 1;
+      const px = -dz / len * MARK_W / 2, pz = dx / len * MARK_W / 2;
+      const base = positions.length / 3;
+      positions.push(ax + px, PARKING_LINE_Y, az + pz, ax - px, PARKING_LINE_Y, az - pz,
+                     bx - px, PARKING_LINE_Y, bz - pz, bx + px, PARKING_LINE_Y, bz + pz);
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    const lines = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+      color: 0xe9ebe6, roughness: 0.8, metalness: 0.0, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
+    }));
+    lines.userData.surface = "parking_bays";
+    group.add(lines);
+  }
+  return group;
+}
+
 const streetNames = new Set();
 let streetLabelCount = 0;
 // Mapped footways first, then everything else.
@@ -6046,6 +6938,16 @@ for (const way of DRAW_ORDER) {
     continue;
   }
   if (way.kind === "poi") continue;
+  if (way.kind === "wall") {
+    const wall = addWall(way);
+    if (wall) addMerged(`wall:${/brick/i.test(way.material || "") ? "brick" : "stone"}`, wall, "wall");
+    continue;
+  }
+  if (way.kind === "parking_lot") {
+    const lot = addParkingLot(way);
+    if (lot) groups.streets.add(lot);
+    continue;
+  }
   if (way.kind === "building") {
     // On the ground, where a footprint is. At 1.8 m it was a plate floating at head height
     // through the middle of every building.
@@ -6137,6 +7039,12 @@ const surfaceKind = isCrossing ? ((way.continental || way.alley_mouth) ? "crossi
   }
 if (!isSidewalk && !isCrossing && !isPath) {
 addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
+  // A road through a hill gets its bore and its portals. `tunnel=yes` is the statement; a way
+  // on a negative layer without it is an underpass, which is the same thing to the camera.
+  if (way.tunnel || (Number.isFinite(way.layer) && way.layer < 0)) {
+    const bore = addTunnel(way, renderPoints, widthMeters, roadTop);
+    if (bore) groups.streets.add(bore);
+  }
 }
   // The footways, laid from the kerb outward on both sides. Drawn a centimetre below the
   // mapped sidewalk ways so that where OpenStreetMap has one the two do not fight, and so
@@ -6167,7 +7075,7 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
   // other way.
   // Lane dividers, from OpenStreetMap's own count. White and broken between lanes running the
   // same way; the yellow is reserved for the line that separates opposing traffic.
-  if (!isSidewalk && !isCrossing && !isPath) {
+  if (!isSidewalk && !isCrossing && !isPath && !isUnmarkedService(way)) {
     const road = widthMeters;
     const [markCutStart, markCutEnd] = laneMarkingTrims(way, renderPoints, road);
     const markingPoints = trimWayEnds(renderPoints, markCutStart, markCutEnd);
@@ -6266,6 +7174,9 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
   }
 }
 
+// The corner pieces, once every pavement that meets at one is down.
+const cornersLaid = addPavementCorners();
+
 // Ground. Everything that is not a road, a footway or a building stands on something -- back
 // yards, light wells, car parks, the middle of a block -- and none of it is mapped. Without a
 // surface under them those became holes onto the background, which reads as black voids
@@ -6306,10 +7217,12 @@ const PARK_Y = 0.022;          // mapped public green
 const FRONT_WALK_Y = 0.025;    // paving between a stoop and the pavement
 const COURT_Y = 0.030;         // asphalt and turf laid inside a park
 const COURT_LINE_Y = 0.042;    // the paint on the courts
+// PARKING_Y and PARKING_LINE_Y are declared with the car-park renderer, which the street loop
+// reaches before this block runs; they are still checked in GROUND_STACK below.
 
 //: No two of these may be equal, and none may reach the carriageway's own top at 0.06.
 const GROUND_STACK = {
-  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y,
+  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y, PARKING_Y, PARKING_LINE_Y,
 };
 {
   const seen = new Map();
@@ -7434,6 +8347,8 @@ function buildCourts(ground) {
   }
 
   buildCourts(ground);
+  // The ground is down; now the things that stand on it.
+  if (groups.furniture.visible) ensureLazyLayer("furniture");
 })();
 
 // Everything collected off the roofs while the buildings were being built, in nine meshes.
@@ -7796,83 +8711,90 @@ function curbZoneColor(record) {
   return colors[record.curb_color] || null;
 }
 
+//: How far from a snapped policy line a kerb vertex may sit and still take its paint. The lip
+//: is four inches wide and the snap lands on its street edge, so this only needs to reach across
+//: the lip and absorb the snap's own error.
+const KERB_PAINT_REACH_M = 0.45;
+
 function addOfficialCurbZoneBands(records) {
-  // Kerb paint, on the kerb.
+  // Kerb paint, painted onto the kerb.
   //
-  // San Francisco paints the top of the kerb and its face, for the length of the zone, and the
-  // colour is the policy: red no stopping, yellow commercial loading, white passenger loading,
-  // green short-term, blue accessible. This drew the published policy line flat on the roadway
-  // wherever that line happened to fall, which is not where this model's kerbs are -- so bands
-  // ended up out in traffic and up on the pavement. Now each one is snapped to the kerb and
-  // painted the way kerb paint is painted: a band over the top and a face down to the road.
-  const buckets = new Map();
-  const materials = new Map();
-  const materialFor = (color) => {
-    if (!materials.has(color)) {
-      materials.set(color, new THREE.MeshStandardMaterial({
-        color, roughness: 0.84, metalness: 0.0, side: THREE.DoubleSide,
-        polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -16,
-      }));
-    }
-    return materials.get(color);
-  };
-  const bucketFor = (colorName, color) => {
-    const key = `${colorName}:${color}`;
-    if (!buckets.has(key)) buckets.set(key, { colorName, color, positions: [], index: [] });
-    return buckets.get(key);
-  };
-  const top = roadSurfaceTop() + 0.004;
-  const face = ROAD_TOP_M + 0.004;
-  let added = 0;
+  // The kerb is a tile of its own, laid with the pavement: four inches of the top and the whole
+  // face. This colours that tile's vertices along each policy line -- red no stopping, yellow
+  // commercial loading, white passenger loading, green short-term, blue accessible -- and the
+  // paint is then in the pavement rather than a separate band floating over it, which is what
+  // it was: a strip drawn where SFMTA had digitised the line, in traffic on one block and up on
+  // the footway the next. Now the line is snapped to the kerb the model drew and the kerb's own
+  // vertices take the colour, so it cannot be anywhere but on the kerb.
+  const kerbs = [];
+  groups.streets.traverse((o) => {
+    if (o.isMesh && o.userData && o.userData.surface === "kerb"
+        && o.geometry.getAttribute("color")) kerbs.push(o);
+  });
+  if (!kerbs.length) return { segments: 0, unplaced: records.length, painted: 0 };
+
+  // Every snapped policy segment, with its colour, in a grid.
+  const CELL = 8;
+  const grid = new Map();
+  let segments = 0;
   let unplaced = 0;
   for (const record of records) {
     const color = curbZoneColor(record);
     if (!color || !Array.isArray(record.lines)) continue;
-    const bucket = bucketFor(record.curb_color, color);
+    const c = new THREE.Color(color);
     const runs = kerbRunsFor(record);
     if (!runs.length) { unplaced += 1; continue; }
     for (const run of runs) {
       for (let i = 1; i < run.length; i += 1) {
         const a = run[i - 1];
         const b = run[i];
-        if (Math.hypot(b.x - a.x, b.z - a.z) < 0.05) continue;
-        // Over the top of the kerb, inward from its edge onto the pavement.
-        let base = bucket.positions.length / 3;
-        bucket.positions.push(
-          a.x, top, a.z,
-          a.x + a.nx * CURB_BAND_W_M, top, a.z + a.nz * CURB_BAND_W_M,
-          b.x + b.nx * CURB_BAND_W_M, top, b.z + b.nz * CURB_BAND_W_M,
-          b.x, top, b.z,
-        );
-        bucket.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        // And down the face of the kerb to the gutter, which is the part you see from a car.
-        base = bucket.positions.length / 3;
-        bucket.positions.push(
-          a.x, face, a.z,
-          a.x, top, a.z,
-          b.x, top, b.z,
-          b.x, face, b.z,
-        );
-        bucket.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        added += 1;
+        const seg = [a.x, a.z, b.x, b.z, c.r, c.g, c.b];
+        const x0 = Math.floor(Math.min(a.x, b.x) / CELL), x1 = Math.floor(Math.max(a.x, b.x) / CELL);
+        const z0 = Math.floor(Math.min(a.z, b.z) / CELL), z1 = Math.floor(Math.max(a.z, b.z) / CELL);
+        for (let ix = x0; ix <= x1; ix += 1) {
+          for (let iz = z0; iz <= z1; iz += 1) {
+            const key = `${ix}:${iz}`;
+            let bucket = grid.get(key);
+            if (!bucket) grid.set(key, bucket = []);
+            bucket.push(seg);
+          }
+        }
+        segments += 1;
       }
     }
   }
-  for (const bucket of buckets.values()) {
-    if (!bucket.positions.length) continue;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(bucket.positions, 3));
-    geometry.setIndex(bucket.index);
-    geometry.computeVertexNormals();
-    const mesh = new THREE.Mesh(geometry, materialFor(bucket.color));
-    mesh.userData = {
-      surface: `official_curb_zone:${bucket.colorName}`,
-      source: "sfmta_curb_zones",
-      provenance: "official_digital_curb_policy_polyline_snapped_to_rendered_kerb",
-    };
-    groups.furniture.add(mesh);
+  // Then every kerb vertex asks whether a painted line runs past it.
+  const reach2 = KERB_PAINT_REACH_M * KERB_PAINT_REACH_M;
+  let painted = 0;
+  for (const kerb of kerbs) {
+    const pos = kerb.geometry.getAttribute("position");
+    const col = kerb.geometry.getAttribute("color");
+    let touched = false;
+    for (let i = 0; i < pos.count; i += 1) {
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const cx = Math.floor(x / CELL);
+      const cz = Math.floor(z / CELL);
+      let best = null;
+      let bestD = reach2;
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dz = -1; dz <= 1; dz += 1) {
+          const bucket = grid.get(`${cx + dx}:${cz + dz}`);
+          if (!bucket) continue;
+          for (const seg of bucket) {
+            const d = distanceToSegmentSquared(x, z, seg[0], seg[1], seg[2], seg[3]);
+            if (d < bestD) { bestD = d; best = seg; }
+          }
+        }
+      }
+      if (!best) continue;
+      col.setXYZ(i, best[4], best[5], best[6]);
+      painted += 1;
+      touched = true;
+    }
+    if (touched) col.needsUpdate = true;
   }
-  return { segments: added, unplaced };
+  return { segments, unplaced, painted };
 }
 
 //: The curb lane a bus pulls into. Three metres is the lane, and the paint covers it.
@@ -8275,7 +9197,7 @@ const STREET_SPEED = 8.94;     // 20 mph in metres per second, at street level
 // corridor would take four minutes. What stays constant is the apparent speed, not the metric.
 const SPEED_REFERENCE_DIST = 45;
 const AVATAR_RADIUS = 0.9;     // 1.8 m across: a person, so everything else has a scale to read against
-const AVATAR_HEIGHT = 2.13;    // just over human height: about seven feet for the demo avatar
+const AVATAR_HEIGHT = 2.1336;  // seven feet exactly, which is what the demo avatar is asked to be
 const ARRIVAL_DIST = 45;       // close enough that a 126 mm kerb is a step rather than a line
 const DEMO_CHARACTER_URL = "https://threejs.org/examples/models/gltf/Soldier.glb";
 const DEMO_CHARACTER_SOURCE = "Three.js Soldier.glb demo avatar with skinned idle/walk/run clips";
@@ -8688,6 +9610,27 @@ animate();
 window.kerbside = {
   scene, camera, renderer, groups, DATA, xy, insideCarriageway, buildingAt,
   pickedFeature,
+  // The corner pieces: how many cuts were decided and how many pieces laid between them.
+  corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
+             laid: cornersLaid, legs: cornerLegs.length,
+             ends: pavementCornerLaid.size, skipped: addPavementCorners.skipped },
+  cornersAt(lon, lat, reach = 3.0) {
+    // The legs at a junction, with what was decided and laid at each: for looking at one.
+    const [x, y] = xy(lon, lat);
+    return cornerLegs.filter((leg) => Math.hypot(leg.x - x, leg.y - y) <= reach).map((leg) => ({
+      id: leg.id, name: leg.way.name, bearing: +(leg.bearing * 180 / Math.PI).toFixed(1),
+      inner: +leg.inner.toFixed(2), walk: +leg.walk.toFixed(2), length: +leg.length.toFixed(1),
+      sides: Object.fromEntries([1, -1].map((side) => {
+        const c = pavementCornerCuts.get(`${leg.id}:${side}`);
+        const l = pavementCornerLaid.get(`${leg.id}:${side}`);
+        return [side, {
+          neighbour: c ? c.B.id : null, cut: c ? +c.cut.toFixed(2) : null, valid: c ? c.valid : null,
+          tK: c ? +c.tK.toFixed(2) : null, tO: c ? +c.tO.toFixed(2) : null,
+          laid: l ? +l.width.toFixed(2) : null,
+        }];
+      })),
+    }));
+  },
 
   /** A photograph of one place, from a camera this call positions. */
   shoot({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
@@ -8717,7 +9660,18 @@ window.kerbside = {
       this._shot.toneMappingExposure = renderer.toneMappingExposure;
     }
     this._shot.setSize(w, h, false);
-    this._shot.render(scene, cam);
+    // The environment map belongs to the map's own WebGL context; a second renderer cannot
+    // read it, and glass and metal with nothing to reflect come out black. Every curtain-wall
+    // building in a photograph was a black block for that reason, and the fault was reported
+    // as one in the model. The photograph renderer keeps a sky of its own.
+    if (!this._shotEnvironment) this._shotEnvironment = skyEnvironment(this._shot, SKY);
+    const environment = scene.environment;
+    scene.environment = this._shotEnvironment;
+    try {
+      this._shot.render(scene, cam);
+    } finally {
+      scene.environment = environment;
+    }
     return this._shot.domElement.toDataURL("image/jpeg", quality);
   },
 
