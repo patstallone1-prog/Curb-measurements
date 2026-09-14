@@ -2292,10 +2292,9 @@ function entryTexture(seed, archetype) {
     ctx.fillRect(62, 69, 3, 3);
     ctx.fillStyle = awning;
     ctx.fillRect(4, 20, 120, 18);
-    ctx.fillStyle = "rgba(255,255,255,0.72)";
-    ctx.font = "bold 13px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(archetype === "restaurant" ? "CAFE" : "SHOP", 64, 34);
+    // No words on the awning. It used to say CAFE or SHOP, which is a placeholder pretending
+    // to be a sign; the business's own name goes on the sign geometry over the door, from
+    // OpenStreetMap, Overture or Google, and where none of them knows it the awning is blank.
     ctx.fillStyle = "rgba(255,255,255,0.34)";
     for (let x = 12; x < 120; x += 18) ctx.fillRect(x, 20, 8, 18);
     ctx.strokeStyle = "rgba(255,255,255,0.18)";
@@ -2604,6 +2603,18 @@ const SERVICE_ROAD_M = { driveway: 3.4, "drive-through": 3.4, parking_aisle: 6.0
 //: stalls. Drawn as streets they each grew two pavements and a yellow centreline.
 const UNMARKED_SERVICE = new Set(Object.keys(SERVICE_ROAD_M));
 function isUnmarkedService(way) { return UNMARKED_SERVICE.has(way.service); }
+//: A tunnel that is a ramp under a building -- the Transbay bus ramps, a car park's entrance
+//: going underground -- has nothing at the surface and is drawn nowhere. A road tunnel has a
+//: mouth at each end, and that is what is drawn of it.
+function isUndergroundWay(way) { return way.tunnel_kind === "underground"; }
+function isRoadTunnel(way) { return way.tunnel_kind === "road"; }
+//: How far into the hill a road tunnel's bore is drawn from each mouth before it goes dark:
+//: the portal gallery. Looking in from the street this is what is lit; the rest is under the
+//: hill, where the camera cannot go, and the model is flat, so it is not drawn -- and the
+//: street on the hill above it (Stockton Street runs over its own tunnel) is drawn at the
+//: same level, which is the flat model's limit. Declared here because the carriageway grid,
+//: built long before the tunnels are drawn, keeps only these stubs.
+const TUNNEL_STUB_M = 9.0;
 const MAX_RENDER_ROAD_M = 24.0;
 const MAX_INFERRED_ROAD_M = 16.5;
 const MIN_RENDER_WALK_M = 0.9;
@@ -2624,8 +2635,14 @@ function nominalRoadWidth(way) {
   // way into a plaza-wide slab, which is what covers sidewalks/streets at curved junctions.
   const raw = way.road_m || 8.0;
   const lanes = laneCountForWay(way);
-  const laneCap = lanes ? Math.max(4.2, lanes * 3.35 + 1.4) : MAX_INFERRED_ROAD_M;
-  const sourceCap = way.road_source === "curb_geometry" ? MAX_RENDER_ROAD_M : MAX_INFERRED_ROAD_M;
+  // The lane cap reins in a width that was inferred from the right of way. A width measured
+  // between the mapped kerbs is not that: Grant Avenue through Chinatown is 7.36 m kerb to
+  // kerb and tagged lanes=1, because the other four metres are parked cars, and capped to one
+  // lane it was drawn 4.75 m wide -- with the pavement laid from that kerb reaching a metre
+  // and a third into the roadway, past the ends of the crossings, as a tongue at every corner.
+  const measured = way.road_source === "curb_geometry";
+  const laneCap = lanes && !measured ? Math.max(4.2, lanes * 3.35 + 1.4) : MAX_RENDER_ROAD_M;
+  const sourceCap = measured ? MAX_RENDER_ROAD_M : MAX_INFERRED_ROAD_M;
   // A driveway or a parking aisle has no right of way of its own to fall back on: the eight
   // metre default is a street's, and drawn that wide beside a house it is the front garden.
   const serviceCap = SERVICE_ROAD_M[way.service] || Infinity;
@@ -2649,10 +2666,29 @@ function renderedRoadWidth(way) {
   return way._renderRoadM;
 }
 
+//: A neighbouring carriageway runs within this angle of the way it makes room for.
+const NEIGHBOUR_PARALLEL_DEG = 30;
+
+function segmentRunsAlongside(px, pz, bearing, other) {
+  // Does this segment lie beside the point, running the same way? A cross street meets the way
+  // at a junction and is not beside it; the same street carrying on is met at its endpoint.
+  const [ax, az, bx, bz] = other;
+  const dx = bx - ax;
+  const dz = bz - az;
+  const length2 = dx * dx + dz * dz;
+  if (length2 < 1e-9) return false;
+  let turn = Math.abs(Math.atan2(dz, dx) - bearing) % Math.PI;
+  turn = Math.min(turn, Math.PI - turn);
+  if (turn > (NEIGHBOUR_PARALLEL_DEG * Math.PI) / 180) return false;
+  const t = ((px - ax) * dx + (pz - az) * dz) / length2;
+  return t > 0.02 && t < 0.98;
+}
+
 function clampRoadWidthsToNeighbours(ways) {
   const CELL = 40;
   const grid = new Map();
-  const streets = ways.filter((w) => w.kind === "street" && w.points && w.points.length > 1);
+  const streets = ways.filter((w) => w.kind === "street" && w.points && w.points.length > 1
+    && !isUndergroundWay(w));
   const segments = [];
   for (const way of streets) {
     way._renderRoadM = nominalRoadWidth(way);
@@ -2675,12 +2711,21 @@ function clampRoadWidthsToNeighbours(ways) {
       }
     }
   }
-  // The nearest other centreline to each way, sampled along it. Junctions are excluded by
-  // ignoring anything that shares an endpoint neighbourhood -- two streets that meet at a
-  // corner are not competing for the same ground, they are the same ground.
+  // The nearest other centreline running alongside each way, sampled along it.
+  //
+  // Alongside is the whole of it. This used to take the nearest other segment of any kind,
+  // skipping only what was under three metres away, and the nearest segment to a point a few
+  // metres along a way is nearly always the cross street at the junction it just left -- or
+  // the same street carrying on beyond it, met at its endpoint. So every leg of every junction
+  // was clamped to however far its first sample stood from the node: Grant Avenue, measured
+  // between its kerbs at 7.36 m, was drawn 4.75 m wide out of Clay Street, and the pavement
+  // laid from that kerb reached a metre and a third into the roadway and across the ends of
+  // the crossing. A neighbour is a segment that runs beside this one: roughly parallel, with
+  // its nearest point in its interior rather than at an end.
   const nearest = new Map();
   for (const [ax, az, bx, bz, way] of segments) {
     const steps = Math.max(1, Math.round(Math.hypot(bx - ax, bz - az) / 8));
+    const ownBearing = Math.atan2(bz - az, bx - ax);
     for (let k = 0; k <= steps; k += 1) {
       const t = k / steps;
       const px = ax + (bx - ax) * t;
@@ -2693,10 +2738,11 @@ function clampRoadWidthsToNeighbours(ways) {
           if (!bucket) continue;
           for (const other of bucket) {
             if (other[4] === way) continue;
+            if (!segmentRunsAlongside(px, pz, ownBearing, other)) continue;
             const d = Math.sqrt(distanceToSegmentSquared(px, pz, other[0], other[1],
                                                          other[2], other[3]));
-            // Under three metres is a junction or a way drawn on top of another, not a
-            // neighbour to make room for; clamping to that would erase the street.
+            // Under three metres is a way drawn on top of another, not a neighbour to make
+            // room for; clamping to that would erase the street.
             if (d < 3.0) continue;
             const best = nearest.get(way);
             if (best === undefined || d < best) nearest.set(way, d);
@@ -2748,15 +2794,110 @@ function addCarriagewaySegment(ax, az, bx, bz, half, source = null) {
   }
 }
 
+// ---- the street where the city's kerbs say it is ----
+//
+// OpenStreetMap's centreline is a line somebody drew down the middle of the road as they saw
+// it, and along Grant Avenue through Chinatown it runs 1.75 m west of the middle of the road
+// the city surveyed. Everything laid from that line -- the carriageway, the kerb, the pavement,
+// the corners -- was 1.75 m west of where it stands, so the pavement corner on one side stood
+// in the roadway past the end of the crossing, as a tongue, and on the other the road ran
+// under the pavement. The crossings were right, because they were already read off the city's
+// curb lines. Now the street is too: each way is moved sideways to the middle of the official
+// kerbs it runs between, by one offset for the whole way (the median of its stations, which a
+// street that is straight relative to its kerbs has), and where the kerbs were only inferred
+// the width becomes the measured one.
+//: Stations this far from a way's end are not asked: the ray would cross a curb return.
+const RECENTRE_END_MARGIN_M = 8.0;
+const RECENTRE_STATION_M = 4.0;
+//: The stations have to agree: above this spread they are not one street between two kerbs.
+const RECENTRE_MAX_SPREAD_M = 0.5;
+//: And a move this large is not a recentring, it is a different street.
+const RECENTRE_MAX_SHIFT_M = 4.0;
+const RECENTRE_MIN_SHIFT_M = 0.12;
+
+function officialKerbOffsetsAt(x, z, nx, nz, road) {
+  // The kerb on each side, as signed distances along the left normal, or null.
+  const reach = Math.min(30, road * 1.3 + 5);
+  const hits = rayCurbIntersections(x, z, nx, nz, reach, officialCurbGrid);
+  const negative = hits.filter((v) => v < -1.2).pop();
+  const positive = hits.find((v) => v > 1.2);
+  if (negative === undefined || positive === undefined) return null;
+  const span = positive - negative;
+  // The pair has to be this street's own two kerbs: a plausible width, roughly balanced.
+  if (span < 3.0 || span > 30.0 || -negative > positive * 3.0 || positive > -negative * 3.0) {
+    return null;
+  }
+  return { offset: (positive + negative) / 2, span };
+}
+
+function recentreStreetsOnOfficialKerbs(ways) {
+  if (!officialCurbGrid.size) return { moved: 0, widened: 0 };
+  let moved = 0;
+  let widened = 0;
+  for (const way of ways) {
+    if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
+    if (isUnmarkedService(way) || way.tunnel_kind) continue;
+    const road = way.road_m || 8.0;
+    const dense = densifyWay(way.points, RECENTRE_STATION_M);
+    const length = wayLength(way.points);
+    if (length < RECENTRE_END_MARGIN_M * 2 + RECENTRE_STATION_M) continue;
+    const offsets = [];
+    const spans = [];
+    let along = 0;
+    for (let i = 1; i < dense.length - 1; i += 1) {
+      const [px, py] = xy(dense[i - 1][0], dense[i - 1][1]);
+      const [x, y] = xy(dense[i][0], dense[i][1]);
+      const [qx, qy] = xy(dense[i + 1][0], dense[i + 1][1]);
+      along += Math.hypot(x - px, y - py);
+      if (along < RECENTRE_END_MARGIN_M || along > length - RECENTRE_END_MARGIN_M) continue;
+      const dx = qx - px;
+      const dz = -(qy - py);
+      const span = Math.hypot(dx, dz) || 1;
+      // The left normal, in the x/z frame the kerb grid is indexed in.
+      const found = officialKerbOffsetsAt(x, -y, dz / span, -dx / span, road);
+      if (!found) continue;
+      offsets.push(found.offset);
+      spans.push(found.span);
+    }
+    if (offsets.length < 3) continue;
+    const sorted = offsets.slice().sort((p, q) => p - q);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const spread = sorted[Math.floor(sorted.length * 0.75)] - sorted[Math.floor(sorted.length * 0.25)];
+    if (spread > RECENTRE_MAX_SPREAD_M || Math.abs(median) > RECENTRE_MAX_SHIFT_M) continue;
+    // Where the way stood, kept for the junction it shares with the ways that meet it there.
+    way._node = [way.points[0].slice(), way.points[way.points.length - 1].slice()];
+    if (Math.abs(median) >= RECENTRE_MIN_SHIFT_M) {
+      way.points = offsetWay(way.points, median);
+      way.recentred_m = +median.toFixed(3);
+      moved += 1;
+    }
+    if (way.road_source !== "curb_geometry") {
+      const widths = spans.slice().sort((p, q) => p - q);
+      way.road_m = +widths[Math.floor(widths.length / 2)].toFixed(3);
+      way.road_source = "official_curbs";
+      widened += 1;
+    }
+  }
+  return { moved, widened };
+}
+
+const recentred = recentreStreetsOnOfficialKerbs(DATA.ways);
+
 clampRoadWidthsToNeighbours(DATA.ways);
 
 for (const way of DATA.ways) {
   if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
+  if (isUndergroundWay(way)) continue;
   const half = renderedRoadWidth(way) / 2;
-  for (let i = 1; i < way.points.length; i += 1) {
-    const [ax, ay] = xy(way.points[i - 1][0], way.points[i - 1][1]);
-    const [bx, by] = xy(way.points[i][0], way.points[i][1]);
-    addCarriagewaySegment(ax, -ay, bx, -by, half, way);
+  // A road tunnel is roadway only at its two mouths; between them it is under the hill, and
+  // the streets on the hill cross its line with their pavements intact.
+  const runs = isRoadTunnel(way) ? tunnelStubs(way.points) : [way.points];
+  for (const run of runs) {
+    for (let i = 1; i < run.length; i += 1) {
+      const [ax, ay] = xy(run[i - 1][0], run[i - 1][1]);
+      const [bx, by] = xy(run[i][0], run[i][1]);
+      addCarriagewaySegment(ax, -ay, bx, -by, half, way);
+    }
   }
 }
 
@@ -2862,6 +3003,7 @@ function pavementRunsOutsideCarriageway(points, width, discardDetached = false) 
       const innerEdge = insideCarriageway(x + nx * edge, z + nz * edge, 0.30);
       const outerEdge = insideCarriageway(x - nx * edge, z - nz * edge, 0.30);
     const overlaps = insideCarriageway(x, z, 0.30)
+      || insideJunctionBox(x, z)
       || (innerEdge && outerEdge)
         || pavementSurroundedByStreet(x, z, width);
     if (overlaps) {
@@ -3060,7 +3202,7 @@ function walkSidesToDraw(way, renderPoints, inner) {
   // Both sides unless OpenStreetMap says otherwise and the ground agrees with it.
   const stated = way.walk_sides;
   const drawn = [];
-  if (isUnmarkedService(way)) return drawn;
+  if (isUnmarkedService(way) || way._junctionInternal || way.tunnel_kind) return drawn;
   for (const side of [1, -1]) {
     if (stated === undefined) {
       drawn.push(side);
@@ -3099,6 +3241,7 @@ function indexStreetEnds(ways) {
   streetEndGrid.clear();
   for (const way of ways) {
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
+    if (isUndergroundWay(way)) continue;
     const n = way.points.length;
     for (const [end, next] of [[0, 1], [n - 1, n - 2]]) {
       const [ex, ey] = xy(way.points[end][0], way.points[end][1]);
@@ -3161,18 +3304,19 @@ function kerbsideTrims(renderPoints, back, side = 0) {
   const [e2x, e2y] = xy(renderPoints[n - 2][0], renderPoints[n - 2][1]);
   const startBearing = Math.atan2(-s2y + sy, s2x - sx);
   const endBearing = Math.atan2(-e2y + ey, e2x - ex);
-  const cornerCut = (x, y, dx, dy, awaySide) => {
-    if (!awaySide) return undefined;
-    const leg = cornerLegAt(x, y, dx, dy);
+  const cut = (x, y, dx, dy, bearing, awaySide) => {
+    const leg = awaySide ? cornerLegAt(x, y, dx, dy) : null;
     const corner = leg && pavementCornerCuts.get(`${leg.id}:${awaySide}`);
-    return corner && corner.valid ? corner.cut : undefined;
+    if (corner && corner.valid) return corner.cut;
+    if (streetCarriesOn(null, x, -y, bearing)) return 0;
+    // No corner to meet and no street to carry on into, but a junction box to stay out of.
+    if (leg && leg.boxExit > 0) return Math.max(back, leg.boxExit + 0.5);
+    return back;
   };
-  const start = cornerCut(sx, sy, s2x - sx, s2y - sy, side);
-  // Leaving the far end the way runs backwards, so the pavement on its left is on the right.
-  const end = cornerCut(ex, ey, e2x - ex, e2y - ey, -side);
   return [
-    start !== undefined ? start : (streetCarriesOn(null, sx, -sy, startBearing) ? 0 : back),
-    end !== undefined ? end : (streetCarriesOn(null, ex, -ey, endBearing) ? 0 : back),
+    cut(sx, sy, s2x - sx, s2y - sy, startBearing, side),
+    // Leaving the far end the way runs backwards, so the pavement on its left is on the right.
+    cut(ex, ey, e2x - ex, e2y - ey, endBearing, -side),
   ];
 }
 
@@ -3202,6 +3346,10 @@ const CORNER_JOIN_M = 1.0;
 const CORNER_MIN_DEG = 20;
 const CORNER_MAX_DEG = 150;
 const CORNER_CELL_M = 4.0;
+//: Nodes this close are one junction. The Embarcadero's crossing with Broadway is drawn as
+//: connector ways eleven to fifteen metres long between the nodes on its two carriageways,
+//: and the junction -- its box, and the ways that are only its connectors -- is the whole of it.
+const JUNCTION_CLUSTER_M = 16.0;
 const cornerLegGrid = new Map();
 const cornerLegs = [];
 //: `${leg.id}:${side}` -> { cut, corner geometry } for the pavement on that side of that leg,
@@ -3212,7 +3360,8 @@ const pavementCornerCuts = new Map();
 const pavementCornerLaid = new Map();
 
 function cornerLegAt(x, y, dx, dy) {
-  // The indexed leg leaving this point in this direction, if any.
+  // The indexed leg leaving this point in this direction, if any. The grid is keyed by the
+  // node the way stood on, which a recentred way's end is within RECENTRE_MAX_SHIFT_M of.
   const span = Math.hypot(dx, dy) || 1;
   const ux = dx / span;
   const uy = dy / span;
@@ -3220,8 +3369,8 @@ function cornerLegAt(x, y, dx, dy) {
   const cy = Math.floor(y / CORNER_CELL_M);
   let best = null;
   let bestScore = -1;
-  for (let ix = cx - 1; ix <= cx + 1; ix += 1) {
-    for (let iy = cy - 1; iy <= cy + 1; iy += 1) {
+  for (let ix = cx - 2; ix <= cx + 2; ix += 1) {
+    for (let iy = cy - 2; iy <= cy + 2; iy += 1) {
       const bucket = cornerLegGrid.get(`${ix}:${iy}`);
       if (!bucket) continue;
       for (const leg of bucket) {
@@ -3235,8 +3384,9 @@ function cornerLegAt(x, y, dx, dy) {
 }
 
 function cornerLegsAt(leg) {
-  const cx = Math.floor(leg.x / CORNER_CELL_M);
-  const cy = Math.floor(leg.y / CORNER_CELL_M);
+  // The other legs of this leg's junction: the ways that shared its node.
+  const cx = Math.floor(leg.nx / CORNER_CELL_M);
+  const cy = Math.floor(leg.ny / CORNER_CELL_M);
   const out = [];
   for (let ix = cx - 1; ix <= cx + 1; ix += 1) {
     for (let iy = cy - 1; iy <= cy + 1; iy += 1) {
@@ -3244,7 +3394,7 @@ function cornerLegsAt(leg) {
       if (!bucket) continue;
       for (const other of bucket) {
         if (other === leg) continue;
-        if (Math.hypot(other.x - leg.x, other.y - leg.y) <= CORNER_JOIN_M) out.push(other);
+        if (Math.hypot(other.nx - leg.nx, other.ny - leg.ny) <= CORNER_JOIN_M) out.push(other);
       }
     }
   }
@@ -3256,6 +3406,7 @@ function cornerNeighbour(leg, side) {
   let best = null;
   let bestTurn = Infinity;
   for (const other of cornerLegsAt(leg)) {
+    if (other.way._junctionInternal) continue;
     let turn = other.bearing - leg.bearing;
     turn = ((turn % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
     if (side < 0) turn = (2 * Math.PI - turn) % (2 * Math.PI);
@@ -3280,20 +3431,25 @@ function cornerFrame(A, B, side) {
   const nb = [s * b[1], -s * b[0]];
   const den = a[0] * b[1] - a[1] * b[0];
   if (Math.abs(den) < 1e-6) return null;
+  // Each leg measures from its own end: the two are the same node unless one of the ways was
+  // recentred onto the city's kerbs, and then they stand a metre or two apart.
   const P = [A.x, A.y];
+  const Q = [B.x, B.y];
+  const qx = Q[0] - P[0];
+  const qy = Q[1] - P[1];
   // Where the line `offA` out from A's centreline meets the line `offB` out from B's, as the
-  // distances along each leg from the junction.
+  // distances along each leg from its end.
   const meet = (offA, offB) => {
-    const rx = nb[0] * offB - na[0] * offA;
-    const ry = nb[1] * offB - na[1] * offA;
+    const rx = qx + nb[0] * offB - na[0] * offA;
+    const ry = qy + nb[1] * offB - na[1] * offA;
     return [(rx * b[1] - ry * b[0]) / den, (rx * a[1] - ry * a[0]) / den];
   };
   const alongA = (t, off) => [P[0] + a[0] * t + na[0] * off, P[1] + a[1] * t + na[1] * off];
-  const alongB = (u, off) => [P[0] + b[0] * u + nb[0] * off, P[1] + b[1] * u + nb[1] * off];
+  const alongB = (u, off) => [Q[0] + b[0] * u + nb[0] * off, Q[1] + b[1] * u + nb[1] * off];
   // Where A's cut line (across A at `cutA`) meets B's, as the offsets out from each centreline.
   const meetCuts = (cutA, cutB) => {
-    const r2x = b[0] * cutB - a[0] * cutA;
-    const r2y = b[1] * cutB - a[1] * cutA;
+    const r2x = qx + b[0] * cutB - a[0] * cutA;
+    const r2y = qy + b[1] * cutB - a[1] * cutA;
     const d2 = na[0] * nb[1] - na[1] * nb[0];
     if (Math.abs(d2) < 1e-6) return null;
     return [(r2x * nb[1] - r2y * nb[0]) / d2, (r2x * na[1] - r2y * na[0]) / d2];
@@ -3380,7 +3536,8 @@ function indexPavementCorners(ways) {
   for (const way of ways) {
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     // A driveway has no pavement of its own; the street's runs across its mouth as an apron.
-    if (isUnmarkedService(way)) continue;
+    // A tunnel's pavement is inside the hill.
+    if (isUnmarkedService(way) || way.tunnel_kind) continue;
     const n = way.points.length;
     const inner = renderedRoadWidth(way) / 2;
     const walk = renderedWalkWidth(way, 4.0);
@@ -3390,8 +3547,13 @@ function indexPavementCorners(ways) {
       const [nx2, ny2] = xy(way.points[next][0], way.points[next][1]);
       const span = Math.hypot(nx2 - ex, ny2 - ey);
       if (span < 1e-6) continue;
+      // A way moved onto the city's kerbs no longer ends on the node it shares with the
+      // streets that meet it; the junction is still where the node was.
+      const node = way._node ? xy(way._node[end === 0 ? 0 : 1][0], way._node[end === 0 ? 0 : 1][1])
+        : [ex, ey];
       const leg = {
-        id: cornerLegs.length, x: ex, y: ey, dx: (nx2 - ex) / span, dy: (ny2 - ey) / span,
+        id: cornerLegs.length, x: ex, y: ey, nx: node[0], ny: node[1],
+        dx: (nx2 - ex) / span, dy: (ny2 - ey) / span,
         bearing: Math.atan2(ny2 - ey, nx2 - ex), inner, walk, length, way, end, far: null,
       };
       // The leg at the other end of the same way, so a short way can share itself out.
@@ -3400,19 +3562,109 @@ function indexPavementCorners(ways) {
         if (start && start.way === way && start.end === 0) { start.far = leg; leg.far = start; }
       }
       cornerLegs.push(leg);
-      const key = `${Math.floor(ex / CORNER_CELL_M)}:${Math.floor(ey / CORNER_CELL_M)}`;
+      const key = `${Math.floor(node[0] / CORNER_CELL_M)}:${Math.floor(node[1] / CORNER_CELL_M)}`;
       let bucket = cornerLegGrid.get(key);
       if (!bucket) cornerLegGrid.set(key, bucket = []);
       bucket.push(leg);
     }
   }
+  // A way that runs from one node of a junction to another node of the same junction is the
+  // junction, not a street: the connectors OpenStreetMap draws across the Embarcadero's
+  // median between its two carriageways. They were getting a pavement down each side, laid
+  // in the middle of the crossroads, and a corner piece where they met the carriageways.
   for (const leg of cornerLegs) {
+    if (leg.end !== 0 || !leg.far) continue;
+    if (leg.length > JUNCTION_CLUSTER_M) continue;
+    if (Math.hypot(leg.far.nx - leg.nx, leg.far.ny - leg.ny) > JUNCTION_CLUSTER_M) continue;
+    if (cornerLegsAt(leg).length < 2 || cornerLegsAt(leg.far).length < 2) continue;
+    leg.way._junctionInternal = true;
+  }
+  // The box of each junction, and where each leg leaves it. A pavement with no corner to
+  // meet -- its neighbour round the junction is one of those connectors -- starts where its
+  // street leaves the box rather than a fixed pull-back from its node, which on the
+  // Embarcadero's median left a strip of pavement standing in the crossroads.
+  junctionBoxHulls.length = 0;
+  junctionBoxGrid.clear();
+  for (const legs of junctionClusters()) {
+    if (legs.length < 3) continue;
+    const hull = junctionBoxHull(legs);
+    if (hull.length < 3) continue;
+    junctionBoxHulls.push(hull);
+    indexJunctionBox(hull);
+    for (const leg of legs) {
+      let t = 0;
+      const limit = Math.min(leg.length, 60);
+      while (t < limit && pointInRing(leg.x + leg.dx * t, leg.y + leg.dy * t, hull)) t += 0.5;
+      leg.boxExit = t;
+    }
+  }
+  for (const leg of cornerLegs) {
+    if (leg.way._junctionInternal) continue;
     for (const side of [1, -1]) {
       const corner = cornerCutFor(leg, side);
       if (corner) pavementCornerCuts.set(`${leg.id}:${side}`, corner);
     }
   }
   return reconcilePavementCorners();
+}
+
+const junctionBoxHulls = [];
+const JUNCTION_BOX_CELL_M = 30;
+const junctionBoxGrid = new Map();
+
+function indexJunctionBox(hull) {
+  const xs = hull.map((q) => q[0]);
+  const ys = hull.map((q) => q[1]);
+  const x0 = Math.floor(Math.min(...xs) / JUNCTION_BOX_CELL_M);
+  const x1 = Math.floor(Math.max(...xs) / JUNCTION_BOX_CELL_M);
+  const y0 = Math.floor(Math.min(...ys) / JUNCTION_BOX_CELL_M);
+  const y1 = Math.floor(Math.max(...ys) / JUNCTION_BOX_CELL_M);
+  for (let ix = x0; ix <= x1; ix += 1) {
+    for (let iy = y0; iy <= y1; iy += 1) {
+      const key = `${ix}:${iy}`;
+      let bucket = junctionBoxGrid.get(key);
+      if (!bucket) junctionBoxGrid.set(key, bucket = []);
+      bucket.push(hull);
+    }
+  }
+}
+
+function insideJunctionBox(x, z) {
+  // Is this point (in the x/z frame) inside a junction's box? The box is roadway whatever the
+  // ways through it say: the Embarcadero's carriageways carry on through their junction with
+  // Broadway, and their median-side pavements carried on with them, into the crossroads.
+  const y = -z;
+  const bucket = junctionBoxGrid.get(
+    `${Math.floor(x / JUNCTION_BOX_CELL_M)}:${Math.floor(y / JUNCTION_BOX_CELL_M)}`);
+  if (!bucket) return false;
+  for (const hull of bucket) if (pointInRing(x, y, hull)) return true;
+  return false;
+}
+
+function pointInRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function junctionBoxHull(legs) {
+  // Each leg's carriageway across its mouth, from its end to as far in as the widest leg
+  // crossing it reaches.
+  const widest = Math.max(...legs.map((l) => l.inner));
+  const points = [];
+  for (const l of legs) {
+    const reach = Math.min(widest, l.length * 0.5);
+    for (const t of [0, reach]) {
+      for (const side of [1, -1]) {
+        points.push([l.x + l.dx * t - side * l.dy * l.inner, l.y + l.dy * t + side * l.dx * l.inner]);
+      }
+    }
+  }
+  return convexHull(points);
 }
 
 function cornerQuad(leg, side) {
@@ -3440,6 +3692,81 @@ function cornerQuad(leg, side) {
   const kerb = [frame.alongA(cutA, leg.inner + lip / 2), frame.alongA(tk2, leg.inner + lip / 2),
                 frame.alongB(cutB, B.inner + lip / 2)];
   return { K, A1, C, B1, kerb, frame, cutA, vC };
+}
+
+// ---- the junction box ----
+//
+// A junction is drawn as the ends of the ways that meet at it, and where they meet cleanly at
+// one node the box is covered by their overlap. Where they do not -- the Embarcadero's
+// junctions, drawn by OpenStreetMap as six ways ending on three nodes, or any junction whose
+// ways were moved onto the city's kerbs -- the box has pockets in it that no ribbon reaches,
+// and the low concrete underlay showed through them as pale slabs in the middle of the road.
+// The box is its own piece of asphalt: the hull of every leg's carriageway across its mouth,
+// a shade under the ribbons so it never fights them and shows only where they are not.
+const JUNCTION_BOX_DROP_M = 0.004;
+
+function junctionClusters() {
+  // Every leg's node, merged with the nodes within JUNCTION_CLUSTER_M of it.
+  const parent = cornerLegs.map((_, i) => i);
+  const find = (i) => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  const cell = JUNCTION_CLUSTER_M;
+  const grid = new Map();
+  for (const leg of cornerLegs) {
+    const key = `${Math.floor(leg.nx / cell)}:${Math.floor(leg.ny / cell)}`;
+    let bucket = grid.get(key);
+    if (!bucket) grid.set(key, bucket = []);
+    bucket.push(leg);
+  }
+  for (const leg of cornerLegs) {
+    const cx = Math.floor(leg.nx / cell);
+    const cy = Math.floor(leg.ny / cell);
+    for (let ix = cx - 1; ix <= cx + 1; ix += 1) {
+      for (let iy = cy - 1; iy <= cy + 1; iy += 1) {
+        for (const other of grid.get(`${ix}:${iy}`) || []) {
+          if (other.id <= leg.id) continue;
+          if (Math.hypot(other.nx - leg.nx, other.ny - leg.ny) <= JUNCTION_CLUSTER_M) {
+            parent[find(other.id)] = find(leg.id);
+          }
+        }
+      }
+    }
+  }
+  const clusters = new Map();
+  for (const leg of cornerLegs) {
+    const root = find(leg.id);
+    let members = clusters.get(root);
+    if (!members) clusters.set(root, members = []);
+    members.push(leg);
+  }
+  return [...clusters.values()];
+}
+
+function addJunctionBoxes() {
+  let laid = 0;
+  const top = ROAD_TOP_M - JUNCTION_BOX_DROP_M;
+  for (const hull of junctionBoxHulls) {
+    const position = [];
+    const uv = [];
+    const index = [];
+    for (const [x, y] of hull) {
+      position.push(x, top, -y);
+      uv.push(x / 8.0, -y / 8.0);
+    }
+    for (let i = 1; i + 1 < hull.length; i += 1) index.push(0, i + 1, i);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, surfaceMaterial("road", 0xffffff, 1.0));
+    mesh.userData.surface = "road";
+    addMerged("junction:box", mesh, "road");
+    laid += 1;
+  }
+  return laid;
 }
 
 function addPavementCorners() {
@@ -3525,10 +3852,15 @@ function laneMarkingProfile(way, road = renderedRoadWidth(way)) {
   const backward = way.lanes_back || (oneway ? 0 : Math.floor(tagged / 2));
   const explicitTotal = oneway ? (forward || tagged || 0)
     : (way.lanes_fwd || way.lanes_back ? (forward || 0) + (backward || 0) : tagged);
-  const inferredTotal = explicitTotal ? 0
+  // Lanes are only guessed from the width of a street that is one. A way with no name is a
+  // connector through a junction -- a slip, a turning link, the piece of the Embarcadero's
+  // box that OpenStreetMap draws as its own way -- and at 17.6 m across it was guessed to
+  // have four lanes, so three white lines ran diagonally through the crossroads.
+  const named = Boolean(way.name);
+  const inferredTotal = explicitTotal || !named ? 0
     : road >= 13.8 ? 4 : road >= 9.0 ? 2 : road >= 6.2 && oneway ? 2 : 1;
   const total = explicitTotal || inferredTotal;
-  const opposing = !oneway && (explicitTotal ? total >= 2 : road >= 5.6);
+  const opposing = !oneway && (explicitTotal ? total >= 2 : named && road >= 5.6);
   return { oneway, total, forward, backward, opposing, road };
 }
 
@@ -3923,17 +4255,35 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, y,
     const stretch = spine.slice(from, Math.min(to + 2, spine.length));
     if (stretch.length < 2) return;
     const width = widths[pick];
-    // The kerb first: four inches of the top and the whole face, as its own tile along the
-    // street edge. It is laid with the pavement rather than over it -- the same concrete, the
-    // same height, the same merge -- and it is the thing the curb policy paints. Four inches is
-    // the default where nothing was measured; SFMTA paints the face and the top edge of the kerb.
-    addPavementRibbon(offsetWay(stretch, side * (inner + KERB_LIP_M / 2)), KERB_LIP_M,
-                      color, opacity, y, thickness, "kerb");
+    // The kerb: four inches of the top and the whole face, as its own tile along the street
+    // edge. It is laid with the pavement rather than over it -- the same concrete, the same
+    // height, the same merge -- and it is the thing the curb policy paints. Four inches is the
+    // default where nothing was measured; SFMTA paints the face and the top edge of the kerb.
+    //
+    // With the pavement, and only where the pavement is. The pavement is dropped wherever it
+    // lies over another street's carriageway, but a four-inch tile with its centre a hand's
+    // breadth outside its own kerb line is hardly ever over anything -- so along the nameless
+    // connector ways through the Embarcadero's junctions the kerb was laid where the
+    // pavement was not: a thin white line across the crossroads at an angle nothing else on
+    // the road shares. The kerb is the pavement's edge; where there is no pavement there is
+    // no edge.
     const inset = width - KERB_LIP_M;
     if (inset > 0.2) {
-      laid += addPavementRibbon(offsetWay(stretch, side * (inner + KERB_LIP_M + inset / 2)), inset,
-                                color, opacity, y, thickness,
-                                inset <= NARROW_WALK_M ? "walk_narrow" : "walk");
+      const walkCentre = offsetWay(stretch, side * (inner + KERB_LIP_M + inset / 2));
+      for (const run of pavementRunsOutsideCarriageway(walkCentre, inset)) {
+        const surface = inset <= NARROW_WALK_M ? "walk_narrow" : "walk";
+        stampPaved(run, inset, y + thickness / 2);
+        addMerged(`walk:${surface}:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
+                  ribbon(run, inset, color, opacity, y, thickness, surface), surface);
+        laid += wayLength(run);
+        const kerb = offsetWay(run, -side * (inset / 2 + KERB_LIP_M / 2));
+        stampPaved(kerb, KERB_LIP_M, y + thickness / 2);
+        addMerged(`walk:kerb:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
+                  ribbon(kerb, KERB_LIP_M, color, opacity, y, thickness, "kerb"), "kerb");
+      }
+    } else {
+      addPavementRibbon(offsetWay(stretch, side * (inner + KERB_LIP_M / 2)), KERB_LIP_M,
+                        color, opacity, y, thickness, "kerb");
     }
   };
   let start = 0;
@@ -4043,6 +4393,7 @@ function walkFitsAt(x, z, nx, nz, width) {
   const innerEdge = insideCarriageway(x + nx * edge, z + nz * edge, 0.30);
   const outerEdge = insideCarriageway(x - nx * edge, z - nz * edge, 0.30);
   return !(insideCarriageway(x, z, 0.30)
+    || insideJunctionBox(x, z)
     || (innerEdge && outerEdge)
     || pavementSurroundedByStreet(x, z, width));
 }
@@ -6687,56 +7038,88 @@ const TUNNEL_WALL_M = 4.2;          // the vertical wall before the arch springs
 const TUNNEL_SHELL_M = 0.6;         // the lining's thickness
 const TUNNEL_PORTAL_DEPTH_M = 1.4;  // the headwall at each mouth
 const TUNNEL_PORTAL_MARGIN_M = 4.0; // how far the headwall reaches past the bore each side
+function tunnelStubs(points) {
+  // The first and last TUNNEL_STUB_M of a tunnel way, from each mouth inward.
+  const length = wayLength(points);
+  if (length <= TUNNEL_STUB_M * 2 + 1) return [points];
+  return [trimWayEnds(points, 0, length - TUNNEL_STUB_M),
+          trimWayEnds(points, length - TUNNEL_STUB_M, 0)];
+}
 
 function tunnelArchShape(halfWidth, outer) {
-  // The bore cross-section in the plane across the road: vertical sides up to TUNNEL_WALL_M,
-  // then a semicircle-ish arch to the crown. `outer` adds the lining thickness.
   const w = halfWidth + (outer ? TUNNEL_SHELL_M : 0);
-  const wall = TUNNEL_WALL_M + (outer ? TUNNEL_SHELL_M : 0);
+  const wall = TUNNEL_WALL_M;
   const crown = TUNNEL_CROWN_M + (outer ? TUNNEL_SHELL_M : 0);
   const shape = new THREE.Shape();
-  shape.moveTo(-w, 0);
-  shape.lineTo(w, 0);
+  shape.moveTo(-w, outer ? -0.3 : 0);
+  shape.lineTo(w, outer ? -0.3 : 0);
   shape.lineTo(w, wall);
-  const rise = crown - wall;
-  const steps = 12;
-  for (let i = 1; i <= steps; i += 1) {
-    const t = Math.PI - (i / steps) * Math.PI;          // from the right springing to the left
-    shape.lineTo(Math.cos(t) * -w, wall + Math.sin(t) * rise);
+  // The arch: a half-ellipse from wall height to the crown.
+  const segments = 14;
+  for (let i = 1; i <= segments; i += 1) {
+    const t = Math.PI * (i / segments);
+    shape.lineTo(w * Math.cos(t), wall + (crown - wall) * Math.sin(t));
   }
-  shape.lineTo(-w, 0);
+  shape.lineTo(-w, outer ? -0.3 : 0);
   return shape;
 }
 
 function addTunnel(way, renderPoints, roadWidth, roadTop) {
-  // The bore is the outer arch minus the inner arch, swept along the carriageway. What the
-  // camera sees from the street is the lining's inner face overhead and the headwall at the
-  // mouth; from above it sees the shell. Both are the real shape of the thing rather than a road
-  // drawn a little darker.
-  const pts = renderPoints.map((p) => { const [x, y] = xy(p[0], p[1]); return new THREE.Vector3(x, roadTop, -y); });
-  if (pts.length < 2) return null;
+  // A road tunnel is drawn as what can be seen of it from the street: the two mouths. At
+  // each, the headwall stands as high as the lidar says the ground is over the bore there
+  // (Stockton's 8 m, Broadway's 11.6 m at Mason; a default where nothing measured), the bore
+  // goes in under it for TUNNEL_STUB_M with its road and its lining, and then it is dark. The
+  // model is flat, so the hill itself is not here; between the mouths the surface is the
+  // streets and houses that stand on the hill, with nothing of the tunnel under them.
+  //
+  // It used to be drawn as a lining along the whole way lying on the ground -- a tube across
+  // three blocks of Russian Hill with the roadway inside it -- and every busway ramp and
+  // car park entrance tagged tunnel=yes got the same, 150 portals for a city with six.
+  if (renderPoints.length < 2) return null;
   const half = roadWidth / 2;
   const group = new THREE.Group();
-  const path = new THREE.CatmullRomCurve3(pts, false, "centripetal");
-  const outer = tunnelArchShape(half, true);
-  outer.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
-  const shell = new THREE.ExtrudeGeometry(outer, {
-    steps: Math.max(4, Math.round(path.getLength() / 4)), bevelEnabled: false, extrudePath: path,
-  });
+  const stubs = tunnelStubs(renderPoints);
   const lining = new THREE.MeshStandardMaterial({
     color: 0x5f6266, roughness: 0.92, metalness: 0.02, side: THREE.DoubleSide,
   });
-  const bore = new THREE.Mesh(shell, lining);
-  bore.userData.surface = "tunnel";
-  group.add(bore);
-  // The headwalls: a slab across each mouth with the bore's own opening cut through it.
-  for (const end of [0, pts.length - 1]) {
-    const here = pts[end];
-    const next = pts[end === 0 ? 1 : pts.length - 2];
+  const dark = new THREE.MeshStandardMaterial({ color: 0x08090a, roughness: 1.0, metalness: 0.0 });
+  const measured = way.tunnel_portal || {};
+  const ends = stubs.length === 2 ? [["start", stubs[0]], ["end", stubs[1]]] : [["start", stubs[0]]];
+  for (const [label, stub] of ends) {
+    // The stub runs from the mouth inward; the end stub is stored mouth-last.
+    const inward = label === "start" ? stub : stub.slice().reverse();
+    const pts = inward.map((p) => { const [x, y] = xy(p[0], p[1]); return new THREE.Vector3(x, roadTop, -y); });
+    if (pts.length < 2) continue;
+    // The road in the mouth.
+    addMerged(`ribbon:road:${(Math.round(roadTop / 0.05) * 0.05).toFixed(2)}`,
+              ribbon(inward, roadWidth, 0xffffff, 1.0, roadTop / 2, roadTop, "road"), "road");
+    // The lining, swept along the stub.
+    const path = new THREE.CatmullRomCurve3(pts, false, "centripetal");
+    const outer = tunnelArchShape(half, true);
+    outer.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
+    const shell = new THREE.ExtrudeGeometry(outer, {
+      steps: Math.max(4, Math.round(path.getLength() / 3)), bevelEnabled: false, extrudePath: path,
+    });
+    const bore = new THREE.Mesh(shell, lining);
+    bore.userData.surface = "tunnel";
+    group.add(bore);
+    // Where the light gives out: a dark wall across the bore at the stub's inner end.
+    const last = pts[pts.length - 1];
+    const before = pts[pts.length - 2];
+    const yawIn = Math.atan2(last.x - before.x, last.z - before.z);
+    const cap = new THREE.Mesh(new THREE.ShapeGeometry(tunnelArchShape(half, false)), dark);
+    cap.position.set(last.x, roadTop, last.z);
+    cap.rotation.y = yawIn;
+    cap.userData.surface = "tunnel_dark";
+    group.add(cap);
+    // The headwall at the mouth, as tall as the ground over the bore, and never shorter than
+    // the bore it has to hide.
+    const here = pts[0];
+    const next = pts[1];
     const yaw = Math.atan2(next.x - here.x, next.z - here.z);
-    const face = new THREE.Shape();
+    const H = Math.max(TUNNEL_CROWN_M + TUNNEL_SHELL_M + 0.5, measured[label] || 0);
     const W = half + TUNNEL_PORTAL_MARGIN_M;
-    const H = TUNNEL_CROWN_M + TUNNEL_SHELL_M + 1.2;
+    const face = new THREE.Shape();
     face.moveTo(-W, 0); face.lineTo(W, 0); face.lineTo(W, H); face.lineTo(-W, H); face.lineTo(-W, 0);
     face.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
     const slab = new THREE.ExtrudeGeometry(face, { depth: TUNNEL_PORTAL_DEPTH_M, bevelEnabled: false });
@@ -6747,6 +7130,8 @@ function addTunnel(way, renderPoints, roadWidth, roadTop) {
     portal.position.set(here.x, roadTop, here.z);
     portal.rotation.y = yaw;
     portal.userData.surface = "tunnel_portal";
+    portal.userData.headwallM = H;
+    portal.userData.measured = Boolean(measured[label]);
     group.add(portal);
   }
   return group;
@@ -6992,11 +7377,18 @@ for (const way of DRAW_ORDER) {
   // 3.6, which made Grant Avenue and Van Ness the same street.
   // A San Francisco crosswalk band is about twelve feet, not seventeen. The extra width made
   // the bars sparse and the whole marking read as a couple of stripes.
+  if (isUndergroundWay(way)) continue;
   const widthMeters = isCrossing ? (way.crossing_m || 3.7)
     : isSidewalk ? renderedWalkWidth(way, 3.6)
     : isPath ? 2.4
     : renderedRoadWidth(way);
   const renderPoints = densifyWay(way.points);
+  // A road tunnel: its two mouths, and nothing at the surface between them.
+  if (isRoadTunnel(way)) {
+    const bore = addTunnel(way, renderPoints, widthMeters, ROAD_TOP_M);
+    if (bore) groups.streets.add(bore);
+    continue;
+  }
  const surfacePoints = isCrossing ? crossingRectanglePoints(renderPoints)
  : (isSidewalk || isPath) ? trimWalkwayForCorners(renderPoints, widthMeters) : renderPoints;
   // This kerb, not the city's median kerb. Four thousand nine hundred of these carry their own
@@ -7039,12 +7431,6 @@ const surfaceKind = isCrossing ? ((way.continental || way.alley_mouth) ? "crossi
   }
 if (!isSidewalk && !isCrossing && !isPath) {
 addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
-  // A road through a hill gets its bore and its portals. `tunnel=yes` is the statement; a way
-  // on a negative layer without it is an underpass, which is the same thing to the camera.
-  if (way.tunnel || (Number.isFinite(way.layer) && way.layer < 0)) {
-    const bore = addTunnel(way, renderPoints, widthMeters, roadTop);
-    if (bore) groups.streets.add(bore);
-  }
 }
   // The footways, laid from the kerb outward on both sides. Drawn a centimetre below the
   // mapped sidewalk ways so that where OpenStreetMap has one the two do not fight, and so
@@ -7080,16 +7466,9 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
     const [markCutStart, markCutEnd] = laneMarkingTrims(way, renderPoints, road);
     const markingPoints = trimWayEnds(renderPoints, markCutStart, markCutEnd);
     const markingRuns = markingRunsClearOfJunctions(markingPoints, way);
-    const oneway = Boolean(way.oneway || way.osm_oneway);
-    const tagged = way.lanes || 0;
-    const forward = way.lanes_fwd || (oneway ? tagged : Math.floor(tagged / 2));
-    const backward = way.lanes_back || (oneway ? 0 : Math.floor(tagged / 2));
-    const explicitTotal = oneway ? (forward || tagged || 0)
-      : (way.lanes_fwd || way.lanes_back ? (forward || 0) + (backward || 0) : tagged);
-    const inferredTotal = explicitTotal ? 0
-      : road >= 13.8 ? 4 : road >= 9.0 ? 2 : road >= 6.2 && oneway ? 2 : 1;
-    const total = explicitTotal || inferredTotal;
-    const opposing = !oneway && (explicitTotal ? total >= 2 : road >= 5.6);
+    // One profile, the same one the transitions and the trims read; this loop used to carry
+    // its own copy of the lane arithmetic and the two could disagree.
+    const { total, backward, opposing } = laneMarkingProfile(way, road);
     if (total >= 2) {
       const laneWidth = road / total;
       if (laneWidth >= 2.6 && markingPoints.length >= 2) {
@@ -7176,6 +7555,7 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
 
 // The corner pieces, once every pavement that meets at one is down.
 const cornersLaid = addPavementCorners();
+const junctionBoxes = addJunctionBoxes();
 
 // Ground. Everything that is not a road, a footway or a building stands on something -- back
 // yards, light wells, car parks, the middle of a block -- and none of it is mapped. Without a
@@ -9611,6 +9991,8 @@ window.kerbside = {
   scene, camera, renderer, groups, DATA, xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
+  recentred,
+  junctionBoxes,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
              laid: cornersLaid, legs: cornerLegs.length,
              ends: pavementCornerLaid.size, skipped: addPavementCorners.skipped },
@@ -9620,6 +10002,7 @@ window.kerbside = {
     return cornerLegs.filter((leg) => Math.hypot(leg.x - x, leg.y - y) <= reach).map((leg) => ({
       id: leg.id, name: leg.way.name, bearing: +(leg.bearing * 180 / Math.PI).toFixed(1),
       inner: +leg.inner.toFixed(2), walk: +leg.walk.toFixed(2), length: +leg.length.toFixed(1),
+      boxExit: leg.boxExit, internal: !!leg.way._junctionInternal,
       sides: Object.fromEntries([1, -1].map((side) => {
         const c = pavementCornerCuts.get(`${leg.id}:${side}`);
         const l = pavementCornerLaid.get(`${leg.id}:${side}`);
