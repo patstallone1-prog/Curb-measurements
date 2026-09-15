@@ -666,7 +666,9 @@ function surfaceMaterial(surface, color, opacity) {
   return new THREE.MeshStandardMaterial({
     color, opacity, roughness: surface === "road" ? 0.86 : 0.94, metalness: 0.02,
     transparent: opacity < 1 || painted,
-    alphaTest: painted ? 0.35 : 0,
+    // Paint or not paint, at the half: below this the edge fades over a texel and a bar reads
+    // as dissolving into the road at the far end of a street.
+    alphaTest: painted ? 0.5 : 0,
     map: surfaceBase(surface),
     side: THREE.DoubleSide,
     // The kerb carries its paint on its own vertices: red, yellow, white, green or blue over the
@@ -2445,14 +2447,22 @@ function crossingTexture() {
       ctx.fillRect(x, y, 1, 1);
     }
   }
-  // Softened edges: paint sprayed against a screed does not end on a pixel.
-  for (let i = 0; i < size * 2; i += 1) {
-    ctx.fillStyle = "rgba(244,245,240,0.35)";
-    ctx.fillRect(random(i * 7) < 0.5 ? 0 : size * 0.5 - 1, random(i * 3) * size, 1, 1);
-  }
+  // The bar ends where it ends. It used to be given a sprinkle of half-transparent pixels
+  // along each edge -- "paint sprayed against a screed" -- and, mipmapped and viewed at a
+  // grazing angle, that read as bars fading into the asphalt. Thermoplastic is laid to a
+  // line; the cutoff is hard.
+  return hardPaintTexture(canvas);
+}
+
+function hardPaintTexture(canvas) {
+  // A road-paint texture drawn crisp: no filtering across the paint's edge, and the
+  // anisotropy to keep a bar a bar down the length of a street.
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.anisotropy = 8;
   return texture;
 }
 
@@ -2475,10 +2485,7 @@ function crossingEdgeTexture() {
     ctx.fillStyle = random(i * 9) < 0.7 ? "rgba(24,26,28,0.28)" : "rgba(255,255,255,0.14)";
     ctx.fillRect(random(i * 7) * size, y, 1, 1);
   }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
+  return hardPaintTexture(canvas);
 }
 
 const CROSSING_EDGES = crossingEdgeTexture();
@@ -7356,8 +7363,8 @@ for (const way of DRAW_ORDER) {
         // The tint is already in the texture, so keying on that merges them down to the number
         // of distinct doors the city actually has rather than the number of openings.
         if (panel) addMerged("garage", panel, "garage");
-        const apron = apronSlab(opening);
-        if (apron) addMerged("apron", apron, "apron");
+        // The dropped kerb itself is made after the pavements are merged, in
+        // dropKerbsAtDriveways: the pavement is let down, not a ramp laid on it.
       }
     }
     continue;
@@ -8744,6 +8751,96 @@ const isBuilt = (key) => key.startsWith("part|") || key.startsWith("plane|")
 flushMerged(groups.streets, (key) => !isBuilt(key));
 flushMerged(groups.mapped3d, isBuilt);
 
+// ---- the dropped kerb at every garage ----
+//
+// A driveway is not a ramp laid on the pavement: it is the pavement itself, let down to the
+// gutter across the width of the door and flared a little either side, so a car rolls up off
+// the street. The apron slab drew that ramp -- and drew it inside the solid pavement, whose
+// kerb ran straight past every garage at full height with the slope buried under it. The
+// pavement and its kerb tile are lowered here, on their own vertices, along the city's 14,130
+// dropped kerbs: the kerb edge to the gutter, rising to footway level at the property line,
+// flared over APRON_FLARE_M beyond the door on each side.
+function dropKerbsAtDriveways(ways) {
+  const cell = 6.0;
+  const grid = new Map();
+  let openings = 0;
+  for (const way of ways) {
+    if (way.kind !== "building" || !way.garages) continue;
+    for (const opening of way.garages) {
+      if (!opening.kp || opening.on === undefined) continue;
+      const [kx, ky] = xy(opening.kp[0], opening.kp[1]);
+      const bearing = opening.on * Math.PI / 180;
+      const drop = {
+        x: kx, z: -ky, ox: Math.sin(bearing), oz: -Math.cos(bearing),
+        half: Math.max(1.1, (opening.w || 3.5) / 2), depth: Math.max(1.5, Math.min(opening.walk || 3.0, 5.0)),
+      };
+      // The city's kerb point is on the city's kerb line, which runs a metre or two from this
+      // model's kerb on many blocks. The drop is made at the kerb that is drawn: the nearest
+      // one, going inward from it the way the pavement does. Where none is near, the record
+      // is of a driveway this model's kerb does not run past.
+      const kerb = nearestKerbAt(drop.x, drop.z, 4.0);
+      if (!kerb) continue;
+      drop.x = kerb.x;
+      drop.z = kerb.z;
+      drop.ox = kerb.nx;
+      drop.oz = kerb.nz;
+      const reach = drop.half + APRON_FLARE_M + drop.depth;
+      for (let ix = Math.floor((drop.x - reach) / cell); ix <= Math.floor((drop.x + reach) / cell); ix += 1) {
+        for (let iz = Math.floor((drop.z - reach) / cell); iz <= Math.floor((drop.z + reach) / cell); iz += 1) {
+          const key = `${ix}:${iz}`;
+          let bucket = grid.get(key);
+          if (!bucket) grid.set(key, bucket = []);
+          bucket.push(drop);
+        }
+      }
+      openings += 1;
+    }
+  }
+  if (!openings) return 0;
+  const gutter = ROAD_TOP_M + 0.002;
+  let lowered = 0;
+  groups.streets.traverse((o) => {
+    if (!o.isMesh || !["walk", "walk_narrow", "kerb"].includes(o.userData.surface)) return;
+    const pos = o.geometry.getAttribute("position");
+    let touched = false;
+    for (let i = 0; i < pos.count; i += 1) {
+      const y = pos.getY(i);
+      if (y < ROAD_TOP_M + 0.03) continue;                 // a face's foot, already at the gutter
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const bucket = grid.get(`${Math.floor(x / cell)}:${Math.floor(z / cell)}`);
+      if (!bucket) continue;
+      let lowest = y;
+      for (const d of bucket) {
+        const dx = x - d.x;
+        const dz = z - d.z;
+        const inward = dx * d.ox + dz * d.oz;
+        const across = Math.abs(-dx * d.oz + dz * d.ox);
+        if (inward < -0.35 || inward > d.depth || across > d.half + APRON_FLARE_M) continue;
+        // Up the ramp from the gutter to footway level at the property line, and out across
+        // the flare from full drop to none.
+        const rise = Math.max(0, Math.min(1, inward / d.depth));
+        const flare = across <= d.half ? 1 : 1 - (across - d.half) / APRON_FLARE_M;
+        const ramp = gutter + (y - gutter) * rise;
+        const target = y - (y - ramp) * flare;
+        if (target < lowest) lowest = target;
+      }
+      if (lowest < y - 1e-4) {
+        pos.setY(i, lowest);
+        touched = true;
+        lowered += 1;
+      }
+    }
+    if (touched) {
+      pos.needsUpdate = true;
+      o.geometry.computeVertexNormals();
+      o.geometry.computeBoundingSphere();
+    }
+  });
+  return lowered;
+}
+const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
+
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
   const [x1, y1] = xy(d.west, d.north);
@@ -8905,11 +9002,55 @@ function kerbRunsFor(record, maxTurnDeg = null) {
   return runs;
 }
 
+//: A sign point inside the roadway is carried this far onto the pavement from the nearest
+//: kerb: a post stands a foot or so back from the kerb face.
+const FURNITURE_KERB_SETBACK_M = 0.45;
+//: And no further than this. A stop sign is digitised in the middle of the junction it
+//: controls, seven metres from any kerb of a fifteen-metre street.
+const FURNITURE_SNAP_REACH_M = 12.0;
+
+function nearestGroundOffRoad(x, z, reach) {
+  // The nearest point to (x, z) that is on neither a carriageway nor a junction box, by rings
+  // of samples outward.
+  for (let r = 0.6; r <= reach; r += 0.4) {
+    for (let k = 0; k < 16; k += 1) {
+      const a = (k / 16) * Math.PI * 2;
+      const px = x + Math.cos(a) * r;
+      const pz = z + Math.sin(a) * r;
+      if (insideCarriageway(px, pz, 0.15) || insideJunctionBox(px, pz)) continue;
+      return [px + Math.cos(a) * FURNITURE_KERB_SETBACK_M, pz + Math.sin(a) * FURNITURE_KERB_SETBACK_M];
+    }
+  }
+  return null;
+}
+
 function furnitureAnchor(item) {
   if (!item || !item.p || item.p.length < 2) return null;
-  const [x, y] = xy(item.p[0], item.p[1]);
-  const z = -y;
-  if (insideBikeLane(x, z, 0.15) || insideCarriageway(x, z, 0.25)) return null;
+  let [x, y] = xy(item.p[0], item.p[1]);
+  let z = -y;
+  if (insideBikeLane(x, z, 0.15) || insideCarriageway(x, z, 0.25)) {
+    // SFMTA's sign points are digitised against its centrelines and a good half of them land
+    // on the roadway of this model, whose kerbs are a metre or two from where the city's
+    // lines put them. They were dropped -- 14,000 of 24,600 signs -- when they are simply
+    // on the wrong side of a kerb that is close by. Carried to the nearest kerb and set back
+    // from it, a sign stands where a sign stands.
+    const kerb = nearestKerbAt(x, z, FURNITURE_SNAP_REACH_M);
+    let moved = false;
+    if (kerb) {
+      const kx = kerb.x + kerb.nx * FURNITURE_KERB_SETBACK_M;
+      const kz = kerb.z + kerb.nz * FURNITURE_KERB_SETBACK_M;
+      if (!insideCarriageway(kx, kz, 0.1) && !insideJunctionBox(kx, kz)) { x = kx; z = kz; moved = true; }
+    }
+    if (!moved) {
+      // At a junction the nearest kerb of one street is inside the other, and nearestKerbAt
+      // rightly refuses it. The nearest ground that is not roadway is the corner, and that is
+      // where a stop sign stands.
+      const spot = nearestGroundOffRoad(x, z, FURNITURE_SNAP_REACH_M);
+      if (!spot) return null;
+      x = spot[0];
+      z = spot[1];
+    }
+  }
   const top = pavementTopAt(x, z);
   return { x, z, y: top === undefined ? ROAD_TOP_M + KERB_FALLBACK : top };
 }
@@ -9003,80 +9144,387 @@ function addMuniShelters(records) {
   return added;
 }
 
-function stopSignShapeGeometry() {
-  const shape = new THREE.Shape();
-  const radius = 0.43;
-  for (let i = 0; i < 8; i += 1) {
-    const a = Math.PI / 8 + i * Math.PI / 4;
-    const x = Math.cos(a) * radius;
-    const y = Math.sin(a) * radius;
-    if (i === 0) shape.moveTo(x, y);
-    else shape.lineTo(x, y);
-  }
-  shape.closePath();
-  const geometry = new THREE.ShapeGeometry(shape);
-  geometry.computeVertexNormals();
-  return geometry;
+// ---- the signs, saying what they say ----
+//
+// SFMTA's sign inventory carries the legend of every sign: "SPEED LIMIT 25", "NPRK 2AM-6AM
+// TUE THUR STCL", "2 HR PRK 8AM-6PM MON-FRI EXC "G" PERMITS". The plates were blank white
+// rectangles and the stop signs plain red octagons. Each legend is now drawn once into a
+// shared atlas -- the plate in the colours the city uses for that class of sign, the words
+// wrapped onto it -- and every sign is a quad that reads its own tile. A stop sign is a red
+// octagon with STOP on it, a warning is a yellow diamond, a street name a green blade; the
+// shape is in the tile's alpha, so one material draws them all.
+//
+// The plate stands in front of its post, not through it: the post is behind the sign, which is
+// where a post is, and from the road you see the face and not a pole down the middle of it.
+// Several legends at one point are one post with the plates stacked down it.
+const PLATE_TILE_PX = 192;
+const PLATE_ATLAS_PX = 2048;
+const PLATE_PER_ROW = Math.floor(PLATE_ATLAS_PX / PLATE_TILE_PX);
+const PLATE_PER_ATLAS = PLATE_PER_ROW * PLATE_PER_ROW;
+//: The post's radius plus the bracket: how far the plate stands in front of the post's axis.
+const PLATE_STANDOFF_M = 0.05;
+//: Plates on one post are this far apart, and the topmost sits at the panel height.
+const PLATE_GAP_M = 0.06;
+//: Points closer than this are one post.
+const PLATE_SAME_POST_M = 0.35;
+
+const plateAtlases = [];
+const PLATE_SLOTS = new Map();
+
+function newPlateAtlas() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = PLATE_ATLAS_PX;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, PLATE_ATLAS_PX, PLATE_ATLAS_PX);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  const atlas = { canvas, ctx, texture, used: 0, index: plateAtlases.length, sink: newSink() };
+  plateAtlases.push(atlas);
+  return atlas;
 }
 
-const STOP_SIGN_GEOMETRY = stopSignShapeGeometry();
+//: What each class of sign looks like: plate colour, lettering colour, shape, and the plate's
+//: real size in metres. The colours are the MUTCD's and the city's: red-on-white for parking
+//: prohibitions and street cleaning, green-on-white for time-limited parking, white-on-green
+//: street blades, black-on-yellow diamonds for warnings, the red octagon.
+const PLATE_STYLES = {
+  stop:        { bg: "#b52127", fg: "#ffffff", shape: "octagon", w: 0.76, h: 0.76, border: "#ffffff" },
+  all_way:     { bg: "#b52127", fg: "#ffffff", shape: "plate", w: 0.46, h: 0.15, border: "#ffffff" },
+  yield:       { bg: "#ffffff", fg: "#b52127", shape: "triangle", w: 0.76, h: 0.66, border: "#b52127" },
+  warning:     { bg: "#f2c027", fg: "#111111", shape: "diamond", w: 0.76, h: 0.76, border: "#111111" },
+  no_parking:  { bg: "#ffffff", fg: "#b52127", shape: "plate", w: 0.30, h: 0.46, border: "#b52127" },
+  parking:     { bg: "#ffffff", fg: "#1e7a3e", shape: "plate", w: 0.30, h: 0.46, border: "#1e7a3e" },
+  street_name: { bg: "#1e7a3e", fg: "#ffffff", shape: "plate", w: 0.90, h: 0.23, border: "#ffffff" },
+  one_way:     { bg: "#111111", fg: "#ffffff", shape: "plate", w: 0.90, h: 0.30, border: "#ffffff" },
+  guide:       { bg: "#1e7a3e", fg: "#ffffff", shape: "plate", w: 0.60, h: 0.45, border: "#ffffff" },
+  bike:        { bg: "#ffffff", fg: "#111111", shape: "plate", w: 0.45, h: 0.60, border: "#111111" },
+  regulatory:  { bg: "#ffffff", fg: "#111111", shape: "plate", w: 0.45, h: 0.60, border: "#111111" },
+};
 
-function addOfficialStopSigns(records) {
+function plateStyleFor(sign) {
+  const category = String((sign.tags || {}).SIGN_CATEGORY || "").toUpperCase();
+  const klass = String((sign.tags || {}).SIGN_CLASS || "").toUpperCase();
+  const label = String(sign.label || "").toUpperCase();
+  if (sign.sign_kind === "stop" || label === "STOP") return "stop";
+  if (sign.sign_kind === "all_way" || category === "ALL WAY") return "all_way";
+  if (sign.sign_kind === "yield" || label.startsWith("YIELD")) return "yield";
+  if (category === "STREET NAME") return "street_name";
+  if (category.startsWith("ONE WAY")) return "one_way";
+  if (klass === "WARNING" || category.startsWith("SCHOOL") || category.startsWith("PEDESTRIAN")) {
+    return "warning";
+  }
+  if (category === "STREET CLEANING" || category.startsWith("TOW") || category.startsWith("PARKING:NPRK")
+      || category.startsWith("PARKING:NO DBL") || label.startsWith("NPRK") || label.startsWith("TANP")) {
+    return "no_parking";
+  }
+  if (category.startsWith("PARKING")) return "parking";
+  if (klass === "GUIDE" && !category.startsWith("BIKE")) return "guide";
+  if (category.startsWith("BIKE")) return "bike";
+  return "regulatory";
+}
+
+//: Assets in the sign inventory that are not signs at all, and what they are instead.
+function plateAssetKind(sign) {
+  const category = String((sign.tags || {}).SIGN_CATEGORY || "").toUpperCase();
+  const label = String(sign.label || "").toUpperCase();
+  if (category === "BIKE RACK" || label === "BIKE RACK") return "bike_rack";
+  if (category.startsWith("DELINEATOR") || label.includes("DELINEATOR")) return "delineator";
+  if (label.includes("LANTERN")) return "lantern";
+  return "sign";
+}
+
+function plateLegend(label) {
+  // The inventory's shorthand, read out: "NPRK 2AM-6AM TUE THUR STCL" is NO PARKING 2AM-6AM
+  // TUE THUR STREET CLEANING, "(RA)" is a right arrow, "(SYM)" marks a symbol the legend does
+  // not spell out and says nothing on the plate.
+  return String(label || "")
+    .toUpperCase()
+    .replace(/\(RA\)/g, "→").replace(/\(LA\)/g, "←")
+    .replace(/\(H\/C SYM\)/g, "♿").replace(/\(SYM\)/g, "").replace(/\s+\/\s*/g, " / ")
+    .replace(/NPRK/g, "NO PARKING").replace(/TANP/g, "TOW-AWAY NO PARKING")
+    .replace(/TANSAT/g, "TOW-AWAY NO STOPPING ANY TIME").replace(/STCL/g, "STREET CLEANING")
+    .replace(/PRK/g, "PARKING").replace(/EXC/g, "EXCEPT").replace(/PLO/g, "PASSENGER LOADING ONLY")
+    .replace(/TA/g, "TOW-AWAY").replace(/DBL/g, "DOUBLE").replace(/PRK/g, "PARKING")
+    .replace(/\s{2,}/g, " ").trim();
+}
+
+function wrapLegend(ctx, text, maxWidth, maxLines) {
+  const words = text.split(/\s+|(?<=\/)/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const trial = line ? `${line} ${word}` : word;
+    if (ctx.measureText(trial).width <= maxWidth || !line) line = trial;
+    else { lines.push(line); line = word; }
+    if (lines.length >= maxLines) break;
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  return lines;
+}
+
+function plateSilhouetteSlot(style) {
+  // The back of a plate: the same outline in plain aluminium grey, one tile per style. The
+  // face's own tile would show its legend through the grey, mirrored.
+  return plateSlot({ label: "", sign_kind: null, tags: {} }, style, true);
+}
+
+function plateSlot(sign, forcedStyle = null, silhouette = false) {
+  const style = forcedStyle || plateStyleFor(sign);
+  const text = silhouette ? "" : plateLegend(sign.label);
+  const key = silhouette ? `back|${style}` : `${style}|${text}`;
+  const cached = PLATE_SLOTS.get(key);
+  if (cached) return cached;
+  let atlas = plateAtlases[plateAtlases.length - 1];
+  if (!atlas || atlas.used >= PLATE_PER_ATLAS) atlas = newPlateAtlas();
+  const spec = PLATE_STYLES[style];
+  const col = atlas.used % PLATE_PER_ROW;
+  const row = Math.floor(atlas.used / PLATE_PER_ROW);
+  atlas.used += 1;
+  const ox = col * PLATE_TILE_PX;
+  const oy = row * PLATE_TILE_PX;
+  const ctx = atlas.ctx;
+  // The plate drawn at its own aspect inside the square tile; what the tile leaves over is
+  // transparent, which is what gives an octagon its corners and a blade its width.
+  const scale = Math.min((PLATE_TILE_PX - 6) / spec.w, (PLATE_TILE_PX - 6) / spec.h);
+  const pw = spec.w * scale;
+  const ph = spec.h * scale;
+  const px = ox + (PLATE_TILE_PX - pw) / 2;
+  const py = oy + (PLATE_TILE_PX - ph) / 2;
+  ctx.save();
+  ctx.beginPath();
+  if (spec.shape === "octagon") {
+    const r = pw / 2;
+    for (let i = 0; i < 8; i += 1) {
+      const a = Math.PI / 8 + i * Math.PI / 4;
+      const x = px + r + Math.cos(a) * r;
+      const y = py + r + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+  } else if (spec.shape === "diamond") {
+    ctx.moveTo(px + pw / 2, py); ctx.lineTo(px + pw, py + ph / 2);
+    ctx.lineTo(px + pw / 2, py + ph); ctx.lineTo(px, py + ph / 2);
+  } else if (spec.shape === "triangle") {
+    ctx.moveTo(px, py); ctx.lineTo(px + pw, py); ctx.lineTo(px + pw / 2, py + ph);
+  } else {
+    ctx.rect(px, py, pw, ph);
+  }
+  ctx.closePath();
+  ctx.fillStyle = silhouette ? "#8a9093" : spec.bg;
+  ctx.fill();
+  ctx.lineWidth = Math.max(2, pw * 0.035);
+  ctx.strokeStyle = silhouette ? "#6f7477" : spec.border;
+  ctx.stroke();
+  ctx.clip();
+  // The words. Set as large as fits: one line for a short legend, up to six for a parking
+  // regulation, smaller until the longest line fits the plate.
+  ctx.fillStyle = spec.fg;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const inset = spec.shape === "plate" ? 0.08 : 0.24;
+  const maxW = pw * (1 - 2 * inset);
+  const maxH = ph * (1 - 2 * (spec.shape === "triangle" ? 0.3 : inset));
+  let lines = [];
+  let size = Math.max(10, Math.min(ph * 0.5, pw * 0.34));
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    ctx.font = `bold ${Math.round(size)}px Helvetica, Arial, sans-serif`;
+    lines = wrapLegend(ctx, text, maxW, 6);
+    const widest = Math.max(...lines.map((l) => ctx.measureText(l).width), 1);
+    if (lines.length * size * 1.12 <= maxH && widest <= maxW) break;
+    size *= 0.88;
+  }
+  const lineH = size * 1.12;
+  const y0 = py + ph / 2 - ((lines.length - 1) * lineH) / 2 + (spec.shape === "triangle" ? -ph * 0.14 : 0);
+  lines.forEach((line, i) => ctx.fillText(line, px + pw / 2, y0 + i * lineH));
+  ctx.restore();
+  atlas.texture.needsUpdate = true;
+  const slot = {
+    atlas, style, w: spec.w, h: spec.h,
+    u0: (px - 1) / PLATE_ATLAS_PX, u1: (px + pw + 1) / PLATE_ATLAS_PX,
+    v0: 1 - (py + ph + 1) / PLATE_ATLAS_PX, v1: 1 - (py - 1) / PLATE_ATLAS_PX,
+  };
+  PLATE_SLOTS.set(key, slot);
+  return slot;
+}
+
+const PLATE_MATERIALS = new Map();
+function plateMaterial(atlas) {
+  if (!PLATE_MATERIALS.has(atlas.index)) {
+    PLATE_MATERIALS.set(atlas.index, new THREE.MeshStandardMaterial({
+      map: atlas.texture, transparent: true, alphaTest: 0.5, side: THREE.FrontSide,
+      roughness: 0.55, metalness: 0.05,
+    }));
+  }
+  return PLATE_MATERIALS.get(atlas.index);
+}
+
+function addOfficialSignPlates(records) {
+  // Every sign on its post, the plates stacked where several share one.
   const anchors = records.map((item, index) => ({ item, index, anchor: furnitureAnchor(item) }))
     .filter((row) => row.anchor);
+  if (!anchors.length) return { signs: 0, posts: 0, racks: 0 };
+  // One post per point: rows within PLATE_SAME_POST_M of an earlier one join it.
+  const cell = 2.0;
+  const grid = new Map();
+  const posts = [];
+  for (const row of anchors) {
+    const kind = plateAssetKind(row.item);
+    const key = `${Math.floor(row.anchor.x / cell)}:${Math.floor(row.anchor.z / cell)}`;
+    let post = null;
+    if (kind === "sign") {
+      for (let dx = -1; dx <= 1 && !post; dx += 1) {
+        for (let dz = -1; dz <= 1 && !post; dz += 1) {
+          for (const other of grid.get(`${Math.floor(row.anchor.x / cell) + dx}:${Math.floor(row.anchor.z / cell) + dz}`) || []) {
+            if (Math.hypot(other.anchor.x - row.anchor.x, other.anchor.z - row.anchor.z) <= PLATE_SAME_POST_M) {
+              post = other;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (post) { post.rows.push(row); continue; }
+    post = { anchor: row.anchor, rows: [row], kind };
+    posts.push(post);
+    let bucket = grid.get(key);
+    if (!bucket) grid.set(key, bucket = []);
+    bucket.push(post);
+  }
+  // The backs read the same atlas for their outline and are painted over it in grey, so
+  // they are sunk by atlas as the faces are.
+  const backSinks = new Map();
+  let signs = 0;
+  const postAnchors = [];
+  const racks = [];
+  const delineators = [];
+  const lanterns = [];
+  for (const post of posts) {
+    if (post.kind === "bike_rack") { racks.push(post); continue; }
+    if (post.kind === "delineator") { delineators.push(post); continue; }
+    if (post.kind === "lantern") { lanterns.push(post); continue; }
+    const first = post.rows[0];
+    const yaw = furnitureBearing(first.item, first.index, post.anchor);
+    // The face's normal, and the plate's rightward direction as it is read.
+    const nx = Math.sin(yaw);
+    const nz = Math.cos(yaw);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    // Stop first, then its ALL WAY plaque, then the rest, top down.
+    const order = { stop: 0, all_way: 1 };
+    post.rows.sort((a, b) => (order[plateStyleFor(a.item)] ?? 2) - (order[plateStyleFor(b.item)] ?? 2));
+    let top = post.anchor.y + FURNITURE_PANEL_BOTTOM_M + PLATE_STYLES[plateStyleFor(first.item)].h;
+    for (const row of post.rows) {
+      const slot = plateSlot(row.item);
+      const cx = post.anchor.x + nx * PLATE_STANDOFF_M;
+      const cz = post.anchor.z + nz * PLATE_STANDOFF_M;
+      const bottom = top - slot.h;
+      if (bottom < post.anchor.y + 0.9) break;          // no room lower on the post
+      const hw = slot.w / 2;
+      const corners = [
+        [cx - rx * hw, bottom, cz - rz * hw], [cx + rx * hw, bottom, cz + rz * hw],
+        [cx + rx * hw, top, cz + rz * hw], [cx - rx * hw, top, cz - rz * hw],
+      ];
+      const sink = slot.atlas.sink;
+      const base = sink.positions.length / 3;
+      const uv = [[slot.u0, slot.v0], [slot.u1, slot.v0], [slot.u1, slot.v1], [slot.u0, slot.v1]];
+      for (let i = 0; i < 4; i += 1) {
+        sink.positions.push(corners[i][0], corners[i][1], corners[i][2]);
+        sink.uvs.push(uv[i][0], uv[i][1]);
+        sink.colours.push(1, 1, 1);
+      }
+      sink.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      // The back: aluminium, the same outline, a hair behind the face, wound the other way.
+      const shadow = plateSilhouetteSlot(slot.style);
+      const bx = cx - nx * 0.004;
+      const bz = cz - nz * 0.004;
+      let backSink = backSinks.get(shadow.atlas.index);
+      if (!backSink) backSinks.set(shadow.atlas.index, backSink = newSink());
+      const b2 = backSink.positions.length / 3;
+      const back = [
+        [bx + rx * hw, bottom, bz + rz * hw], [bx - rx * hw, bottom, bz - rz * hw],
+        [bx - rx * hw, top, bz - rz * hw], [bx + rx * hw, top, bz + rz * hw],
+      ];
+      const buv = [[shadow.u1, shadow.v0], [shadow.u0, shadow.v0], [shadow.u0, shadow.v1], [shadow.u1, shadow.v1]];
+      for (let i = 0; i < 4; i += 1) {
+        backSink.positions.push(back[i][0], back[i][1], back[i][2]);
+        backSink.uvs.push(buv[i][0], buv[i][1]);
+        backSink.colours.push(1, 1, 1);
+      }
+      backSink.indices.push(b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3);
+      top = bottom - PLATE_GAP_M;
+      signs += 1;
+    }
+    postAnchors.push(post.anchor);
+  }
+  for (const atlas of plateAtlases) {
+    const mesh = flushSink(atlas.sink, plateMaterial(atlas), "furniture:sign_plate");
+    if (mesh) groups.furniture.add(mesh);
+    atlas.sink = newSink();
+  }
+  for (const [index, backSink] of backSinks) {
+    const material = new THREE.MeshStandardMaterial({
+      map: plateAtlases[index].texture, transparent: true, alphaTest: 0.5,
+      side: THREE.FrontSide, roughness: 0.6, metalness: 0.35,
+    });
+    const mesh = flushSink(backSink, material, "furniture:sign_back");
+    if (mesh) groups.furniture.add(mesh);
+  }
+  // The posts, at the points, with the plates in front of them.
+  addFurniturePostsAt(postAnchors, FURNITURE_POST_H_M, 0.026, 0x9aa1a3);
+  addBikeRacks(racks.map((p) => p.anchor));
+  addFurniturePostsAt(delineators.map((p) => p.anchor), 1.1, 0.04, 0xf4f4f0);
+  addFurniturePostsAt(lanterns.map((p) => p.anchor), 3.2, 0.05, 0x2f3436);
+  return { signs, posts: postAnchors.length, racks: racks.length, delineators: delineators.length };
+}
+
+function addFurniturePostsAt(anchors, height, radius, colour) {
   if (!anchors.length) return 0;
-  const faces = new THREE.InstancedMesh(
-    STOP_SIGN_GEOMETRY,
-    new THREE.MeshStandardMaterial({
-      color: 0xb52127,
-      roughness: 0.58,
-      metalness: 0.02,
-      side: THREE.FrontSide,
-    }),
-    anchors.length,
-  );
-  const backs = new THREE.InstancedMesh(
-    STOP_SIGN_GEOMETRY,
-    new THREE.MeshStandardMaterial({
-      color: 0x7b8082,
-      roughness: 0.72,
-      metalness: 0.18,
-      side: THREE.FrontSide,
-    }),
-    anchors.length,
-  );
-  const poles = new THREE.InstancedMesh(
-    new THREE.CylinderGeometry(0.026, 0.032, 1, 6),
-    new THREE.MeshStandardMaterial({ color: 0x9aa1a3, roughness: 0.48, metalness: 0.54 }),
-    anchors.length,
-  );
+  const mesh = new THREE.InstancedMesh(
+    new THREE.CylinderGeometry(radius, radius * 1.2, 1, 6),
+    new THREE.MeshStandardMaterial({ color: colour, roughness: 0.48, metalness: 0.54 }),
+    anchors.length);
   const dummy = new THREE.Object3D();
-  anchors.forEach((row, i) => {
-    const yaw = furnitureBearing(row.item, row.index, row.anchor);
-    dummy.position.set(row.anchor.x, row.anchor.y + FURNITURE_PANEL_BOTTOM_M + 0.43, row.anchor.z);
-    dummy.rotation.set(0, yaw, 0);
-    dummy.scale.set(1, 1, 1);
+  anchors.forEach((a, i) => {
+    dummy.position.set(a.x, a.y + height / 2, a.z);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, height, 1);
     dummy.updateMatrix();
-    faces.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(row.anchor.x, row.anchor.y + FURNITURE_PANEL_BOTTOM_M + 0.43, row.anchor.z);
-    dummy.rotation.set(0, yaw + Math.PI, 0);
-    dummy.updateMatrix();
-    backs.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(row.anchor.x, row.anchor.y + FURNITURE_POST_H_M / 2, row.anchor.z);
-    dummy.rotation.set(0, yaw, 0);
-    dummy.scale.set(1, FURNITURE_POST_H_M, 1);
-    dummy.updateMatrix();
-    poles.setMatrixAt(i, dummy.matrix);
+    mesh.setMatrixAt(i, dummy.matrix);
   });
-  faces.instanceMatrix.needsUpdate = true;
-  backs.instanceMatrix.needsUpdate = true;
-  poles.instanceMatrix.needsUpdate = true;
-  faces.userData.surface = "furniture:official_stop_front";
-  backs.userData.surface = "furniture:official_stop_back";
-  poles.userData.surface = "furniture:official_stop_post";
-  groups.furniture.add(faces);
-  groups.furniture.add(backs);
-  groups.furniture.add(poles);
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.userData.surface = "furniture:post";
+  groups.furniture.add(mesh);
+  return anchors.length;
+}
+
+function addBikeRacks(anchors) {
+  // An inverted U: two legs and a bar, 0.8 m high and 0.6 m wide, square to the kerb.
+  if (!anchors.length) return 0;
+  const legs = new THREE.InstancedMesh(
+    new THREE.CylinderGeometry(0.022, 0.022, 1, 6),
+    new THREE.MeshStandardMaterial({ color: 0x2b2f31, roughness: 0.5, metalness: 0.6 }),
+    anchors.length * 3);
+  const dummy = new THREE.Object3D();
+  anchors.forEach((a, i) => {
+    const kerb = nearestKerbAt(a.x, a.z);
+    const yaw = kerb ? Math.atan2(-kerb.nx, -kerb.nz) : 0;
+    const rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    for (const [k, side] of [[0, -0.3], [1, 0.3]]) {
+      dummy.position.set(a.x + rx * side, a.y + 0.4, a.z + rz * side);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 0.8, 1);
+      dummy.updateMatrix();
+      legs.setMatrixAt(i * 3 + k, dummy.matrix);
+    }
+    dummy.position.set(a.x, a.y + 0.8, a.z);
+    dummy.rotation.set(0, yaw, Math.PI / 2);
+    dummy.scale.set(1, 0.6, 1);
+    dummy.updateMatrix();
+    legs.setMatrixAt(i * 3 + 2, dummy.matrix);
+  });
+  legs.instanceMatrix.needsUpdate = true;
+  legs.userData.surface = "furniture:bike_rack";
+  groups.furniture.add(legs);
   return anchors.length;
 }
 
@@ -9289,13 +9737,15 @@ function renderStreetFurniture(furniture) {
   // the same corner arrived as two shelters standing inside each other.
   const shelters = dedupeByDistance(inferred.shelters || [], SHELTER_CLUSTER_M);
   const ads = inferred.ad_panels || [];
-  const posts = officialOtherSigns.concat(signs, stops, ads);
+  const posts = signs.concat(stops, ads);
+  const plates = addOfficialSignPlates(officialSigns);
   const placed = {
     posts: addStreetFurniturePosts(posts),
-    official_stop_signs: addOfficialStopSigns(officialStops),
+    official_signs: plates.signs,
+    official_posts: plates.posts,
+    bike_racks: plates.racks,
     stop_signs: officialStops.length ? 0 : addInstancedFurniturePanels(signs.filter((s) => s.sign_kind === "stop"), 0.72, 0.72, 0xb52127, "furniture:stop"),
-    yield_signs: addInstancedFurniturePanels(signs.filter((s) => s.sign_kind === "yield"), 0.86, 0.74, 0xf9fbf8, "furniture:yield"),
-    official_signs: addInstancedFurniturePanels(officialOtherSigns, 0.44, 0.62, 0xf3f5ef, "furniture:official_sign"),
+    yield_signs: officialSigns.length ? 0 : addInstancedFurniturePanels(signs.filter((s) => s.sign_kind === "yield"), 0.86, 0.74, 0xf9fbf8, "furniture:yield"),
     generic_signs: officialOtherSigns.length ? 0 : addInstancedFurniturePanels(signs.filter((s) => !["stop", "yield"].includes(s.sign_kind)), 0.44, 0.62, 0xf3f5ef, "furniture:generic"),
     bus_flags: addInstancedFurniturePanels(stops, 0.48, 0.34, 0x2a6db8, "furniture:bus_stop", 2.25),
     ad_panels: addInstancedFurniturePanels(ads, 1.2, 1.8, 0xffffff, "furniture:blank_ad", 0.55),
@@ -9993,6 +10443,8 @@ window.kerbside = {
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
   recentred,
   junctionBoxes,
+  kerbVerticesDropped,
+  nearestKerbAt, furnitureAnchor,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
              laid: cornersLaid, legs: cornerLegs.length,
              ends: pavementCornerLaid.size, skipped: addPavementCorners.skipped },
