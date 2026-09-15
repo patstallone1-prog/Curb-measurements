@@ -2276,51 +2276,9 @@ function entryTexture(seed, archetype) {
   ctx.fillStyle = "rgba(0,0,0,0.20)";
   ctx.fillRect(0, 118, 128, 6);
 
-  if (archetype === "retail" || archetype === "restaurant") {
-    const awning = archetype === "restaurant"
-      ? (random(seed + 5) < 0.5 ? "#9b2f24" : "#1f6b55")
-      : (random(seed + 5) < 0.5 ? "#264f7f" : "#b48a35");
-    ctx.fillStyle = "rgba(18,22,24,0.82)";
-    ctx.fillRect(8, 36, 112, 70);
-    const glass = ctx.createLinearGradient(0, 42, 0, 108);
-    glass.addColorStop(0, "rgba(140,174,192,0.88)");
-    glass.addColorStop(1, "rgba(64,84,96,0.92)");
-    ctx.fillStyle = glass;
-    ctx.fillRect(13, 42, 42, 58);
-    ctx.fillRect(73, 42, 42, 58);
-    ctx.fillStyle = "rgba(36,28,22,0.95)";
-    ctx.fillRect(57, 43, 14, 60);
-    ctx.fillStyle = "rgba(255,232,160,0.74)";
-    ctx.fillRect(62, 69, 3, 3);
-    ctx.fillStyle = awning;
-    ctx.fillRect(4, 20, 120, 18);
-    // No words on the awning. It used to say CAFE or SHOP, which is a placeholder pretending
-    // to be a sign; the business's own name goes on the sign geometry over the door, from
-    // OpenStreetMap, Overture or Google, and where none of them knows it the awning is blank.
-    ctx.fillStyle = "rgba(255,255,255,0.34)";
-    for (let x = 12; x < 120; x += 18) ctx.fillRect(x, 20, 8, 18);
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
-    ctx.strokeRect(12.5, 41.5, 103, 59);
-  } else if (archetype === "office" || archetype === "hotel") {
-    const glass = ctx.createLinearGradient(0, 18, 0, 112);
-    glass.addColorStop(0, "rgba(160,192,206,0.88)");
-    glass.addColorStop(1, "rgba(70,90,102,0.92)");
-    ctx.fillStyle = "rgba(0,0,0,0.28)";
-    ctx.fillRect(16, 17, 96, 94);
-    ctx.fillStyle = glass;
-    ctx.fillRect(20, 20, 88, 88);
-    ctx.fillStyle = "rgba(255,255,255,0.52)";
-    ctx.fillRect(62, 20, 3, 88);
-    ctx.fillRect(20, 55, 88, 2);
-    ctx.fillStyle = "rgba(20,24,26,0.88)";
-    ctx.fillRect(49, 70, 30, 38);
-    if (archetype === "hotel") {
-      ctx.fillStyle = "rgba(255,255,255,0.76)";
-      ctx.font = "bold 12px system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("HOTEL", 64, 36);
-    }
-  } else {
+  // The door of a house. Shops, offices and hotels have their storefronts drawn for what
+  // they are (see addStorefronts); this is the front door and the step.
+  {
     const paint = random(seed + 7) < 0.5 ? "#244a61" : random(seed + 9) < 0.5 ? "#7a3d35" : "#315b43";
     ctx.fillStyle = "rgba(0,0,0,0.24)";
     ctx.fillRect(44, 26, 40, 86);
@@ -5528,8 +5486,16 @@ function measureTracked(ctx, text, track) {
 
 const SIGN_SLOTS = new Map();
 
-function signSlot(name, trade) {
-  const key = `${trade}|${name}`;
+function inkFor(colour) {
+  // Letters that read: dark on a light board, light on a dark one. Every sign used to be set
+  // in near-white, which on the pale awnings the lighter buildings get was white on cream.
+  const hsl = {};
+  colour.getHSL(hsl, THREE.SRGBColorSpace);
+  return hsl.l > 0.52 ? "dark" : "light";
+}
+
+function signSlot(name, trade, ink = "light") {
+  const key = `${trade}|${ink}|${name}`;
   const cached = SIGN_SLOTS.get(key);
   if (cached) return cached;
 
@@ -5565,9 +5531,9 @@ function signSlot(name, trade) {
   c.font = ctx.font;
   c.textBaseline = "middle";
   // Painted letters, with the faint shadow a raised letter throws on the board behind it.
-  c.fillStyle = "rgba(0,0,0,0.34)";
+  c.fillStyle = ink === "dark" ? "rgba(255,255,255,0.30)" : "rgba(0,0,0,0.34)";
   drawTracked(c, text, ax + SIGN_PAD_PX + 1.2, ay + SIGN_ROW_PX / 2 + 1.4, style.track * scale);
-  c.fillStyle = "rgba(250,248,242,0.97)";
+  c.fillStyle = ink === "dark" ? "rgba(24,22,20,0.97)" : "rgba(250,248,242,0.97)";
   drawTracked(c, text, ax + SIGN_PAD_PX, ay + SIGN_ROW_PX / 2, style.track * scale);
   atlas.texture.needsUpdate = true;
   atlas.x += width + SIGN_PAD_PX;
@@ -5633,7 +5599,8 @@ function awningMaterial(kind) {
   if (!AWNING_MATERIALS[kind]) {
     AWNING_MATERIALS[kind] = new THREE.MeshStandardMaterial({
       color: 0xffffff, vertexColors: true, side: THREE.DoubleSide,
-      roughness: kind === "board" ? 0.72 : 0.88, metalness: kind === "board" ? 0.12 : 0.0,
+      roughness: kind === "board" ? 0.72 : kind === "band" ? 0.8 : 0.88,
+      metalness: kind === "board" ? 0.12 : 0.0,
     });
   }
   return AWNING_MATERIALS[kind];
@@ -5912,20 +5879,21 @@ function addShopfronts(feature, seed, height, tint) {
   const wall = bestFacadeWall(feature, false);
   if (!wall || wall.span < 4.0) return;
 
-  // Several businesses share a street wall by dividing it, which is what a block of shops is.
-  const fit = Math.max(1, Math.min(shops.length, Math.floor(wall.span / 5.0)));
-  const share = wall.span / fit;
+  // Several businesses share a street wall by dividing it, which is what a block of shops is:
+  // the same bays the storefronts are drawn in, so each sign is over its own front.
   const colour = awningColour(tint);
-  for (let i = 0; i < fit; i += 1) {
-    const shop = shops[i];
+  const bays = shopBays(feature, wall);
+  for (let i = 0; i < bays.length; i += 1) {
+    const shop = bays[i].shop;
     if (!shop || !shop.n) continue;
-    const centre = -wall.span / 2 + share * (i + 0.5);
+    const share = bays[i].share;
+    const centre = bays[i].centre;
     const width = Math.min(share * 0.82, 7.5);
     if (width < 2.2) continue;
     const at = shopFrame(wall, centre);
     const trade = shop.t || "shop";
     const kind = pickAwning(trade, seed + i * 31.7);
-    const slot = signSlot(shop.n, trade);
+    const slot = signSlot(shop.n, trade, inkFor(colour));
     const sink = awningSink(kind);
     if (kind === "board") buildBoard(sink, at, width, colour, slot, slot.atlas);
     else if (kind === "dome") buildDome(sink, at, width, colour, slot, slot.atlas);
@@ -5955,7 +5923,8 @@ function addBuildingNamePlaque(group, feature, seed, height, tint) {
   if (!wall || wall.span < 5.0) return;
 
   const trade = buildingNameTrade(feature);
-  const slot = signSlot(name, trade);
+  const colour = awningColour(tint).multiplyScalar(0.58);
+  const slot = signSlot(name, trade, inkFor(colour));
   const boardH = Math.min(0.86, Math.max(0.50, height * 0.055));
   const signH = Math.max(0.30, boardH - 0.18);
   const boardW = Math.min(wall.span - 0.7, Math.max(3.0, signH * slot.aspect + 0.42));
@@ -5964,7 +5933,6 @@ function addBuildingNamePlaque(group, feature, seed, height, tint) {
   const bottom = Math.min(height - boardH - 0.25, Math.max(3.05, Math.min(5.5, height * 0.38)));
   if (!(bottom > 1.5)) return;
 
-  const colour = awningColour(tint).multiplyScalar(0.58);
   const sink = awningSink("board");
   const corner = (along, y, out = 0.16) => {
     const point = wallPoint(wall, along, out);
@@ -5996,19 +5964,532 @@ function emitShopfronts() {
   }
 }
 
-function addGroundFacadeDetail(group, feature, seed, height) {
-  const shopfront = feature.archetype === "retail" || feature.archetype === "restaurant"
-    || feature.archetype === "office" || feature.archetype === "hotel";
+function addGroundFacadeDetail(group, feature, seed, height, tint) {
+  // A building with businesses in it, or of a business's kind, gets its storefronts; a house
+  // gets its door.
+  if (hasStorefront(feature)) {
+    addStorefronts(group, feature, seed, height, tint);
+    return;
+  }
   const residential = feature.archetype === "residential" || feature.archetype === "generic";
-  if (!shopfront && !residential) return;
-  const wall = bestFacadeWall(feature, shopfront ? false : true);
+  if (!residential) return;
+  const wall = bestFacadeWall(feature, true);
   if (!wall) return;
-  const panelW = shopfront ? Math.min(wall.span * 0.86, 18) : Math.min(wall.span * 0.62, 7.2);
-  const panelH = shopfront ? Math.min(4.2, Math.max(3.1, height * 0.34)) : Math.min(3.35, height - 0.3);
+  const panelW = Math.min(wall.span * 0.62, 7.2);
+  const panelH = Math.min(3.35, height - 0.3);
   const anchor = wallPoint(wall, 0, 0.11);
   planePart(group, anchor.x, 0.06, anchor.z, panelW, panelH,
             entryTextureFor(seed, feature.archetype), wall.yaw);
 }
+
+// ---- storefronts ----
+//
+// A shopfront is drawn for what the shop is. Every business used to get the same picture --
+// two big panes, a door between, a coloured band over -- stretched across as much as eighteen
+// metres of wall, so a bank, a laundromat and a taqueria were the same cafe at three widths.
+// Each trade now has its own front: the restaurant's panes and central doors, the bar's small
+// dark windows, the grocer's glass with the produce stacked in it, the boutique's display
+// windows either side of a recessed door, the bank's pilasters and tall windows, the
+// laundromat's row of machines. Each comes in variants -- door left, right or centre, panes
+// split or whole -- and the wall is divided into bays, one per business, so the sign over
+// each bay is the sign of the shop in it.
+//
+// The ground storey of a building with shops in it is painted its own colour: shopfronts are
+// fitted out separately from the building they are in and nearly always in a different
+// colour. Nothing in the records says which, so the colour is chosen to go with the building
+// -- analogous or complementary on the wheel, with real contrast in lightness -- from the
+// colours San Francisco's shopfronts are actually painted, by trade, and it is the same
+// colour on every load. A standalone shop, a single storey with nothing above it, is built
+// differently from a shop under a block of flats: full-height glazing to a fascia and a
+// parapet, rather than a storey under a cornice.
+const STOREFRONT_BAND_M = 3.9;
+const STOREFRONT_STANDALONE_MAX_M = 6.5;
+//: What a shopfront frame is painted, by trade: the colours the city's shopfronts have.
+const STOREFRONT_PALETTES = {
+  restaurant: [0x6b2a24, 0x1f4f3a, 0x1f3450, 0x1b1c1e, 0x8c5a2b],
+  pizza:      [0x8f2b23, 0x1f4f3a, 0x1b1c1e, 0xd9cfb8],
+  cafe:       [0x1f4f3a, 0x3d2b1f, 0x1b1c1e, 0x6b2a24, 0x2e5a6e],
+  bakery:     [0xd9cfb8, 0x6b2a24, 0x2e5a6e, 0x3d2b1f],
+  bar:        [0x1b1c1e, 0x6b2a24, 0x143a3f, 0x2a2a3a],
+  grocery:    [0x1f5f3a, 0xd9cfb8, 0x9c2f2a, 0x2a4a7a],
+  clothing:   [0x1b1c1e, 0xe8e4dc, 0x6f6f6f, 0x1f3450, 0xd9cfb8],
+  books:      [0x1f4f3a, 0x6b2a24, 0x3d2b1f, 0x1f3450],
+  salon:      [0x1b1c1e, 0xe8e4dc, 0x7a3f5a, 0x2e5a6e],
+  pharmacy:   [0xe8e4dc, 0x2a4a7a, 0x1f5f3a],
+  bank:       [0xa8a08e, 0x1f4f3a, 0x1f3450, 0x4a4a48],
+  laundry:    [0x2a6fa8, 0xe8e4dc, 0x1f5f3a],
+  hardware:   [0x9c2f2a, 0x4a4a48, 0x1f3450, 0x8c5a2b],
+  florist:    [0x1f5f3a, 0x7a3f5a, 0xd9cfb8, 0x2e5a6e],
+  hotel:      [0xd9cfb8, 0x1f4f3a, 0x6b2a24, 0x4a4a48],
+  office:     [0x4a4a48, 0x1b1c1e, 0x6f6f6f, 0xa8a08e],
+  shop:       [0x1b1c1e, 0x1f4f3a, 0x1f3450, 0x6b2a24, 0xd9cfb8, 0x4a4a48],
+};
+
+function hasStorefront(feature) {
+  if (feature.shops && feature.shops.length) return true;
+  return ["retail", "restaurant", "office", "hotel"].includes(feature.archetype);
+}
+
+function storefrontColour(tint, trade, seed) {
+  // The frame's colour, chosen to go with the building it is cut into. Of the trade's own
+  // colours, those that sit with the building on the wheel -- within forty degrees of it, or
+  // opposite it, or neutral -- and stand off it in lightness; then one of those by the seed.
+  // If none does, the building's own colour taken a long way darker or lighter.
+  const building = new THREE.Color(tint);
+  const hsl = {};
+  building.getHSL(hsl, THREE.SRGBColorSpace);
+  const candidates = (STOREFRONT_PALETTES[trade] || STOREFRONT_PALETTES.shop).map((hex) => {
+    const c = new THREE.Color(hex);
+    const h = {};
+    c.getHSL(h, THREE.SRGBColorSpace);
+    let apart = Math.abs(h.h - hsl.h) * 360;
+    apart = Math.min(apart, 360 - apart);
+    const neutral = h.s < 0.14 || hsl.s < 0.14;
+    const harmonious = neutral || apart <= 40 || Math.abs(apart - 180) <= 25;
+    const contrast = Math.abs(h.l - hsl.l) >= 0.16;
+    return { c, ok: harmonious && contrast };
+  });
+  const fit = candidates.filter((k) => k.ok);
+  if (fit.length) return fit[Math.floor(random(seed + 4.1) * fit.length) % fit.length].c;
+  const own = new THREE.Color(tint);
+  own.setHSL(hsl.h, Math.min(0.6, hsl.s + 0.1), hsl.l > 0.45 ? Math.max(0.12, hsl.l - 0.3)
+    : Math.min(0.85, hsl.l + 0.3), THREE.SRGBColorSpace);
+  return own;
+}
+
+function shopBays(feature, wall) {
+  // The wall divided among its businesses, or into fronts of a business's usual width where
+  // the building is of a business's kind but nobody is named in it.
+  const shops = (feature.shops || []).filter((shop) => shop && shop.n);
+  const count = shops.length
+    ? Math.max(1, Math.min(shops.length, Math.floor(wall.span / 5.0)))
+    : Math.max(1, Math.min(4, Math.round(wall.span / 7.5)));
+  const share = wall.span / count;
+  const bays = [];
+  for (let i = 0; i < count; i += 1) {
+    const shop = shops[i] || null;
+    const trade = shop ? (shop.t || "shop")
+      : feature.archetype === "restaurant" ? "restaurant"
+        : feature.archetype === "hotel" ? "hotel"
+          : feature.archetype === "office" ? "office" : "shop";
+    bays.push({ shop, trade, centre: -wall.span / 2 + share * (i + 0.5), share });
+  }
+  return bays;
+}
+
+const STOREFRONT_TEXTURES = new Map();
+const STOREFRONT_VARIANTS = 4;
+
+function storefrontTexture(trade, variant, frameHex, standalone) {
+  const key = `${trade}|${variant}|${frameHex}|${standalone ? "s" : "u"}`;
+  if (STOREFRONT_TEXTURES.has(key)) return STOREFRONT_TEXTURES.get(key);
+  const W = 256;
+  const H = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  const frame = `#${frameHex.toString(16).padStart(6, "0")}`;
+  const frameColour = new THREE.Color(frameHex);
+  const fh = {};
+  frameColour.getHSL(fh, THREE.SRGBColorSpace);
+  const lightFrame = fh.l > 0.5;
+  const trim = lightFrame ? "rgba(0,0,0,0.35)" : "rgba(255,255,255,0.22)";
+  const seed = variant * 37 + trade.length * 11;
+  const rnd = (k) => random(seed + k);
+
+  // The frame: the whole ground storey in the shopfront's colour. A standalone shop runs its
+  // glazing high and finishes in a fascia; one under flats has a stall riser and a transom
+  // under the storey above.
+  ctx.fillStyle = frame;
+  ctx.fillRect(0, 0, W, H);
+  const riser = standalone ? 10 : 16;            // the stall riser at the foot of the glass
+  const head = standalone ? 30 : 22;             // the fascia above the glass
+  const top = head;
+  const bottom = H - riser;
+  const gap = 6;
+
+  // The door: centre, left or right, single or double, by variant and by trade.
+  const doorW = trade === "restaurant" || trade === "hotel" || trade === "office" || trade === "bank"
+    ? 34 : 22;
+  const doorAt = variant === 0 ? "centre" : variant === 1 ? "left" : variant === 2 ? "right" : "centre";
+  const doorX = doorAt === "centre" ? W / 2 - doorW / 2 : doorAt === "left" ? gap + 4 : W - gap - 4 - doorW;
+  const glass = (x0, x1, y0, y1, tone = 0) => {
+    // A pane: the sky in the top of it, the dark of the shop in the bottom, a reflection
+    // across it.
+    const g = ctx.createLinearGradient(0, y0, 0, y1);
+    g.addColorStop(0, tone > 0 ? "rgba(214,226,232,0.92)" : "rgba(150,182,198,0.88)");
+    g.addColorStop(0.55, tone > 0 ? "rgba(120,148,164,0.9)" : "rgba(70,94,108,0.92)");
+    g.addColorStop(1, "rgba(28,36,42,0.94)");
+    ctx.fillStyle = g;
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath();
+    ctx.moveTo(x0, y1); ctx.lineTo(x0 + (x1 - x0) * 0.45, y0); ctx.lineTo(x0 + (x1 - x0) * 0.62, y0);
+    ctx.lineTo(x0 + (x1 - x0) * 0.17, y1);
+    ctx.closePath();
+    ctx.fill();
+  };
+  const mullions = (x0, x1, y0, y1, n) => {
+    ctx.fillStyle = frame;
+    for (let i = 1; i < n; i += 1) ctx.fillRect(x0 + ((x1 - x0) * i) / n - 1.5, y0, 3, y1 - y0);
+  };
+  const door = (x, w, dark = true, glazed = true) => {
+    ctx.fillStyle = dark ? "rgba(30,26,22,0.96)" : frame;
+    ctx.fillRect(x, top + 4, w, bottom - top - 4 + riser - 2);
+    if (glazed) {
+      ctx.fillStyle = "rgba(120,150,166,0.85)";
+      ctx.fillRect(x + 3, top + 8, w - 6, (bottom - top) * 0.62);
+      ctx.fillStyle = trim;
+      ctx.fillRect(x + w / 2 - 0.75, top + 8, 1.5, (bottom - top) * 0.62);
+    }
+    ctx.fillStyle = "rgba(255,232,160,0.8)";
+    ctx.fillRect(x + w - 6, top + (bottom - top) * 0.55, 2, 3);
+  };
+  const glow = (x0, x1, colour) => {
+    ctx.fillStyle = colour;
+    ctx.fillRect(x0, top + 6, x1 - x0, (bottom - top) * 0.5);
+  };
+  const shelves = (x0, x1, colours, rows = 3) => {
+    // What is in the window: rows of goods in the colours of the trade.
+    let k = 0;
+    for (let r = 0; r < rows; r += 1) {
+      const y = top + 10 + ((bottom - top - 16) * (r + 0.5)) / rows;
+      for (let x = x0 + 4; x < x1 - 4; x += 5) {
+        k += 1;
+        ctx.fillStyle = colours[Math.floor(rnd(k * 3.3) * colours.length)];
+        ctx.fillRect(x, y - 3 + rnd(k) * 2, 4, 6 + rnd(k * 1.7) * 3);
+      }
+      ctx.fillStyle = "rgba(240,236,224,0.5)";
+      ctx.fillRect(x0 + 3, y + 5, x1 - x0 - 6, 1);
+    }
+  };
+  const panes = [];                                // [x0, x1] of the glazing either side of the door
+  if (doorAt === "centre") {
+    panes.push([gap, doorX - gap], [doorX + doorW + gap, W - gap]);
+  } else if (doorAt === "left") {
+    panes.push([doorX + doorW + gap, W - gap]);
+  } else {
+    panes.push([gap, doorX - gap]);
+  }
+
+  // The trade's own front.
+  switch (trade) {
+    case "restaurant":
+    case "pizza": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom);
+        glow(x0, x1, trade === "pizza" ? "rgba(255,170,80,0.22)" : "rgba(255,214,150,0.2)");
+        mullions(x0, x1, top, bottom, variant === 3 ? 3 : 2);
+        // Tables in the window, and a menu in the corner.
+        for (let x = x0 + 12; x < x1 - 12; x += 22) {
+          ctx.fillStyle = "rgba(240,236,224,0.75)";
+          ctx.fillRect(x, bottom - 22, 12, 2);
+          ctx.fillStyle = "rgba(60,44,30,0.9)";
+          ctx.fillRect(x + 5, bottom - 20, 2, 10);
+        }
+        ctx.fillStyle = "rgba(245,240,225,0.9)";
+        ctx.fillRect(x1 - 14, top + 8, 9, 12);
+      }
+      door(doorX, doorW, true, true);
+      if (doorW > 30) { ctx.fillStyle = trim; ctx.fillRect(doorX + doorW / 2 - 1, top + 4, 2, bottom - top); }
+      break;
+    }
+    case "cafe":
+    case "bakery": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,225,170,0.22)");
+        if (variant % 2) mullions(x0, x1, top, bottom, 2);
+        // The counter, and what is on it: the case of pastries or the row of cups.
+        ctx.fillStyle = "rgba(88,60,38,0.92)";
+        ctx.fillRect(x0 + 4, bottom - 28, x1 - x0 - 8, 8);
+        for (let x = x0 + 8; x < x1 - 8; x += 9) {
+          ctx.fillStyle = trade === "bakery"
+            ? (rnd(x) < 0.5 ? "rgba(214,160,90,0.95)" : "rgba(240,220,180,0.95)")
+            : (rnd(x) < 0.5 ? "rgba(240,240,236,0.95)" : "rgba(60,44,30,0.95)");
+          ctx.fillRect(x, bottom - 34, 5, 6);
+        }
+        // A chalkboard by the door.
+        ctx.fillStyle = "rgba(24,30,26,0.95)";
+        ctx.fillRect(x0 + 6, top + 8, 16, 20);
+        ctx.fillStyle = "rgba(230,230,220,0.6)";
+        for (let y = top + 12; y < top + 26; y += 4) ctx.fillRect(x0 + 8, y, 12, 1);
+      }
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "bar": {
+      // Small, dark, high windows; the door the darkest thing on the block; a glow in each.
+      for (const [x0, x1] of panes) {
+        ctx.fillStyle = frame;
+        ctx.fillRect(x0, top, x1 - x0, bottom - top);
+        const n = Math.max(1, Math.floor((x1 - x0) / 46));
+        for (let i = 0; i < n; i += 1) {
+          const wx0 = x0 + 8 + ((x1 - x0 - 16) * i) / n;
+          const wx1 = wx0 + (x1 - x0 - 16) / n - 8;
+          glass(wx0, wx1, top + 8, top + (bottom - top) * 0.5);
+          ctx.fillStyle = rnd(i) < 0.5 ? "rgba(255,70,110,0.55)" : "rgba(80,220,255,0.5)";
+          ctx.fillRect(wx0 + 4, top + 16, wx1 - wx0 - 8, 3);
+        }
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(x0, top + (bottom - top) * 0.5, x1 - x0, (bottom - top) * 0.5);
+      }
+      door(doorX, doorW, true, false);
+      break;
+    }
+    case "grocery":
+    case "convenience": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,255,240,0.28)");
+        mullions(x0, x1, top, bottom, 3);
+        shelves(x0, x1, ["#d94a2a", "#f0b429", "#5ea63a", "#2f7a3e", "#e8e0c8", "#8a3a8a"], 3);
+        // A poster or two on the glass.
+        ctx.fillStyle = "rgba(250,230,60,0.85)";
+        ctx.fillRect(x1 - 20, top + 6, 14, 18);
+        ctx.fillStyle = "rgba(220,40,40,0.9)";
+        ctx.fillRect(x1 - 18, top + 10, 10, 4);
+      }
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "clothing": {
+      // Display windows on a deep riser, a mannequin or two in each, a recessed door.
+      for (const [x0, x1] of panes) {
+        ctx.fillStyle = frame;
+        ctx.fillRect(x0, top, x1 - x0, bottom - top);
+        glass(x0 + 3, x1 - 3, top + 3, bottom - 8, 1);
+        glow(x0 + 3, x1 - 3, "rgba(255,255,255,0.18)");
+        const n = Math.max(1, Math.floor((x1 - x0) / 40));
+        for (let i = 0; i < n; i += 1) {
+          const mx = x0 + 3 + ((x1 - x0 - 6) * (i + 0.5)) / n;
+          const c = ["#1b1c1e", "#b83a3a", "#e8e4dc", "#2f4f7a", "#c9a24a"][Math.floor(rnd(i * 5.1) * 5)];
+          ctx.fillStyle = "rgba(230,220,205,0.95)";
+          ctx.beginPath(); ctx.arc(mx, top + 16, 4, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = c;
+          ctx.fillRect(mx - 7, top + 21, 14, 28);
+          ctx.fillStyle = "rgba(60,60,60,0.9)";
+          ctx.fillRect(mx - 5, top + 49, 10, 18);
+        }
+      }
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(doorX - 4, top, doorW + 8, bottom - top);
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "books": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom);
+        glow(x0, x1, "rgba(255,240,200,0.14)");
+        if (variant % 2) mullions(x0, x1, top, bottom, 2);
+        shelves(x0, x1, ["#9c2f2a", "#2a4a7a", "#1f5f3a", "#d9cfb8", "#c9a24a", "#3d2b1f", "#e8e4dc"], 4);
+      }
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "salon": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,255,255,0.24)");
+        mullions(x0, x1, top, bottom, 2);
+        // The row of chairs and the mirrors behind them.
+        for (let x = x0 + 12; x < x1 - 12; x += 20) {
+          ctx.fillStyle = "rgba(235,235,240,0.85)";
+          ctx.fillRect(x - 5, top + 12, 12, 16);
+          ctx.fillStyle = "rgba(30,30,32,0.95)";
+          ctx.fillRect(x - 3, bottom - 26, 8, 12);
+          ctx.fillRect(x, bottom - 14, 2, 8);
+        }
+      }
+      door(doorX, doorW, false, true);
+      break;
+    }
+    case "pharmacy": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,255,255,0.42)");
+        mullions(x0, x1, top, bottom, 3);
+        shelves(x0, x1, ["#e8e4dc", "#2a6fa8", "#f0f0f0", "#d94a2a", "#5ea63a"], 3);
+        // The cross.
+        ctx.fillStyle = "rgba(40,170,90,0.95)";
+        ctx.fillRect(x1 - 18, top + 6, 12, 4); ctx.fillRect(x1 - 14, top + 2, 4, 12);
+      }
+      door(doorX, doorW, false, true);
+      break;
+    }
+    case "bank": {
+      // Stone: pilasters between tall windows, a heavy door, nothing lit.
+      ctx.fillStyle = frame;
+      ctx.fillRect(0, 0, W, H);
+      for (const [x0, x1] of panes) {
+        const n = Math.max(1, Math.floor((x1 - x0) / 44));
+        for (let i = 0; i < n; i += 1) {
+          const wx0 = x0 + 6 + ((x1 - x0 - 12) * i) / n + 4;
+          const wx1 = wx0 + (x1 - x0 - 12) / n - 8;
+          glass(wx0, wx1, top - 8, bottom - 4);
+          ctx.fillStyle = trim;
+          ctx.fillRect(wx0 - 4, top - 10, 4, bottom - top + 12);
+          ctx.fillRect(wx1, top - 10, 4, bottom - top + 12);
+        }
+      }
+      door(doorX, doorW, true, true);
+      ctx.fillStyle = trim;
+      ctx.fillRect(doorX - 6, top - 10, 6, bottom - top + 12);
+      ctx.fillRect(doorX + doorW, top - 10, 6, bottom - top + 12);
+      break;
+    }
+    case "laundry": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,255,255,0.36)");
+        // The machines, two rows of them, a porthole in each.
+        for (let r = 0; r < 2; r += 1) {
+          const y = top + 18 + r * 30;
+          for (let x = x0 + 8; x < x1 - 14; x += 16) {
+            ctx.fillStyle = "rgba(235,235,238,0.95)";
+            ctx.fillRect(x, y, 13, 26);
+            ctx.fillStyle = "rgba(60,80,100,0.95)";
+            ctx.beginPath(); ctx.arc(x + 6.5, y + 15, 4.5, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+      }
+      door(doorX, doorW, false, true);
+      break;
+    }
+    case "hardware": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom);
+        mullions(x0, x1, top, bottom, 2);
+        shelves(x0, x1, ["#d94a2a", "#f0b429", "#4a4a48", "#2a6fa8", "#8c5a2b", "#e8e4dc"], 3);
+        // Goods out on the pavement side of the glass: buckets, a ladder.
+        ctx.fillStyle = "rgba(240,180,40,0.95)";
+        ctx.fillRect(x0 + 6, bottom - 12, 8, 10);
+        ctx.fillStyle = "rgba(200,200,200,0.9)";
+        ctx.fillRect(x1 - 12, bottom - 30, 2, 28); ctx.fillRect(x1 - 6, bottom - 30, 2, 28);
+        for (let y = bottom - 26; y < bottom - 4; y += 6) ctx.fillRect(x1 - 12, y, 8, 1.5);
+      }
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "florist": {
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, 1);
+        glow(x0, x1, "rgba(255,255,255,0.2)");
+        // Buckets of flowers, in the window and out on the pavement.
+        let k = 0;
+        for (let x = x0 + 6; x < x1 - 8; x += 9) {
+          k += 1;
+          ctx.fillStyle = "rgba(60,90,60,0.95)";
+          ctx.fillRect(x, bottom - 22, 6, 14);
+          ctx.fillStyle = ["#e04a7a", "#f0b429", "#f5f0e0", "#b04ad0", "#e8452a"][Math.floor(rnd(k * 2.7) * 5)];
+          ctx.beginPath(); ctx.arc(x + 3, bottom - 26, 5, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      door(doorX, doorW, true, true);
+      break;
+    }
+    case "hotel":
+    case "office": {
+      // A glazed lobby: tall panes, a double door in the middle, a canopy over it.
+      glass(gap, W - gap, top - 6, bottom + riser - 6);
+      mullions(gap, W - gap, top - 6, bottom + riser - 6, 6);
+      glow(gap, W - gap, "rgba(255,240,210,0.12)");
+      door(W / 2 - 20, 40, true, true);
+      ctx.fillStyle = trim;
+      ctx.fillRect(W / 2 - 1, top - 2, 2, bottom - top + 6);
+      ctx.fillStyle = frame;
+      ctx.fillRect(W / 2 - 36, top - 6, 72, 6);
+      if (trade === "hotel") {
+        ctx.fillStyle = "rgba(255,236,190,0.9)";
+        ctx.fillRect(W / 2 - 40, top - 4, 4, 4); ctx.fillRect(W / 2 + 36, top - 4, 4, 4);
+      }
+      break;
+    }
+    default: {
+      // A shop: glass, a door, whatever is in the window.
+      for (const [x0, x1] of panes) {
+        glass(x0, x1, top, bottom, variant % 2);
+        glow(x0, x1, "rgba(255,250,235,0.18)");
+        mullions(x0, x1, top, bottom, variant === 3 ? 3 : variant === 2 ? 1 : 2);
+        shelves(x0, x1, ["#c9a24a", "#2a4a7a", "#e8e4dc", "#9c2f2a", "#4a4a48"], 2);
+      }
+      door(doorX, doorW, true, true);
+    }
+  }
+
+  // The fascia over the glass, in the frame's colour with its trim, and for a standalone shop
+  // the parapet's cap line. The name goes on the sign geometry over this, not in it.
+  ctx.fillStyle = frame;
+  ctx.fillRect(0, 0, W, head - 2);
+  ctx.fillStyle = trim;
+  ctx.fillRect(0, head - 3, W, 1.5);
+  if (standalone) {
+    ctx.fillRect(0, 2, W, 2);
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(0, 5, W, 3);
+  } else {
+    // The cornice under the storey above.
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.fillRect(0, 0, W, 4);
+  }
+  // The stall riser's foot and the pavement's shadow.
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.fillRect(0, H - 6, W, 6);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  STOREFRONT_TEXTURES.set(key, texture);
+  return texture;
+}
+
+function addStorefronts(group, feature, seed, height, tint) {
+  const wall = bestFacadeWall(feature, false);
+  if (!wall || wall.span < 4.2) return;
+  const standalone = height <= STOREFRONT_STANDALONE_MAX_M;
+  const bays = shopBays(feature, wall);
+  const lead = bays[0].trade;
+  const frame = storefrontColour(tint, lead, seed);
+  const frameHex = frame.getHex();
+  const bandH = standalone ? Math.max(3.0, height - 0.15) : Math.min(STOREFRONT_BAND_M, height * 0.36);
+  // The ground storey's own colour across the whole street wall, just proud of it, on its
+  // vertices so every building's frame merges into one mesh.
+  const sink = awningSink("band");
+  const corner = (along, y, out = 0.05) => {
+    const q = wallPoint(wall, along, out);
+    return [q.x, y, q.z];
+  };
+  awningQuad(sink, [
+    corner(-wall.span / 2, 0.02), corner(wall.span / 2, 0.02),
+    corner(wall.span / 2, bandH), corner(-wall.span / 2, bandH),
+  ], [frame]);
+  // A cornice line where the frame meets the storeys above, or the parapet cap on a
+  // standalone shop.
+  const capColour = frame.clone().multiplyScalar(0.72);
+  awningQuad(sink, [
+    corner(-wall.span / 2, bandH, 0.14), corner(wall.span / 2, bandH, 0.14),
+    corner(wall.span / 2, bandH + 0.18, 0.14), corner(-wall.span / 2, bandH + 0.18, 0.14),
+  ], [capColour]);
+  // Each bay its own front.
+  const panelH = standalone ? bandH - 0.1 : Math.min(bandH - 0.05, 3.8);
+  // A business wider than one front has several: a supermarket is a row of windows and a
+  // door, not one window nine metres wide with black wall either side.
+  for (let i = 0; i < bays.length; i += 1) {
+    const bay = bays[i];
+    const fronts = Math.max(1, Math.ceil(bay.share / 8.0));
+    const each = bay.share / fronts;
+    for (let f = 0; f < fronts; f += 1) {
+      const variant = Math.floor(random(seed + i * 17.3 + f * 5.1 + 5) * STOREFRONT_VARIANTS);
+      const centre = bay.centre - bay.share / 2 + each * (f + 0.5);
+      const at = wallPoint(wall, centre, 0.11);
+      planePart(group, at.x, 0.05, at.z, each * 0.97, panelH,
+                storefrontTexture(bay.trade, variant, frameHex, standalone), wall.yaw);
+    }
+  }
+}
+
 
 function addSouthFacadeDetail(group, feature, seed, height) {
   if (!(feature.archetype === "residential" || feature.archetype === "generic")) return;
@@ -6719,7 +7200,7 @@ function buildingMesh(feature) {
     // No shopfront, no bay windows, no balconies. A garden workshop has a door and a roof, and
     // the detail passes are what made these read as houses in the first place.
   } else {
-    addGroundFacadeDetail(group, feature, seed, height);
+    addGroundFacadeDetail(group, feature, seed, height, tint);
     addSouthFacadeDetail(group, feature, seed, height);
     addRoofFurniture(group, feature, seed, height, areaM2);
     addShopfronts(feature, seed, height, tint);
@@ -7674,124 +8155,159 @@ function soilTexture() {
 }
 
 const GRASS_TEXTURES = new Map();
+//: A dozen kinds of lawn, told apart by how the grass grows on them rather than by a palette:
+//: how long the blades are, how many, how thick, how green, and how much of the ground shows
+//: through as straw and soil. Every lawn polygon draws one of these, chosen by a hash of its
+//: own ring, so neighbouring yards differ and the same yard is the same on every load.
+const GRASS_KINDS = [
+  { name: "mown fine",     hue: 112, sat: 0.42, light: 0.28, blades: 9000, len: 1.6, width: 1.0, brown: 0.02 },
+  { name: "mown coarse",   hue: 106, sat: 0.40, light: 0.29, blades: 7000, len: 2.2, width: 1.2, brown: 0.03 },
+  { name: "medium",        hue: 110, sat: 0.38, light: 0.27, blades: 6500, len: 3.2, width: 1.1, brown: 0.03 },
+  { name: "medium dense",  hue: 116, sat: 0.45, light: 0.25, blades: 9500, len: 3.0, width: 1.0, brown: 0.015 },
+  { name: "long wispy",    hue: 100, sat: 0.32, light: 0.30, blades: 4200, len: 6.5, width: 0.9, brown: 0.03 },
+  { name: "long thick",    hue: 108, sat: 0.40, light: 0.24, blades: 5200, len: 5.5, width: 1.5, brown: 0.02 },
+  { name: "tufted",        hue: 104, sat: 0.36, light: 0.28, blades: 3600, len: 4.5, width: 1.3, brown: 0.03, tufts: 160 },
+  { name: "dry",           hue: 86,  sat: 0.28, light: 0.32, blades: 5000, len: 3.4, width: 1.0, brown: 0.06 },
+  { name: "lush dark",     hue: 120, sat: 0.48, light: 0.22, blades: 8800, len: 2.8, width: 1.1, brown: 0.01 },
+  { name: "lush light",    hue: 114, sat: 0.45, light: 0.33, blades: 8000, len: 2.6, width: 1.0, brown: 0.01 },
+  { name: "worn",          hue: 98,  sat: 0.26, light: 0.28, blades: 3000, len: 2.4, width: 1.0, brown: 0.05 },
+  { name: "clover",        hue: 118, sat: 0.40, light: 0.27, blades: 2400, len: 1.8, width: 1.0, brown: 0.02, leaves: 5000 },
+];
+const GRASS_VARIANTS = GRASS_KINDS.length;
+
+function hslToBytes(h, s, l, out, at) {
+  // Plain HSL to 8-bit sRGB, for a quarter of a million pixels per texture: cheaper than a
+  // THREE.Color round trip through linear light for each.
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channel = (t) => {
+    t = ((t % 1) + 1) % 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  out[at] = Math.round(channel(h + 1 / 3) * 255);
+  out[at + 1] = Math.round(channel(h) * 255);
+  out[at + 2] = Math.round(channel(h - 1 / 3) * 255);
+}
+
 function grassTexture(kind = "yard", variant = 0) {
   const key = `${kind}:${variant}`;
   if (GRASS_TEXTURES.has(key)) return GRASS_TEXTURES.get(key);
-  // Strands, not a wash. This was a field of single pixels at 40% opacity over a flat green,
-  // tiled every four metres, and single pixels at low opacity average out -- from anything
-  // further than a few metres it was one continuous sheet of pale green with no grain in it at
-  // all. Grass reads as grass because it is thousands of separate blades lying in slightly
-  // different directions and catching the light differently, so these are drawn as short
-  // strokes with real contrast between them and a base dark enough to survive the exposure.
-  const size = 384;
+  // No pattern at any scale. This used to be a base green with a hundred soft patches, a set
+  // of mowing lines and a field of blades, tiled every four metres -- and a patch or a mowing
+  // line is a feature, so from any height the eye found the same feature every four metres
+  // and the lawn was a grid. Now every pixel takes its own shade of green, a few per hundred
+  // its own brown of soil or straw, and the blades go over that; nothing in the tile is
+  // larger than a blade, so the repeat has nothing to show. What varies from lawn to lawn is
+  // the kind of grass, one of GRASS_KINDS, and that is chosen per polygon.
+  const spec = GRASS_KINDS[Math.abs(variant) % GRASS_VARIANTS];
+  const size = 512;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  const parkPalettes = [
-    ["#36a846", "rgba(20,92,29,0.42)", "rgba(111,202,100,0.30)", "rgba(210,239,170,0.08)"],
-    ["#2f9741", "rgba(18,83,33,0.45)", "rgba(135,211,103,0.26)", "rgba(232,238,164,0.06)"],
-    ["#409d35", "rgba(27,86,28,0.38)", "rgba(154,213,118,0.24)", "rgba(196,232,151,0.07)"],
-    ["#2d8f4a", "rgba(17,74,45,0.40)", "rgba(102,192,128,0.22)", "rgba(213,234,180,0.055)"],
-  ];
-  const yardPalettes = [
-    ["#2f9738", "rgba(21,80,24,0.46)", "rgba(92,178,78,0.26)", "rgba(220,231,150,0.055)"],
-    ["#3a8d35", "rgba(31,78,25,0.44)", "rgba(126,180,79,0.23)", "rgba(213,211,136,0.05)"],
-    ["#287f3d", "rgba(17,68,32,0.48)", "rgba(83,158,89,0.25)", "rgba(200,225,158,0.055)"],
-    ["#468d31", "rgba(45,76,22,0.40)", "rgba(145,180,73,0.22)", "rgba(226,219,145,0.05)"],
-    ["#2f8850", "rgba(22,76,48,0.42)", "rgba(86,166,117,0.22)", "rgba(194,229,176,0.055)"],
-  ];
-  const palettes = kind === "park" ? parkPalettes : yardPalettes;
-  const palette = palettes[Math.abs(variant) % palettes.length];
-  const [base, dark, light, mow] = palette;
-  const seed = (variant + 1) * 997 + kind.length * 131;
-  ctx.fillStyle = base;
-  ctx.fillRect(0, 0, size, size);
-
-  // Patchiness first: the underlying unevenness of a lawn, so the blades are not scattered over
-  // a uniform ground. A few straw/dirt flecks keep small residential yards from reading as
-  // bright carpet; parks are cleaner and a touch lighter.
-  for (let i = 0; i < 130; i += 1) {
-    const r = 8 + random(seed + i * 17) * (variant % 2 ? 72 : 48);
-    ctx.fillStyle = random(seed + i * 5) < 0.55 ? dark : light;
-    ctx.beginPath();
-    ctx.arc(random(seed + i * 3) * size, random(seed + i * 7) * size, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  for (let i = 0; i < (kind === "park" ? 260 : 520); i += 1) {
-    const x = random(seed + i * 19.1 + 11) * size;
-    const y = random(seed + i * 23.7 + 5) * size;
-    const w = 0.5 + random(seed + i * 3.2) * 1.8;
-    const h = 0.5 + random(seed + i * 4.6) * 1.6;
-    ctx.fillStyle = random(seed + i * 13.7) < 0.55 ? "rgba(117,92,48,0.20)" : "rgba(221,204,125,0.13)";
-    ctx.fillRect(x, y, w, h);
-  }
-
-  for (let i = 0; i < 38; i += 1) {
-    const x = random(seed + i * 31.7) * size;
-    const y = random(seed + i * 41.3) * size;
-    const rx = 14 + random(seed + i * 2.1) * 42;
-    const ry = 4 + random(seed + i * 5.9) * 12;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate((random(seed + i * 9.7) - 0.5) * Math.PI);
-    ctx.fillStyle = random(seed + i * 12.1) < 0.5 ? "rgba(236,214,132,0.075)" : "rgba(16,64,24,0.10)";
-    ctx.beginPath();
-    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-
-  // The blades. Four passes from dark to light so the field has depth rather than one tone of
-  // speckle; each blade is a stroke two to five pixels long leaning a random way.
-  // Blades over the lighter ground, still dark-to-light so the field keeps its depth. They are
-  // pitched around the new base rather than the old one: strokes mixed for a very dark green
-  // read as dirt once the ground under them is bright.
-  const passes = [
-    ["rgba(12,68,20,0.88)", 7600, 4.2, 1.00],
-    ["rgba(31,111,35,0.82)", 6800, 3.7, 0.88],
-    ["rgba(78,168,65,0.72)", 5200, 3.2, 0.70],
-    ["rgba(158,220,130,0.52)", 2600, 2.8, 0.45],
-  ];
+  const seed = (variant + 1) * 991 + (kind === "park" ? 17 : 0);
+  // Parks are kept a shade fuller than back yards.
+  const light = spec.light + (kind === "park" ? 0.03 : 0);
+  const image = ctx.createImageData(size, size);
+  const data = image.data;
+  const colour = new THREE.Color();
   let n = 0;
-  for (const [colour, count, len, opacityJitter] of passes) {
-    ctx.strokeStyle = colour;
-    ctx.lineWidth = 1;
+  for (let i = 0; i < size * size; i += 1) {
+    n += 1;
+    const r1 = random(seed + n * 1.7);
+    const r2 = random(seed + n * 2.3);
+    const r3 = random(seed + n * 3.9);
+    let h;
+    let sat;
+    let lit;
+    if (r1 < spec.brown) {
+      // Soil, or straw: a warm brown, sometimes pale.
+      h = (28 + r2 * 18) / 360; sat = 0.35 + r3 * 0.2; lit = 0.22 + r2 * 0.22;
+    } else {
+      h = (spec.hue + (r2 - 0.5) * 22) / 360; sat = spec.sat + (r3 - 0.5) * 0.24;
+      lit = light + (r1 - 0.5) * 0.22;
+    }
+    hslToBytes(h, sat, lit, data, i * 4);
+    data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  // The unevenness of the ground under the grass, at a few per cent: a lawn is not the same
+  // green to the centimetre, and without this the field reads as a carpet. Soft and faint, so
+  // it is not a feature the eye can find again at the next repeat.
+  for (let i = 0; i < 7; i += 1) {
+    n += 1;
+    const x = random(seed + n * 3.7) * size;
+    const y = random(seed + n * 5.9) * size;
+    const r = size * (0.25 + random(seed + n * 8.3) * 0.3);
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const dark = random(seed + n * 2.1) < 0.5;
+    glow.addColorStop(0, dark ? "rgba(10,40,12,0.07)" : "rgba(210,230,150,0.05)");
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, size, size);
+  }
+
+  // The blades: strokes of the kind's own length and thickness, dark to light so the field
+  // has depth, leaning every way.
+  const passes = [
+    [0.18, 0.38, 0.9],
+    [0.26, 0.30, 0.8],
+    [0.42, 0.22, 0.6],
+    [0.58, 0.10, 0.4],
+  ];
+  ctx.lineCap = "round";
+  for (const [lightness, share, alpha] of passes) {
+    const count = Math.round(spec.blades * share);
     for (let i = 0; i < count; i += 1) {
       n += 1;
       const x = random(seed + n * 3.1) * size;
       const y = random(seed + n * 5.7) * size;
-      const sweep = kind === "park" ? 0.95 : 1.6;
-      const angle = (random(seed + n * 7.3) - 0.5) * sweep - Math.PI / 2 + (variant - 2) * 0.12;
-      const l = len + random(seed + n * 11.9) * len;
-      ctx.globalAlpha = 0.65 + random(seed + n * 2.6) * opacityJitter * 0.35;
+      const angle = random(seed + n * 7.3) * Math.PI * 2;
+      const l = spec.len * (0.6 + random(seed + n * 11.9) * 0.9);
+      colour.setHSL((spec.hue + (random(seed + n * 4.4) - 0.5) * 20) / 360,
+                    spec.sat + 0.1, lightness + (random(seed + n * 6.1) - 0.5) * 0.12, THREE.SRGBColorSpace);
+      ctx.strokeStyle = `rgba(${Math.round(colour.r * 255)},${Math.round(colour.g * 255)},${Math.round(colour.b * 255)},${alpha})`;
+      ctx.lineWidth = spec.width * (0.7 + random(seed + n * 2.2) * 0.6);
       ctx.beginPath();
       ctx.moveTo(x, y);
       ctx.lineTo(x + Math.cos(angle) * l, y + Math.sin(angle) * l);
       ctx.stroke();
     }
   }
-  ctx.globalAlpha = 1;
-  // Low, soft mowing direction, not stripes. It breaks repetition over large parks without
-  // declaring an exact maintenance pattern the source data does not know.
-  ctx.strokeStyle = mow;
-  ctx.lineWidth = variant % 3 === 0 ? 2 : 1.35;
-  const mowStep = 28 + (variant % 5) * 9;
-  const mowLean = 0.25 + (variant % 4) * 0.13;
-  for (let i = -size; i < size * 2; i += mowStep) {
+  // Tufts, where the kind has them: a knot of longer blades from one root.
+  for (let t = 0; t < (spec.tufts || 0); t += 1) {
+    n += 1;
+    const x = random(seed + n * 3.3) * size;
+    const y = random(seed + n * 5.1) * size;
+    for (let b = 0; b < 9; b += 1) {
+      n += 1;
+      const angle = random(seed + n * 7.7) * Math.PI * 2;
+      const l = spec.len * (1.2 + random(seed + n * 9.1));
+      ctx.strokeStyle = `rgba(40,110,38,0.75)`;
+      ctx.lineWidth = spec.width;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(angle) * l, y + Math.sin(angle) * l);
+      ctx.stroke();
+    }
+  }
+  // Leaves, where the kind has them: clover's round ones.
+  for (let t = 0; t < (spec.leaves || 0); t += 1) {
+    n += 1;
+    ctx.fillStyle = random(seed + n * 2.9) < 0.5 ? "rgba(70,150,60,0.55)" : "rgba(110,180,80,0.45)";
     ctx.beginPath();
-    ctx.moveTo(i, 0);
-    ctx.lineTo(i + size * mowLean, size);
-    ctx.stroke();
+    ctx.arc(random(seed + n * 3.7) * size, random(seed + n * 5.3) * size, 0.9 + random(seed + n * 7.9) * 0.9, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  // The ground meshes carry their own UVs at one tile per eight metres. A tile of this is about
-  // a metre and a half of lawn, which is the scale the blades are drawn at.
-  // A tile every four metres rather than every metre and a half. At the tighter spacing the
-  // blades were finer than a pixel from any height worth looking from, so what was left was the
-  // repeat itself: a flat green field with a visible grid in it.
-  texture.repeat.set(2, 2);
+  // The ground meshes carry their own UVs at one tile per eight metres, and the tile is left
+  // at that: eight metres of lawn at a centimetre and a half a pixel, with nothing in it that
+  // could be recognised from one repeat to the next.
+  texture.repeat.set(1, 1);
   texture.anisotropy = 8;
   texture.colorSpace = THREE.SRGBColorSpace;
   GRASS_TEXTURES.set(key, texture);
@@ -8594,7 +9110,7 @@ function buildCourts(ground) {
   // the scene and then covered over by the very plane it was there to replace. That is what
   // Moscone and Fort Mason were: not missing polygons, buried ones. They belong between the base
   // plane and the top of the roadway (0.06), so they cover the black without climbing the kerb.
-  const parkVariants = 4;
+  const parkVariants = GRASS_VARIANTS;
   for (let variant = 0; variant < parkVariants; variant += 1) {
     const rings = (ground.parks || [])
       .filter((p) => grassVariantForRing(p.p, parkVariants) === variant)
@@ -8612,7 +9128,7 @@ function buildCourts(ground) {
   const grassRings = classifiedGround
     ? [...(ground.lawns || []), ...(ground.backyards || [])]
     : (ground.yards || []);
-  const yardVariants = 5;
+  const yardVariants = GRASS_VARIANTS;
   for (let variant = 0; variant < yardVariants; variant += 1) {
     const rings = grassRings
       .filter((y) => grassVariantForRing(y.p, yardVariants) === variant)
@@ -10444,7 +10960,7 @@ window.kerbside = {
   recentred,
   junctionBoxes,
   kerbVerticesDropped,
-  nearestKerbAt, furnitureAnchor,
+  nearestKerbAt, furnitureAnchor, bestFacadeWall, wallPoint, shopBays,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
              laid: cornersLaid, legs: cornerLegs.length,
              ends: pavementCornerLaid.size, skipped: addPavementCorners.skipped },
