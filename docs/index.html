@@ -8880,6 +8880,10 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
   }
 }
 
+//: Where the roadway between the kerbs has been filled (medians, islands, asphalt), in half
+//: metre cells, so nothing fills it twice.
+const ROAD_FILL_CELL_M = 0.5;
+const roadFillGrid = new Set();
 //: The median of a divided road: the strip between the inner edges of its two halves, raised
 //: a kerb's height. Narrower than this it is paint, not an island; wider it is a park.
 const MEDIAN_MIN_M = 0.5;
@@ -9015,6 +9019,8 @@ function addDividedMedians() {
         const { a, b } = station;
         const under = ROAD_TOP_M - JUNCTION_BOX_DROP_M;
         roadQuad([pa[0], under, pa[1]], [a[0], under, a[1]], [b[0], under, b[1]], [pb[0], under, pb[1]]);
+        stampFill(a[0], a[1], b[0], b[1]);
+        stampFill(pa[0], pa[1], pb[0], pb[1]);
         if (station.raised && previous.raised) {
           quad([pa[0], top, pa[1]], [a[0], top, a[1]], [b[0], top, b[1]], [pb[0], top, pb[1]]);
           // The kerb faces, down to the road on both sides.
@@ -9052,6 +9058,191 @@ function addDividedMedians() {
 const cornersLaid = addPavementCorners();
 const junctionBoxes = addJunctionBoxes();
 const mediansLaid = addDividedMedians();
+
+// ---- the rest of the roadway ----
+//
+// Everything above draws a street as a ribbon of one width on OpenStreetMap's centreline, and
+// the city's kerbs are where they are. Where the two disagree -- a centreline off the middle
+// of its road, a street that widens for a turn pocket, a transit way drawn as three parallel
+// ways, a median island -- the ground between the drawn carriageway and the kerb showed
+// through as a black strip down the middle of the street. The roadway is the whole of the
+// space between the kerbs. What no carriageway, pavement or median covers is filled here:
+// asphalt at road level; a raised concrete island where the city's island kerbs bound the
+// strip, which is where a walker stands halfway across; and a line where two carriageways
+// meet across the strip -- a double yellow between opposing one-way ways, white otherwise.
+const ROAD_FILL_STATION_M = 2.0;
+const ROAD_FILL_STEP_M = 0.25;
+const ROAD_FILL_MIN_M = 0.4;
+const ROAD_FILL_ISLAND_MIN_M = 0.6;
+//: A strip wider than this between two kerbs is a plaza or a lot the kerb file also bounds.
+const ROAD_FILL_MAX_SPAN_M = 34.0;
+
+function fillKey(x, z) { return `${Math.floor(x / ROAD_FILL_CELL_M)}:${Math.floor(z / ROAD_FILL_CELL_M)}`; }
+function stampFill(ax, az, bx, bz) {
+  const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (ROAD_FILL_CELL_M * 0.5)));
+  for (let i = 0; i <= n; i += 1) {
+    roadFillGrid.add(fillKey(ax + (bx - ax) * i / n, az + (bz - az) * i / n));
+  }
+}
+function filledAt(x, z) { return roadFillGrid.has(fillKey(x, z)); }
+
+function carriagewaySourceAt(x, z, slack = 0.1) {
+  const cx = Math.floor(x / CARRIAGEWAY_CELL);
+  const cz = Math.floor(z / CARRIAGEWAY_CELL);
+  let best = null;
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      const bucket = carriagewayGrid.get(`${cx + dx}:${cz + dz}`);
+      if (!bucket) continue;
+      for (const [ax, az, bx, bz, half, bearing, source] of bucket) {
+        const d = Math.sqrt(distanceToSegmentSquared(x, z, ax, az, bx, bz));
+        if (d <= half + slack && (!best || d < best.d)) best = { d, bearing, source };
+      }
+    }
+  }
+  return best;
+}
+
+function roadwayCovered(x, z) {
+  return insideCarriageway(x, z, 0.05) || insideJunctionBox(x, z)
+    || (pavementTopAt(x, z) || 0) > 0 || filledAt(x, z);
+}
+
+function fillRoadwayToKerbs() {
+  if (!officialCurbGrid.size) return { asphalt: 0, islands: 0, lines: 0 };
+  const asphalt = { positions: [], uvs: [], index: [] };
+  const island = { positions: [], uvs: [], index: [] };
+  const lines = { yellow: [], white: [] };
+  let counts = { asphalt: 0, islands: 0, lines: 0 };
+  const quad = (sink, ring, y, scale) => {
+    // Faces up: the ring is ordered so its signed area in x/z is positive.
+    let area = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const [x0, z0] = ring[i]; const [x1, z1] = ring[(i + 1) % 4];
+      area += x0 * z1 - x1 * z0;
+    }
+    const ordered = area > 0 ? ring : [ring[0], ring[3], ring[2], ring[1]];
+    const base = sink.positions.length / 3;
+    for (const [x, z] of ordered) { sink.positions.push(x, y, z); sink.uvs.push(x / scale, z / scale); }
+    sink.index.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  };
+  const face = (sink, a, b, top, bottom) => {
+    const base = sink.positions.length / 3;
+    for (const [x, y, z] of [[a[0], bottom, a[1]], [a[0], top, a[1]], [b[0], top, b[1]], [b[0], bottom, b[1]]]) {
+      sink.positions.push(x, y, z); sink.uvs.push(x / 4, y / 4);
+    }
+    sink.index.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  };
+  for (const way of DATA.ways) {
+    if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
+    if (way.tunnel_kind || isUnmarkedService(way)) continue;
+    const dense = densifyWay(way.points, ROAD_FILL_STATION_M);
+    for (let i = 0; i < dense.length; i += 1) {
+      const before = dense[Math.max(0, i - 1)];
+      const after = dense[Math.min(dense.length - 1, i + 1)];
+      const [bx, by] = xy(before[0], before[1]);
+      const [ax, ay] = xy(after[0], after[1]);
+      const [hx, hy] = xy(dense[i][0], dense[i][1]);
+      const dx = ax - bx, dz = -(ay - by);
+      const span = Math.hypot(dx, dz) || 1;
+      const ux = dx / span, uz = dz / span;                       // along
+      const nx = dz / span, nz = -dx / span;                      // left, in x/z
+      const x = hx, z = -hy;
+      const hits = rayCurbIntersections(x, z, nx, nz, 22, officialCurbGrid);
+      const neg = hits.filter((v) => v < -0.8).pop();
+      const pos = hits.find((v) => v > 0.8);
+      if (neg === undefined || pos === undefined || pos - neg > ROAD_FILL_MAX_SPAN_M) continue;
+      const islands = rayCurbIntersections(x, z, nx, nz, 22, officialIslandCurbGrid)
+        .filter((v) => v > neg && v < pos);
+      // The half-station either side along the way that this cross-section stands for.
+      const halfStep = Math.min(ROAD_FILL_STATION_M, span / 2) / 2 + 0.06;
+      // Walk the cross-section, gathering the runs nothing covers.
+      let runStart = null;
+      const runs = [];
+      for (let t = neg + 0.15; t <= pos - 0.15 + 1e-6; t += ROAD_FILL_STEP_M) {
+        const sx = x + nx * t, sz = z + nz * t;
+        const covered = roadwayCovered(sx, sz);
+        if (!covered && runStart === null) runStart = t;
+        if ((covered || t + ROAD_FILL_STEP_M > pos - 0.15) && runStart !== null) {
+          const end = covered ? t - ROAD_FILL_STEP_M / 2 : t + ROAD_FILL_STEP_M / 2;
+          if (end - runStart >= ROAD_FILL_MIN_M) runs.push([runStart - ROAD_FILL_STEP_M / 2, Math.min(end, pos)]);
+          runStart = null;
+        }
+      }
+      for (const [t0, t1] of runs) {
+        const width = t1 - t0;
+        const at = (t, s) => [x + nx * t + ux * s, z + nz * t + uz * s];
+        const ring = [at(t0, -halfStep), at(t1, -halfStep), at(t1, halfStep), at(t0, halfStep)];
+        // Island kerbs at both edges of the run make it an island.
+        const kerbed = (t) => islands.some((v) => Math.abs(v - t) <= 0.45);
+        if (width >= ROAD_FILL_ISLAND_MIN_M && kerbed(t0) && kerbed(t1)) {
+          const top = ROAD_TOP_M + MEDIAN_KERB_M;
+          quad(island, ring, top, 4);
+          face(island, ring[0], ring[3], top, ROAD_TOP_M);
+          face(island, ring[1], ring[2], top, ROAD_TOP_M);
+          counts.islands += 1;
+        } else {
+          quad(asphalt, ring, ROAD_TOP_M - JUNCTION_BOX_DROP_M, 8);
+          counts.asphalt += 1;
+          // A line where two carriageways meet across the strip.
+          const left = carriagewaySourceAt(...at(t0 - 0.35, 0));
+          const right = carriagewaySourceAt(...at(t1 + 0.35, 0));
+          if (left && right && left.source !== right.source && width <= 3.5) {
+            const mid = (t0 + t1) / 2;
+            const opposing = Boolean(left.source.oneway || left.source.osm_oneway)
+              && Boolean(right.source.oneway || right.source.osm_oneway)
+              && Math.abs(((left.bearing - right.bearing) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 3;
+            const sink = opposing ? lines.yellow : lines.white;
+            const offsets = opposing ? [-(MARK_W + DOUBLE_GAP_M) / 2, (MARK_W + DOUBLE_GAP_M) / 2] : [0];
+            for (const off of offsets) sink.push([at(mid + off, -halfStep), at(mid + off, halfStep)]);
+            counts.lines += 1;
+          }
+        }
+        stampFill(...at(t0, 0), ...at(t1, 0));
+      }
+    }
+  }
+  const emit = (sink, material, surface, key) => {
+    if (!sink.positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(sink.positions, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(sink.uvs, 2));
+    geometry.setIndex(sink.index);
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.surface = surface;
+    addMerged(key, mesh, surface);
+  };
+  emit(asphalt, surfaceMaterial("road", 0xffffff, 1.0), "road", "junction:box");
+  emit(island, surfaceMaterial("walk", 0xffffff, 1.0), "median", "median");
+  for (const [color, list, y] of [[0xd8a92e, lines.yellow, 0.02], [0xdfe3e0, lines.white, 0.015]]) {
+    if (!list.length) continue;
+    const positions = [];
+    const index = [];
+    for (const [a, b] of list) {
+      const dx = b[0] - a[0], dz = b[1] - a[1];
+      const len = Math.hypot(dx, dz) || 1;
+      const px = -dz / len * MARK_W / 2, pz = dx / len * MARK_W / 2;
+      const base = positions.length / 3;
+      const h = ROAD_TOP_M + y;
+      positions.push(a[0] + px, h, a[1] + pz, a[0] - px, h, a[1] - pz,
+                     b[0] - px, h, b[1] - pz, b[0] + px, h, b[1] + pz);
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+      color, roughness: 0.8, metalness: 0.0, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
+    }));
+    mesh.userData.surface = "marking";
+    addMerged(`marking:fill:${color.toString(16)}`, mesh, "marking");
+  }
+  return counts;
+}
+const roadwayFilled = fillRoadwayToKerbs();
 
 // Ground. Everything that is not a road, a footway or a building stands on something -- back
 // yards, light wells, car parks, the middle of a block -- and none of it is mapped. Without a
@@ -12105,7 +12296,7 @@ window.kerbside = {
   nearestKerbAt, furnitureAnchor, bestFacadeWall, wallPoint, shopBays, carriagewayGrid, CARRIAGEWAY_CELL,
   pavementTopAt, parkingLayout, rayCurbIntersections, officialCurbGrid, officialKerbOffsetsAt,
   mappedWalkBeyondKerb, mappedWalkGrid, MAPPED_WALK_CELL, crossingRoadSpanPoints, crossingPaintLegs,
-  officialIslandCurbGrid, isDividedHalf, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
+  officialIslandCurbGrid, isDividedHalf, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
   crossingDrawGrid, sidewalkCrossingReplacementSpans, crossingDrawPose, densifyWay, crossingRectanglePoints,
   twinInnerEdgeAt, halfWidthAt,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
