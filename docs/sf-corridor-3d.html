@@ -118,6 +118,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
       <p id="facadenote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
       <p id="officialnote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
       <p id="furniturenote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
+      <p id="detailnote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
     </div>
     </div>
   </div>
@@ -135,7 +136,8 @@ import { GLTFLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/GL
 // Curb returns and bulb-outs are part of the base street geometry, not merely a comparison
 // overlay.  Load the compact official sidecar before laying out crossings; a network failure
 // still leaves the renderer's local-road-width fallback available.
-const [DATA, OFFICIAL_GEOMETRY] = await Promise.all([
+const EMPTY_DETAIL_MANIFEST = { shards: [], offline_assets: [] };
+const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST] = await Promise.all([
   fetch("sf-corridor-3d.json", { cache: "no-cache" }).then((r) => {
     if (!r.ok) throw new Error(`payload ${r.status}`);
     return r.json();
@@ -143,6 +145,9 @@ const [DATA, OFFICIAL_GEOMETRY] = await Promise.all([
   fetch("sf-corridor-official.json", { cache: "no-cache" })
     .then((r) => r.ok ? r.json() : { curb_lines: [], curb_ramps: [] })
     .catch(() => ({ curb_lines: [], curb_ramps: [] })),
+  fetch("sf-corridor-detail-manifest.json", { cache: "no-cache" })
+    .then((r) => r.ok ? r.json() : EMPTY_DETAIL_MANIFEST)
+    .catch(() => EMPTY_DETAIL_MANIFEST),
 ]);
 document.getElementById("obs").textContent = DATA.summary.observations.toLocaleString();
 document.getElementById("eligible").textContent = DATA.summary.eligible.toLocaleString();
@@ -150,6 +155,10 @@ document.getElementById("seq").textContent = DATA.summary.sequences.toLocaleStri
 document.getElementById("cells").textContent = DATA.summary.coverage_cells.toLocaleString();
 document.getElementById("surfaces").textContent = (DATA.summary.cv_depth.surface_rows || 0).toLocaleString();
 document.getElementById("measured").textContent = (DATA.summary.cv_depth.measured_curb_height_count || 0).toLocaleString();
+const detailBytes = (DETAIL_MANIFEST.shards || []).reduce((sum, shard) => sum + (shard.bytes || 0), 0);
+document.getElementById("detailnote").textContent = DETAIL_MANIFEST.shards.length
+  ? `Full source detail — ${(detailBytes / 1e6).toFixed(1)} MB in two lossless archive shards; the nearby half loads automatically when you inspect a feature.`
+  : "Full source detail is unavailable in this build; render geometry remains complete.";
 
 const canvas = document.getElementById("scene");
 // A logarithmic depth buffer, because this scene spans five orders of magnitude: a 126 mm kerb
@@ -11791,21 +11800,91 @@ let pressedAt = [0, 0];
 canvas.addEventListener("pointerdown", (e) => { pressedAt = [e.clientX, e.clientY]; });
 const tip = document.getElementById("tip");
 
-function featureSummary(feature) {
+const wayIndex = new WeakMap(DATA.ways.map((way, index) => [way, index]));
+const detailShardCache = new Map();
+
+function detailKey(feature) {
+  const renderIndex = wayIndex.get(feature);
+  if (renderIndex !== undefined) return `way:${renderIndex}`;
+  const kind = feature.kind || "feature";
+  if (feature.osm_id !== undefined && feature.osm_id !== null && feature.osm_id !== "") {
+    return `${kind}:osm:${feature.osm_id}`;
+  }
+  const point = feature.centroid || feature.point || (feature.points || [])[0] || [0, 0];
+  const lon = Number(Number(point[0] || 0).toFixed(6));
+  const lat = Number(Number(point[1] || 0).toFixed(6));
+  return `${kind}:at:${lon}:${lat}:${feature.name || ""}`;
+}
+
+function featureLongitude(feature) {
+  const point = feature.centroid || feature.point || (feature.points || [])[0];
+  return point && point.length >= 2 ? Number(point[0]) : Number(DETAIL_MANIFEST.split_lon || 0);
+}
+
+async function fullDetailFeature(feature) {
+  if (!feature || !(DETAIL_MANIFEST.shards || []).length) return feature;
+  const lon = featureLongitude(feature);
+  const side = lon < Number(DETAIL_MANIFEST.split_lon || 0) ? "west" : "east";
+  const shard = DETAIL_MANIFEST.shards.find((candidate) => candidate.id === side)
+    || DETAIL_MANIFEST.shards.find((candidate) =>
+      lon >= candidate.bbox.west && lon <= candidate.bbox.east
+    );
+  if (!shard) return feature;
+  let records = detailShardCache.get(shard.id);
+  if (!records) {
+    records = fetch(shard.file, { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`detail shard ${response.status}`);
+        return response.json();
+      })
+      .then((payload) => new Map((payload.features || []).map((row) => [row.key, row.fields])));
+    detailShardCache.set(shard.id, records);
+  }
+  try {
+    const fields = (await records).get(detailKey(feature));
+    if (!fields) return feature;
+    const full = { ...feature };
+    for (const [field, value] of Object.entries(fields)) {
+      if (value && !Array.isArray(value) && typeof value === "object"
+          && full[field] && !Array.isArray(full[field]) && typeof full[field] === "object") {
+        full[field] = { ...full[field], ...value };
+      } else {
+        full[field] = value;
+      }
+    }
+    full._detailShard = shard.id;
+    full._detailFieldCount = Object.keys(fields).length;
+    full._renderIndex = wayIndex.get(feature);
+    return full;
+  } catch (error) {
+    console.warn("Full feature detail could not be loaded; using render-complete record.", error);
+    return { ...feature, _detailError: true };
+  }
+}
+
+async function featureSummary(feature) {
   if (!feature) return null;
-  const place = feature.place || (feature.google_places || [])[0] || {};
-  const address = feature.address || {};
-  const parcel = feature.parcel || {};
-  const zoning = feature.zoning || {};
-  const title = place.name || feature.name || address.formatted || "Building";
+  const full = await fullDetailFeature(feature);
+  const place = full.place || (full.google_places || [])[0] || {};
+  const address = full.address || {};
+  const parcel = full.parcel || {};
+  const zoning = full.zoning || {};
+  const lidar = full.datasf_building_height || {};
+  const title = place.name || full.name || address.formatted || "Building";
   const lines = [
     `<b>${title}</b>`,
     address.formatted || place.formatted_address || "",
-    feature.archetype ? `Type: ${feature.archetype.replaceAll("_", " ")}` : "",
+    full.archetype ? `Type: ${full.archetype.replaceAll("_", " ")}` : "",
     place.primary_type ? `Business: ${place.primary_type.replaceAll("_", " ")}` : "",
-    feature.land_use || zoning.district ? `Land use: ${feature.land_use || zoning.district}` : "",
+    full.land_use || zoning.district ? `Land use: ${full.land_use || zoning.district}` : "",
+    zoning.code ? `Zoning: ${zoning.code}${zoning.district ? ` — ${zoning.district}` : ""}` : "",
     parcel.blklot ? `Parcel: ${parcel.blklot}` : "",
-    feature.sources ? `Sources: ${feature.sources.join(", ")}` : "",
+    parcel.planning_district ? `Planning district: ${parcel.planning_district}` : "",
+    lidar.height_m ? `DataSF lidar height: ${Number(lidar.height_m).toFixed(2)} m (${lidar.height_method || "measured"})` : "",
+    full.cnn_name ? `Street record: ${full.cnn_name}${full.cnn ? ` (CNN ${full.cnn})` : ""}` : "",
+    full.sources ? `Sources: ${full.sources.join(", ")}` : "",
+    full._detailShard ? `Full archive: ${full._detailFieldCount} restored fields · ${full._detailShard} shard` : "",
+    full._detailError ? "Full archive: temporarily unavailable; showing render-complete record" : "",
   ].filter(Boolean);
   return lines.join("<br>");
 }
@@ -11895,12 +11974,12 @@ function goTo(landing, { travel }) {
   placeCamera();
 }
 
-canvas.addEventListener("pointerup", (e) => {
+canvas.addEventListener("pointerup", async (e) => {
   // A drag is an orbit, not a destination. Only a press that barely moved counts as a click.
   if (Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
   if (e.button === 2) return;   // handled on contextmenu, which fires first on a two-finger tap
   const feature = pickedFeature(e.clientX, e.clientY);
-  const summary = featureSummary(feature);
+  const summary = await featureSummary(feature);
   if (summary && tip) {
     tip.innerHTML = summary;
     return;
@@ -12016,7 +12095,8 @@ animate();
 // picture into its own buffer, and answers what is actually standing at a given point on the
 // ground. Between them a caller with no screen can both see the model and measure it.
 window.kerbside = {
-  scene, camera, renderer, groups, DATA, xy, insideCarriageway, buildingAt,
+  scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
+  xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
   recentred,
