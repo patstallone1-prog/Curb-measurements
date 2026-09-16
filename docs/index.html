@@ -111,6 +111,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
       <h2>Where coverage is missing</h2>
       <div class="toolbar">
         <button data-layer="gaps" aria-pressed="false">Show gaps</button>
+        <button id="firstperson" aria-pressed="false" title="See out of the walker's eyes; drag to look, arrows to walk">First person</button>
         <button id="reset">Reset view</button>
       </div>
       <p id="gapnote" style="margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.45"></p>
@@ -11336,13 +11337,39 @@ for (const s of DATA.sequence_paths) {
 }
 });
 
-const state = { yaw: -0.45, pitch: 0.95, dist: 1180, target: new THREE.Vector3(0, 0, 0) };
+const state = { yaw: -0.45, pitch: 0.95, dist: 1180, target: new THREE.Vector3(0, 0, 0),
+                firstPerson: false, look: 0.0 };
 function placeCamera() {
+  if (state.firstPerson && typeof avatar !== "undefined") {
+    // Out of the walker's eyes: the camera stands at eye height where the walker stands and
+    // looks the way the arrows walk, so forward is forward. Dragging turns the head.
+    const eye = avatar.position.clone();
+    eye.y = AVATAR_EYE_Y;
+    const forward = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw)).negate();
+    const aim = eye.clone().add(forward.multiplyScalar(10)).add(new THREE.Vector3(0, Math.tan(state.look) * 10, 0));
+    camera.position.copy(eye);
+    camera.lookAt(aim);
+    return;
+  }
   const x = Math.sin(state.yaw) * Math.cos(state.pitch) * state.dist;
   const z = Math.cos(state.yaw) * Math.cos(state.pitch) * state.dist;
   const y = Math.sin(state.pitch) * state.dist;
   camera.position.copy(state.target).add(new THREE.Vector3(x, y, z));
   camera.lookAt(state.target);
+}
+function setFirstPerson(on) {
+  state.firstPerson = on;
+  if (typeof avatar !== "undefined") {
+    // The walker is not drawn from inside its own head.
+    avatar.visible = !on;
+    if (on) state.target.copy(avatar.position);
+  }
+  const button = document.getElementById("firstperson");
+  if (button) button.setAttribute("aria-pressed", on ? "true" : "false");
+  // At eye height the kerb is half a metre away; the orbit camera's near plane would cut it.
+  camera.near = on ? 0.12 : 0.5;
+  camera.updateProjectionMatrix();
+  placeCamera();
 }
 placeCamera();
 
@@ -11352,23 +11379,31 @@ canvas.addEventListener("pointermove", (e) => {
   if (!dragging) return;
   const dx = e.clientX - last[0], dy = e.clientY - last[1];
   state.yaw -= dx * 0.006;
-  state.pitch = Math.max(0.25, Math.min(1.28, state.pitch + dy * 0.004));
+  if (state.firstPerson) {
+    state.look = Math.max(-0.7, Math.min(0.7, state.look - dy * 0.004));
+  } else {
+    state.pitch = Math.max(0.25, Math.min(1.28, state.pitch + dy * 0.004));
+  }
   last = [e.clientX, e.clientY];
   placeCamera();
 });
 canvas.addEventListener("pointerup", () => { dragging = false; });
 canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
+  if (state.firstPerson) return;
   state.dist = Math.max(8, Math.min(2600, state.dist * Math.exp(e.deltaY * 0.001)));
   placeCamera();
 }, { passive: false });
+document.getElementById("firstperson").addEventListener("click", () => {
+  setFirstPerson(!state.firstPerson);
+});
 document.getElementById("reset").addEventListener("click", () => {
-  Object.assign(state, { yaw: -0.45, pitch: 0.95, dist: 1180 });
+  Object.assign(state, { yaw: -0.45, pitch: 0.95, dist: 1180, look: 0.0 });
   if (typeof avatar !== "undefined") {
-    avatar.position.set(0, AVATAR_RADIUS, 0);
+    avatar.position.set(0, AVATAR_STAND_Y, 0);
     state.target.copy(avatar.position);
   }
-  placeCamera();
+  setFirstPerson(false);
 });
 
 // ---- gaps: mapped ways nobody has photographed ----
@@ -11548,6 +11583,11 @@ const STREET_SPEED = 8.94;     // 20 mph in metres per second, at street level
 const SPEED_REFERENCE_DIST = 45;
 const AVATAR_RADIUS = 0.9;     // 1.8 m across: a person, so everything else has a scale to read against
 const AVATAR_HEIGHT = 2.1336;  // seven feet exactly, which is what the demo avatar is asked to be
+//: The walker is drawn at the size above: one, once the figure is measured as it stands
+//: (skinnedBounds) rather than by its unposed geometry, which had it ten metres tall.
+const AVATAR_SCALE = 1.0;
+const AVATAR_STAND_Y = AVATAR_RADIUS * AVATAR_SCALE;      // the rig's origin, feet on the ground
+const AVATAR_EYE_Y = AVATAR_HEIGHT * AVATAR_SCALE * 0.93;  // where the first-person camera sits
 const ARRIVAL_DIST = 45;       // close enough that a 126 mm kerb is a step rather than a line
 const DEMO_CHARACTER_URL = "https://threejs.org/examples/models/gltf/Soldier.glb";
 const DEMO_CHARACTER_SOURCE = "Three.js Soldier.glb demo avatar with skinned idle/walk/run clips";
@@ -11658,7 +11698,8 @@ function buildCharacterAvatar() {
   return rig;
 }
 const avatar = buildCharacterAvatar();
-avatar.position.set(0, AVATAR_RADIUS, 0);
+avatar.scale.setScalar(AVATAR_SCALE);
+avatar.position.set(0, AVATAR_STAND_Y, 0);
 root.add(avatar);
 function setAvatarAction(name) {
   const next = avatarActions[name] || avatarActions.Walk || avatarActions.Run || avatarActions.Idle;
@@ -11667,12 +11708,29 @@ function setAvatarAction(name) {
   if (avatarActiveAction) avatarActiveAction.fadeOut(0.18);
   avatarActiveAction = next;
 }
+function skinnedBounds(object) {
+  // The box a skinned figure actually occupies. Box3.setFromObject reads each mesh's
+  // geometry bounds, which for a skinned mesh are the unposed vertices in bone space -- a
+  // box a fifth the height of the figure -- so the walker was fitted to seven feet and then
+  // stood ten metres tall, a giant on every kerb it was meant to give a scale to.
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  object.traverse((node) => {
+    if (!node.isMesh) return;
+    if (node.isSkinnedMesh) {
+      node.computeBoundingBox();
+      box.union(node.boundingBox.clone().applyMatrix4(node.matrixWorld));
+    } else {
+      box.expandByObject(node);
+    }
+  });
+  return box;
+}
 function fitDemoCharacter(model) {
-  const box = new THREE.Box3().setFromObject(model);
-  const size = box.getSize(new THREE.Vector3());
+  const size = skinnedBounds(model).getSize(new THREE.Vector3());
   const scale = size.y > 0 ? AVATAR_HEIGHT / size.y : 1;
   model.scale.setScalar(scale);
-  const fitted = new THREE.Box3().setFromObject(model);
+  const fitted = skinnedBounds(model);
   model.position.y = -AVATAR_RADIUS - fitted.min.y;
   model.rotation.y = Math.PI;
 }
@@ -11830,10 +11888,10 @@ function groundAt(clientX, clientY) {
 function goTo(landing, { travel }) {
   if (!landing) return;
   if (travel) {
-    avatar.position.set(landing.x, AVATAR_RADIUS, landing.z);
+    avatar.position.set(landing.x, AVATAR_STAND_Y, landing.z);
     state.dist = Math.min(state.dist, ARRIVAL_DIST);
   }
-  state.target.set(landing.x, travel ? AVATAR_RADIUS : 0, landing.z);
+  state.target.set(landing.x, travel ? AVATAR_STAND_Y : 0, landing.z);
   placeCamera();
 }
 
@@ -11899,8 +11957,8 @@ function animateAvatar(distance, direction, moving) {
     avatar.userData.walkPhase += distance * 4.8;
   }
   const swing = moving ? Math.sin(avatar.userData.walkPhase) : 0;
-  const lift = moving ? Math.abs(Math.sin(avatar.userData.walkPhase * 2)) * 0.045 : 0;
-  avatar.position.y = AVATAR_RADIUS + lift;
+  const lift = moving ? Math.abs(Math.sin(avatar.userData.walkPhase * 2)) * 0.045 * AVATAR_SCALE : 0;
+  avatar.position.y = AVATAR_STAND_Y + lift;
   avatar.userData.leftLeg.rotation.x = swing * 0.58;
   avatar.userData.rightLeg.rotation.x = -swing * 0.58;
   avatar.userData.leftArm.rotation.x = -swing * 0.48;
