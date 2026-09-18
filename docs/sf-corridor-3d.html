@@ -2703,6 +2703,9 @@ function laneCountForWay(way) {
     : (way.lanes_fwd || way.lanes_back ? (forward || 0) + (backward || 0) : tagged);
 }
 
+//: Road widths that came from the city's kerb lines, one way or another.
+const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half"]);
+
 function nominalRoadWidth(way) {
   // Keep official width metadata intact, but render one OSM way as one carriageway.
   // Broad right-of-way fallbacks and divided street matches otherwise turn a single mapped
@@ -2714,7 +2717,10 @@ function nominalRoadWidth(way) {
   // kerb and tagged lanes=1, because the other four metres are parked cars, and capped to one
   // lane it was drawn 4.75 m wide -- with the pavement laid from that kerb reaching a metre
   // and a third into the roadway, past the ends of the crossings, as a tongue at every corner.
-  const measured = way.road_source === "curb_geometry";
+  // Measured is measured: the kerb envelope read along the way (official_curbs, divided_half)
+  // as much as the city's own kerb-to-kerb record. The lane cap once reined in Vallejo,
+  // Union and Green Street from their measured 12-14 m to 8.1 because only one label counted.
+  const measured = way._spans !== undefined || MEASURED_ROAD_SOURCES.has(way.road_source);
   const laneCap = lanes && !measured ? Math.max(4.2, lanes * 3.35 + 1.4) : MAX_RENDER_ROAD_M;
   const sourceCap = measured ? MAX_RENDER_ROAD_M : MAX_INFERRED_ROAD_M;
   // A driveway or a parking aisle has no right of way of its own to fall back on: the eight
@@ -2756,6 +2762,13 @@ function segmentRunsAlongside(px, pz, bearing, other) {
   if (turn > (NEIGHBOUR_PARALLEL_DEG * Math.PI) / 180) return false;
   const t = ((px - ax) * dx + (pz - az) * dz) / length2;
   return t > 0.02 && t < 0.98;
+}
+
+//: Two ways are on the same level when neither is under or over the other: same OpenStreetMap
+//: layer, and both tunnels or neither.
+function sameLevel(a, b) {
+  return (a.layer || 0) === (b.layer || 0) && Boolean(a.tunnel_kind) === Boolean(b.tunnel_kind)
+    && Boolean(a.bridge) === Boolean(b.bridge);
 }
 
 function clampRoadWidthsToNeighbours(ways) {
@@ -2812,6 +2825,10 @@ function clampRoadWidthsToNeighbours(ways) {
           if (!bucket) continue;
           for (const other of bucket) {
             if (other[4] === way) continue;
+            // A street on another level is not beside this one: Stockton Street on the hill
+            // squeezed the Stockton Tunnel under it to 6.5 m. Nor is the same street carrying
+            // on, split at a driveway node and drawn a metre off its own line.
+            if (!sameLevel(way, other[4]) || (way.name && other[4].name === way.name)) continue;
             if (!segmentRunsAlongside(px, pz, ownBearing, other)) continue;
             const d = Math.sqrt(distanceToSegmentSquared(px, pz, other[0], other[1],
                                                          other[2], other[3]));
@@ -2827,6 +2844,8 @@ function clampRoadWidthsToNeighbours(ways) {
   }
   let clamped = 0;
   for (const way of streets) {
+    // A way drawn between the city's kerbs has its room measured; nothing clamps it.
+    if (way._spans !== undefined) continue;
     const gap = nearest.get(way);
     if (gap === undefined) continue;
     // A street that says how many lanes it has does not get clamped below them. An avenue with
@@ -2927,49 +2946,108 @@ function dividedHalfWidth(way) {
 
 //: How far along the way a station may stand from a vertex and still speak for it.
 const RECENTRE_VERTEX_REACH_M = 12.0;
+//: A way's vertices are no further apart than this before its kerb envelope is read, so a
+//: turn pocket or a bulb-out forty metres from the nearest OpenStreetMap vertex is followed
+//: rather than averaged away.
+const ENVELOPE_VERTEX_M = 24.0;
+//: An edge nearer the centreline than this is the centreline's own noise, not a kerb. Half a
+//: lane: OpenStreetMap draws a three-metre alley's line a metre off its middle.
+const ENVELOPE_MIN_EDGE_M = 0.6;
+//: Ophir Alley is 2.9 m between its kerbs, and it is a street.
+const ENVELOPE_MIN_SPAN_M = 2.4;
+//: Stations within reach of one vertex may disagree by this much and still be one kerb: a
+//: taper over the twelve metres either side of a vertex moves the middle by a metre.
+const ENVELOPE_MAX_SPREAD_M = 0.9;
+//: The shortest way whose envelope is read; below it there is no room for stations clear of
+//: both curb returns.
+const ENVELOPE_MIN_WAY_M = 10.0;
+//: A recorded right of way this many times wider than the kerbs the way actually runs between
+//: was matched to some other street's record: an alley given the avenue's width.
+const ROW_MISMATCH_FACTOR = 2.0;
+//: Where the record and the kerbs disagree by more than this, the kerbs win the label too.
+const ENVELOPE_RELABEL_M = 1.0;
 
-function recentreDividedHalf(way) {
-  // The outer kerb is the one the footway is on; the way is moved so that its outer edge lies
-  // on it, vertex by vertex. One offset for the whole way is the rule for a street between
-  // two kerbs, and it is right there because the kerbs are parallel; a divided half's outer
-  // kerb is not parallel to the median it was drawn along -- Broadway's westbound half widens
-  // by five metres over its last seventy toward the tunnel -- so each vertex takes the offset
-  // of the stations around it, where they agree.
-  const side = way.walk_sides[0];
-  const width = dividedHalfWidth(way);
-  const points = way.points;
+//: How many rays either side of a station say a kerb is there. For a divided half only the
+//: footway side is an outer kerb: the median side is an island kerb, or where the city drew
+//: none, the width the lanes say.
+function envelopeEdgesAt(x, z, nx, nz, way, reach) {
+  const kerbs = rayCurbIntersections(x, z, nx, nz, reach, officialCurbGrid);
+  const oneway = Boolean(way.oneway || way.osm_oneway);
+  const islands = rayCurbIntersections(x, z, nx, nz, reach, officialIslandCurbGrid);
+  const neg = (list) => list.filter((v) => v < -ENVELOPE_MIN_EDGE_M).pop();
+  const pos = (list) => list.find((v) => v > ENVELOPE_MIN_EDGE_M);
+  if (isDividedHalf(way)) {
+    const side = way.walk_sides[0];
+    const kerb = side > 0 ? pos(kerbs) : neg(kerbs);
+    if (kerb === undefined) return null;
+    const island = side > 0 ? islands.filter((v) => v < kerb - 2.5 && v > -12).pop()
+      : islands.find((v) => v > kerb + 2.5 && v < 12);
+    if (island !== undefined) return side > 0 ? [island, kerb] : [kerb, island];
+    const width = dividedHalfWidth(way);
+    return side > 0 ? [kerb - width, kerb] : [kerb, kerb + width];
+  }
+  // Balance is judged more loosely on a narrow roadway, where a metre off the middle is a
+  // third of the width.
+  const plausible = (a, b, ratio) => a !== undefined && b !== undefined
+    && b - a >= ENVELOPE_MIN_SPAN_M && b - a <= 30.0
+    && -a <= b * Math.max(ratio, b - a < 5 ? 5 : 0) && b <= -a * Math.max(ratio, b - a < 5 ? 5 : 0);
+  // Islands bound a one-way carriageway outright. A two-way street runs kerb to kerb -- a
+  // refuge in its middle is drawn on it as the raised thing it is -- unless the "islands"
+  // are a pair standing symmetrically either side of it a lane apart, which is not a refuge
+  // but the kerbs of a narrow roadway inside a wide right of way: Broadway on the hill over
+  // its own tunnel, 5.3 m between the walls the city files as islands, 28 m between the
+  // outer kerbs of the cut.
+  const all = kerbs.concat(islands).sort((p, q) => p - q);
+  const a = neg(all), b = pos(all);
+  if (oneway) {
+    // The centreline of a one-way lane of a divided street is drawn off-centre on purpose,
+    // and gets more room.
+    return plausible(a, b, 6.0) ? [a, b] : null;
+  }
+  if (plausible(a, b, 3.0) && b - a >= 4.2 && (a !== neg(kerbs) || b !== pos(kerbs))) return [a, b];
+  const ka = neg(kerbs), kb = pos(kerbs);
+  return plausible(ka, kb, 3.0) ? [ka, kb] : null;
+}
+
+function recentreOnKerbEnvelope(way) {
+  // The kerb envelope: at each vertex, where this street's two edges stand either side of
+  // the centreline according to the city's kerb lines. The way is moved onto the middle of
+  // them vertex by vertex and drawn as wide as they are at each point. This is the one
+  // source of carriageway edges; the recorded right of way, the lane count and the room to
+  // the next street are fallbacks for where the city drew no kerb.
+  //
+  // One offset for the whole way was the rule for a street between two kerbs, and it was
+  // right where the kerbs are parallel; a divided half's outer kerb is not parallel to the
+  // median it was drawn along, a turn pocket opens over forty metres, and a bulb-out steps
+  // in near the corner -- so each vertex takes the offset and width of the stations around
+  // it, where they agree.
+  if (!way.points || way.points.length < 2) return false;
+  const length = wayLength(way.points);
+  if (length < ENVELOPE_MIN_WAY_M) return false;
+  // Clear of the curb returns at each end -- eight metres on a block, a quarter of the way
+  // on a short connector between two junctions.
+  const margin = Math.min(RECENTRE_END_MARGIN_M, length * 0.25);
+  // Closer stations on a short way, so each vertex has a few within reach of it.
+  const station = length < 60 ? RECENTRE_STATION_M / 2 : RECENTRE_STATION_M;
+  const points = length > ENVELOPE_VERTEX_M * 1.25 ? densifyWay(way.points, ENVELOPE_VERTEX_M) : way.points;
+  const guess = way.road_m || 8.0;
+  const reach = Math.min(30, Math.max(guess, dividedHalfWidth(way)) * 1.3 + 5);
   const stations = [];
-  const dense = densifyWay(points, RECENTRE_STATION_M);
-  const length = wayLength(points);
-  if (length < RECENTRE_END_MARGIN_M * 2 + RECENTRE_STATION_M) return false;
+  const dense = densifyWay(points, station);
   let along = 0;
   for (let i = 1; i < dense.length - 1; i += 1) {
     const [px, py] = xy(dense[i - 1][0], dense[i - 1][1]);
     const [x, y] = xy(dense[i][0], dense[i][1]);
     const [qx, qy] = xy(dense[i + 1][0], dense[i + 1][1]);
     along += Math.hypot(x - px, y - py);
-    if (along < RECENTRE_END_MARGIN_M || along > length - RECENTRE_END_MARGIN_M) continue;
+    if (along < margin || along > length - margin) continue;
     const dx = qx - px;
     const dz = -(qy - py);
     const span = Math.hypot(dx, dz) || 1;
-    const reach = Math.min(30, width * 1.3 + 5);
-    const nx = dz / span, nz = -dx / span;
-    const hits = rayCurbIntersections(x, -y, nx, nz, reach, officialCurbGrid);
-    const kerb = side > 0 ? hits.find((v) => v > 1.2)
-      : hits.filter((v) => v < -1.2).pop();
-    if (kerb === undefined) continue;
-    // The median's own kerb, on the other side: the city maps its islands, and between the
-    // outer kerb and the island kerb is the whole of this half's carriageway -- which is
-    // wider than its lanes where a turn pocket opens, and Broadway's westbound half runs
-    // from 8.5 m at Polk to 11.7 m by Larkin. Without an island kerb the lanes say.
-    const islands = rayCurbIntersections(x, -y, nx, nz, Math.abs(kerb) + 2, officialIslandCurbGrid);
-    const island = side > 0 ? islands.filter((v) => v < kerb - 2.5 && v > -12).pop()
-      : islands.find((v) => v > kerb + 2.5 && v < 12);
-    if (island !== undefined) {
-      stations.push([along, (kerb + island) / 2, Math.abs(kerb - island)]);
-    } else {
-      stations.push([along, kerb - side * width / 2, width]);
-    }
+    // The left normal, in the x/z frame the kerb grid is indexed in.
+    const edges = envelopeEdgesAt(x, -y, dz / span, -dx / span, way, reach);
+    if (!edges) continue;
+    stations.push([along, (edges[0] + edges[1]) / 2, edges[1] - edges[0]]);
   }
   if (stations.length < 3) return false;
   // Each vertex: the median of the stations within reach, if they agree.
@@ -2988,13 +3066,13 @@ function recentreDividedHalf(way) {
     if (near.length < 2) { offsets.push(null); spans.push([at, null]); continue; }
     const spread = near[Math.floor(near.length * 0.75)] - near[Math.floor(near.length * 0.25)];
     const median = near[Math.floor(near.length / 2)];
-    const agreed = spread <= RECENTRE_MAX_SPREAD_M;
+    const agreed = spread <= ENVELOPE_MAX_SPREAD_M;
     offsets.push(!agreed ? null
       : Math.max(-RECENTRE_MAX_SHIFT_M, Math.min(RECENTRE_MAX_SHIFT_M, median)));
     spans.push([at, agreed ? widths[Math.floor(widths.length / 2)] : null]);
   }
-  if (!offsets.some((o) => o !== null)) return false;
-  // A vertex with no width of its own carries its nearest neighbour's.
+  if (offsets.filter((o) => o !== null).length < Math.min(2, points.length)) return false;
+  // A vertex with no reading of its own carries its nearest neighbour's.
   for (let j = 0; j < spans.length; j += 1) {
     if (spans[j][1] !== null) continue;
     for (let k2 = 1; k2 < spans.length; k2 += 1) {
@@ -3002,8 +3080,6 @@ function recentreDividedHalf(way) {
       if (candidate !== null && candidate !== undefined) { spans[j][1] = candidate; break; }
     }
   }
-  way._spans = spans;
-  // A vertex with no stations of its own carries its nearest neighbour's offset.
   const known = offsets.slice();
   for (let j = 0; j < offsets.length; j += 1) {
     if (known[j] !== null) continue;
@@ -3012,20 +3088,35 @@ function recentreDividedHalf(way) {
       if (candidate !== null && candidate !== undefined) { offsets[j] = candidate; break; }
     }
   }
-  way._node = [points[0].slice(), points[points.length - 1].slice()];
+  way._spans = spans;
+  way._node = [way.points[0].slice(), way.points[way.points.length - 1].slice()];
   way._shift = [offsets[0], offsets[offsets.length - 1]];
+  way.points = offsets.some((o) => Math.abs(o) >= RECENTRE_MIN_SHIFT_M)
+    ? offsetWay(points, offsets) : points;
   if (offsets.some((o) => Math.abs(o) >= RECENTRE_MIN_SHIFT_M)) {
-    way.points = offsetWay(points, offsets);
     way.recentred_m = +Math.max(...offsets.map(Math.abs)).toFixed(3);
   }
   const sorted = spans.map(([, w]) => w).sort((p, q) => p - q);
-  way.road_m = +sorted[Math.floor(sorted.length / 2)].toFixed(3);
-  way.road_source = "divided_half";
+  const envelope = +sorted[Math.floor(sorted.length / 2)].toFixed(3);
+  const recorded = way.road_m;
+  if (recorded && way.road_source === "row_minus_footways"
+      && recorded > envelope * ROW_MISMATCH_FACTOR + 2.0) {
+    // Brant Alley carried a 27.7 m right of way between kerbs 4 m apart: the centreline
+    // index matched it to the avenue it leaves from. The record is not this street's.
+    way.road_record_rejected = recorded;
+  }
+  if (isDividedHalf(way)) {
+    way.road_m = envelope;
+    way.road_source = "divided_half";
+  } else if (!recorded || way.road_source !== "curb_geometry"
+             || Math.abs(recorded - envelope) > ENVELOPE_RELABEL_M) {
+    if (recorded && way.road_source === "curb_geometry") way.road_record_m = recorded;
+    way.road_m = envelope;
+    way.road_source = "official_curbs";
+  }
   return true;
 }
 
-//: The half road width at a distance along a way: from its per-vertex spans where the city's
-//: kerbs gave it some, else the one width it is drawn at everywhere.
 function halfWidthAt(way, along) {
   const spans = way && way._spans;
   if (!spans || spans.length < 2) return renderedRoadWidth(way) / 2;
@@ -3053,67 +3144,21 @@ function alongDistances(points) {
 }
 
 function recentreStreetsOnOfficialKerbs(ways) {
-  if (!officialCurbGrid.size) return { moved: 0, widened: 0 };
+  if (!officialCurbGrid.size) return { moved: 0, widened: 0, inherited: 0 };
   let moved = 0;
   let widened = 0;
   for (const way of ways) {
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     if (isUnmarkedService(way) || way.tunnel_kind) continue;
-    if (isDividedHalf(way)) {
-      if (recentreDividedHalf(way)) { moved += 1; widened += 1; }
-      continue;
-    }
-    const road = way.road_m || 8.0;
-    const dense = densifyWay(way.points, RECENTRE_STATION_M);
-    const length = wayLength(way.points);
-    if (length < RECENTRE_END_MARGIN_M * 2 + RECENTRE_STATION_M) continue;
-    const offsets = [];
-    const spans = [];
-    let along = 0;
-    for (let i = 1; i < dense.length - 1; i += 1) {
-      const [px, py] = xy(dense[i - 1][0], dense[i - 1][1]);
-      const [x, y] = xy(dense[i][0], dense[i][1]);
-      const [qx, qy] = xy(dense[i + 1][0], dense[i + 1][1]);
-      along += Math.hypot(x - px, y - py);
-      if (along < RECENTRE_END_MARGIN_M || along > length - RECENTRE_END_MARGIN_M) continue;
-      const dx = qx - px;
-      const dz = -(qy - py);
-      const span = Math.hypot(dx, dz) || 1;
-      // The left normal, in the x/z frame the kerb grid is indexed in.
-      const found = officialKerbOffsetsAt(x, -y, dz / span, -dx / span, road);
-      if (!found) continue;
-      offsets.push(found.offset);
-      spans.push(found.span);
-    }
-    if (offsets.length < 3) continue;
-    const sorted = offsets.slice().sort((p, q) => p - q);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const spread = sorted[Math.floor(sorted.length * 0.75)] - sorted[Math.floor(sorted.length * 0.25)];
-    if (spread > RECENTRE_MAX_SPREAD_M || Math.abs(median) > RECENTRE_MAX_SHIFT_M) continue;
-    // Where the way stood, kept for the junction it shares with the ways that meet it there.
-    way._node = [way.points[0].slice(), way.points[way.points.length - 1].slice()];
-    way._shift = [median, median];
-    if (Math.abs(median) >= RECENTRE_MIN_SHIFT_M) {
-      way.points = offsetWay(way.points, median);
-      way.recentred_m = +median.toFixed(3);
-      moved += 1;
-    }
-    if (way.road_source !== "curb_geometry") {
-      const widths = spans.slice().sort((p, q) => p - q);
-      way.road_m = +widths[Math.floor(widths.length / 2)].toFixed(3);
-      way.road_source = "official_curbs";
-      widened += 1;
-    }
+    const before = way.road_source;
+    if (!recentreOnKerbEnvelope(way)) continue;
+    if (way.recentred_m) moved += 1;
+    if (way.road_source !== before || way.road_record_m) widened += 1;
   }
   const inherited = inheritRecentring(ways);
   return { moved, widened, inherited };
 }
 
-//: A way too short to be recentred on its own -- OpenStreetMap splits a street at every
-//: driveway node and change of tagging, and Polk Street leaves Broadway as a 23 m piece --
-//: moves with the street it is part of: the same shift as the way that carries on from its
-//: end. Left where it was, it stood two metres off the pieces either side of it, with a jog in
-//: the kerb at each node and its pavement laid across the roadway on one side.
 function inheritRecentring(ways) {
   const CELL = 4;
   const ends = new Map();
@@ -3868,10 +3913,13 @@ function indexBulbOuts(ways) {
       const dz = -(ay - by);
       const span = Math.hypot(dx, dz) || 1;
       // The left normal, in the x/z frame the kerb grid is indexed in.
-      const hits = rayCurbIntersections(x, -y, dz / span, -dx / span, inner + 0.6, officialCurbGrid);
+      // Against the kerb line the way is drawn to here -- its envelope where the city's
+      // kerbs gave it one -- not the one width down the middle of it.
+      const local = way._spans ? halfWidthAt(way, along) : inner;
+      const hits = rayCurbIntersections(x, -y, dz / span, -dx / span, local + 0.6, officialCurbGrid);
       for (const side of [1, -1]) {
         const kerb = side > 0 ? hits.find((v) => v > 1.2) : hits.filter((v) => v < -1.2).pop();
-        let depth = kerb === undefined ? 0 : inner - Math.abs(kerb);
+        let depth = kerb === undefined ? 0 : local - Math.abs(kerb);
         if (depth < BULB_MIN_M || depth > BULB_MAX_M) depth = 0;
         bulbs[side].push([along, depth]);
       }
@@ -4692,9 +4740,9 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
         const [x, y] = xy(spine[i][0], spine[i][1]);
         along += Math.hypot(x - px, y - py);
       }
-      // Where the city's kerbs put this half wider than its lanes, the kerb line is there;
-      // never nearer than the drawn width, since the road under it is drawn at that.
-      const here = way && way._spans ? Math.max(inner, halfWidthAt(way, along)) : inner;
+      // The kerb line is where the way's envelope puts it at this station, which is where
+      // the road under it is drawn to.
+      const here = way && way._spans ? halfWidthAt(way, along) : inner;
       kerbAt.push(here);
       innerAt.push(here - bulbDepthAt(way, side, along));
     }
@@ -4718,16 +4766,16 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
     const span = Math.hypot(dx, dz) || 1;
     const nx = -dz / span;
     const nz = dx / span;
-    const blocked = kerbsideBlockedAt(before, spine[i], after, side, inner);
+    const blocked = kerbsideBlockedAt(before, spine[i], after, side, kerbAt[i]);
     for (let w = 0; w < widths.length; w += 1) {
-      const centre = offsetWay([before, spine[i], after], side * (inner + widths[w] / 2))[1];
+      const centre = offsetWay([before, spine[i], after], side * (kerbAt[i] + widths[w] / 2))[1];
       const [cx, cy] = xy(centre[0], centre[1]);
       fits[w].push(!blocked && walkFitsAt(cx, -cy, nx, nz, widths[w]));
     }
     // The mapped footway on this side, if OpenStreetMap has one here. (nx, nz) is the right
     // normal of travel in the x/z frame, and `side` counts left as positive.
     const [sx, sy] = xy(spine[i][0], spine[i][1]);
-    meets.push(blocked ? null : mappedWalkBeyondKerb(sx, -sy, -side * nx, -side * nz, inner));
+    meets.push(blocked ? null : mappedWalkBeyondKerb(sx, -sy, -side * nx, -side * nz, kerbAt[i]));
   }
 
   // One side of one block has one sidewalk width. Changing width mid-block produces exactly
@@ -4758,7 +4806,7 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
   const group = chosen.map((c, i) => {
     const met = meets[i];
     if (c < 0 || !met) return c;
-    const gap = met.edge - inner;
+    const gap = met.edge - kerbAt[i];
     if (gap >= MAPPED_WALK_GAP_MIN_M) return `gap:${Math.round(gap / 0.25)}:${met.thickness.toFixed(3)}`;
     return `under:${c}:${met.thickness.toFixed(3)}`;
   });
@@ -4782,7 +4830,7 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
     if (met) {
       if (typeof group[from] === "string" && group[from].startsWith("gap:")) {
         let gap = 0;
-        for (let i = from; i <= to; i += 1) gap = Math.max(gap, meets[i] ? meets[i].edge - inner : 0);
+        for (let i = from; i <= to; i += 1) gap = Math.max(gap, meets[i] ? meets[i].edge - kerbAt[i] : 0);
         width = Math.min(gap + KERB_LIP_M, MAX_RENDER_WALK_M);
         y = met.y;
         thickness = met.thickness;
@@ -12296,7 +12344,7 @@ window.kerbside = {
   nearestKerbAt, furnitureAnchor, bestFacadeWall, wallPoint, shopBays, carriagewayGrid, CARRIAGEWAY_CELL,
   pavementTopAt, parkingLayout, rayCurbIntersections, officialCurbGrid, officialKerbOffsetsAt,
   mappedWalkBeyondKerb, mappedWalkGrid, MAPPED_WALK_CELL, crossingRoadSpanPoints, crossingPaintLegs,
-  officialIslandCurbGrid, isDividedHalf, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
+  officialIslandCurbGrid, isDividedHalf, recentreOnKerbEnvelope, envelopeEdgesAt, sameLevel, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
   crossingDrawGrid, sidewalkCrossingReplacementSpans, crossingDrawPose, densifyWay, crossingRectanglePoints,
   twinInnerEdgeAt, halfWidthAt,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
