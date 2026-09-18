@@ -2778,6 +2778,29 @@ function sameLevel(a, b) {
     && Boolean(a.bridge) === Boolean(b.bridge);
 }
 
+//: Room a carriageway has between the buildings either side of it: twice the nearer facade
+//: less a footway, at the tightest of a few stations. Null where no building faces the way.
+const FACADE_ROOM_WALK_M = 1.4;
+function roomBetweenFacades(way) {
+  if (!footprintGrid.size || !way.points || way.points.length < 2) return null;
+  const dense = densifyWay(way.points, 12);
+  let tightest = null;
+  for (let i = 1; i + 1 < dense.length; i += 1) {
+    const [px, py] = xy(dense[i - 1][0], dense[i - 1][1]);
+    const [x, y] = xy(dense[i][0], dense[i][1]);
+    const [qx, qy] = xy(dense[i + 1][0], dense[i + 1][1]);
+    const dx = qx - px, dz = -(qy - py);
+    const span = Math.hypot(dx, dz) || 1;
+    const nx = dz / span, nz = -dx / span;
+    const left = rayFootprintDistance(x, -y, nx, nz, 30);
+    const right = rayFootprintDistance(x, -y, -nx, -nz, 30);
+    if (left === null || right === null) continue;
+    const room = 2 * (Math.min(left, right) - FACADE_ROOM_WALK_M);
+    if (tightest === null || room < tightest) tightest = room;
+  }
+  return tightest;
+}
+
 function clampRoadWidthsToNeighbours(ways) {
   const CELL = 40;
   const grid = new Map();
@@ -2853,6 +2876,16 @@ function clampRoadWidthsToNeighbours(ways) {
   for (const way of streets) {
     // A way drawn between the city's kerbs has its room measured; nothing clamps it.
     if (way._spans !== undefined) continue;
+    // With no kerb to draw between, the building line is the next best evidence: a roadway
+    // never runs through the houses either side of it. Genoa Place carried a 14.9 m right
+    // of way between facades 6 m apart, and its pavement was laid through the buildings.
+    // Not under a hill or a building: the houses over a tunnel are not beside it.
+    const facadeRoom = isTunnelWay(way) || (way.layer || 0) !== 0 ? null : roomBetweenFacades(way);
+    if (facadeRoom !== null && facadeRoom < way._renderRoadM) {
+      way._renderRoadM = Math.max(MIN_RENDER_ROAD_M, facadeRoom);
+      way.road_facade_clamped = true;
+      clamped += 1;
+    }
     const gap = nearest.get(way);
     if (gap === undefined) continue;
     // A street that says how many lanes it has does not get clamped below them. An avenue with
@@ -3229,7 +3262,149 @@ function inheritRecentring(ways) {
   return inherited;
 }
 
+// Which building is under the cursor, from the footprints rather than from the meshes.
+//
+// The meshes are merged now, so a ray that hits one comes back with "the buildings" rather than
+// with a building. The footprints are the identity, they are already in the payload, and asking
+// them is both cheaper than a raycast through fifteen thousand objects and more forgiving: a
+// click on a roof lands inside the footprint under it, which is the building you meant.
+const FOOTPRINT_CELL = 60;
+const footprintGrid = new Map();
+for (const way of DATA.ways) {
+  if (way.kind !== "building" || !way.points || way.points.length < 4) continue;
+  const local = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [x, z] of local) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const entry = { way, local, minX, maxX, minZ, maxZ };
+  for (let ix = Math.floor(minX / FOOTPRINT_CELL); ix <= Math.floor(maxX / FOOTPRINT_CELL); ix += 1) {
+    for (let iz = Math.floor(minZ / FOOTPRINT_CELL); iz <= Math.floor(maxZ / FOOTPRINT_CELL); iz += 1) {
+      const key = `${ix}:${iz}`;
+      let bucket = footprintGrid.get(key);
+      if (!bucket) footprintGrid.set(key, bucket = []);
+      bucket.push(entry);
+    }
+  }
+}
+
+function insideFootprint(entry, x, z) {
+  if (x < entry.minX || x > entry.maxX || z < entry.minZ || z > entry.maxZ) return false;
+  let inside = false;
+  const ring = entry.local;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const [xi, zi] = ring[i];
+    const [xj, zj] = ring[j];
+    if ((zi > z) !== (zj > z)
+        && x < ((xj - xi) * (z - zi)) / ((zj - zi) || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function buildingAt(x, z) {
+  const bucket = footprintGrid.get(`${Math.floor(x / FOOTPRINT_CELL)}:${Math.floor(z / FOOTPRINT_CELL)}`);
+  if (!bucket) return null;
+  for (const entry of bucket) if (insideFootprint(entry, x, z)) return entry.way;
+  return null;
+}
+
+
+//: How far from a facade the pavement stops: the building's own threshold and step.
+const FACADE_GAP_M = 0.3;
+//: A pavement whose width was never surveyed may reach this far to meet the building line.
+const WALK_TO_FACADE_MAX_M = 7.0;
+
+function rayFootprintDistance(x, z, dx, dz, reach) {
+  // The distance along the ray from (x, z) to the first building edge, or null. The ray is
+  // walked cell by cell through the footprint grid and each footprint's edges are tested
+  // exactly, so the answer is the facade line, not the nearest sample to it.
+  let best = null;
+  const seen = new Set();
+  for (let t = 0; t <= reach; t += FOOTPRINT_CELL / 2) {
+    const key = `${Math.floor((x + dx * t) / FOOTPRINT_CELL)}:${Math.floor((z + dz * t) / FOOTPRINT_CELL)}`;
+    const bucket = footprintGrid.get(key);
+    if (!bucket) continue;
+    for (const entry of bucket) {
+      if (seen.has(entry)) continue;
+      seen.add(entry);
+      const ring = entry.local;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+        const [ax, az] = ring[j];
+        const [bx, bz] = ring[i];
+        const sx = bx - ax, sz = bz - az;
+        const denominator = dx * sz - dz * sx;
+        if (Math.abs(denominator) < 1e-9) continue;
+        const qx = ax - x, qz = az - z;
+        const alongRay = (qx * sz - qz * sx) / denominator;
+        const alongEdge = (qx * dz - qz * dx) / denominator;
+        if (alongEdge < 0 || alongEdge > 1 || alongRay < 0.05 || alongRay > reach) continue;
+        if (best === null || alongRay < best) best = alongRay;
+      }
+    }
+  }
+  return best;
+}
+
+
 const recentred = recentreStreetsOnOfficialKerbs(DATA.ways);
+
+// ---- bends ----
+//
+// OpenStreetMap draws a curving street as a few straight pieces meeting at an angle, and
+// everything laid from that line -- kerb, pavement, paint, the strips between kerbs -- met at
+// the same angle: a corner in the kerb where the road bends round Yacht Road and the
+// Embarcadero. A bend of up to FILLET_MAX_DEG at a vertex inside a way is a curve, and it is
+// drawn as one: the vertex becomes an arc tangent to both legs. A sharper angle is a corner
+// and stays one; the ends of a way are junctions and are never moved.
+const FILLET_MIN_DEG = 8.0;
+const FILLET_MAX_DEG = 70.0;
+const FILLET_LEG_MAX_M = 8.0;
+const FILLET_STEP_M = 1.5;
+
+function filletBends(points) {
+  if (!points || points.length < 3) return points;
+  const local = points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, y]; });
+  const out = [points[0]];
+  for (let i = 1; i + 1 < local.length; i += 1) {
+    const [ax, ay] = local[i - 1];
+    const [x, y] = local[i];
+    const [bx, by] = local[i + 1];
+    const l1 = Math.hypot(x - ax, y - ay), l2 = Math.hypot(bx - x, by - y);
+    if (l1 < 1e-6 || l2 < 1e-6) continue;
+    const u1 = [(x - ax) / l1, (y - ay) / l1], u2 = [(bx - x) / l2, (by - y) / l2];
+    const turn = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1]))) * 180 / Math.PI;
+    if (turn < FILLET_MIN_DEG || turn > FILLET_MAX_DEG || l1 < 3 || l2 < 3) { out.push(points[i]); continue; }
+    const d = Math.min(l1 / 2.5, l2 / 2.5, FILLET_LEG_MAX_M);
+    const p0 = [x - u1[0] * d, y - u1[1] * d];
+    const p2 = [x + u2[0] * d, y + u2[1] * d];
+    const steps = Math.max(3, Math.ceil((2 * d) / FILLET_STEP_M));
+    for (let k = 0; k <= steps; k += 1) {
+      const t = k / steps;
+      // A quadratic Bezier through the legs' ends with the vertex as its control point:
+      // tangent to both legs, and never further from the vertex than the legs are.
+      const qx = (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * x + t * t * p2[0];
+      const qy = (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * y + t * t * p2[1];
+      out.push(lonLatFromXZ(qx, -qy));
+    }
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+function filletStreetBends(ways) {
+  let bent = 0;
+  for (const way of ways) {
+    if (way.kind !== "street" || !way.points || way.points.length < 3 || isTunnelWay(way)) continue;
+    const before = way.points.length;
+    way.points = filletBends(way.points);
+    if (way.points.length !== before) { bent += 1; way._filleted = true; }
+  }
+  return bent;
+}
+const bendsFilleted = filletStreetBends(DATA.ways);
 
 clampRoadWidthsToNeighbours(DATA.ways);
 
@@ -4713,6 +4888,8 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
   if (!(wanted > 0)) return 0;
   const widths = WALK_FALLBACK_WIDTHS_M.map(
     (share) => Math.max(MIN_RENDER_WALK_M * 0.55, walk * share));
+  // Whether the width came from the city's footway survey or is a share of the right of way.
+  const surveyed = Boolean(way && way.walk_m);
 
   // Trimmed only where the street really ends. `inner + 0.7w` is over seven metres on an
   // ordinary street, and OpenStreetMap splits a street wherever its tagging changes -- so
@@ -4761,6 +4938,12 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
     return 0;
   }
 
+  // The pavement's width at each station, from the building line: the surveyed width, but
+  // never into a building -- a quarter of the corridor's stations put the pavement through
+  // the facade -- and, where the width was only a share of the right of way, out to the
+  // facade where the facade is further than that. A surveyed width that stops short of the
+  // building is a setback, and the ground beyond it is the yard the ground cover draws.
+  const walkAt = [];
   const fits = widths.map(() => []);
   const meets = [];
   for (let i = 0; i < spine.length; i += 1) {
@@ -4774,14 +4957,27 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
     const nx = -dz / span;
     const nz = dx / span;
     const blocked = kerbsideBlockedAt(before, spine[i], after, side, kerbAt[i]);
-    for (let w = 0; w < widths.length; w += 1) {
-      const centre = offsetWay([before, spine[i], after], side * (kerbAt[i] + widths[w] / 2))[1];
-      const [cx, cy] = xy(centre[0], centre[1]);
-      fits[w].push(!blocked && walkFitsAt(cx, -cy, nx, nz, widths[w]));
-    }
-    // The mapped footway on this side, if OpenStreetMap has one here. (nx, nz) is the right
-    // normal of travel in the x/z frame, and `side` counts left as positive.
     const [sx, sy] = xy(spine[i][0], spine[i][1]);
+    // (nx, nz) is the right normal of travel in the x/z frame, and `side` counts left as
+    // positive, so the way out of the road on this side is -side times it.
+    const facade = rayFootprintDistance(sx, -sy, -side * nx, -side * nz,
+                                        kerbAt[i] + WALK_TO_FACADE_MAX_M + 1.0);
+    let target = walk;
+    if (facade !== null) {
+      const room = facade - kerbAt[i] - FACADE_GAP_M;
+      if (room < walk - 0.6) target = Math.max(MIN_RENDER_WALK_M * 0.55, room);
+      else if (!surveyed && facade - kerbAt[i] > walk + 1.0) {
+        target = Math.min(facade - kerbAt[i] - FACADE_GAP_M, WALK_TO_FACADE_MAX_M);
+      }
+    }
+    walkAt.push(target);
+    for (let w = 0; w < widths.length; w += 1) {
+      const width = Math.max(MIN_RENDER_WALK_M * 0.55, target * WALK_FALLBACK_WIDTHS_M[w]);
+      const centre = offsetWay([before, spine[i], after], side * (kerbAt[i] + width / 2))[1];
+      const [cx, cy] = xy(centre[0], centre[1]);
+      fits[w].push(!blocked && walkFitsAt(cx, -cy, nx, nz, width));
+    }
+    // The mapped footway on this side, if OpenStreetMap has one here.
     meets.push(blocked ? null : mappedWalkBeyondKerb(sx, -sy, -side * nx, -side * nz, kerbAt[i]));
   }
 
@@ -4810,17 +5006,19 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
   // height; where the footway reaches the kerb line, the derived pavement lies under it at
   // the footway's height less a centimetre, as it was always meant to. Stations that meet the
   // same footway the same way are one stretch.
+  // The width at station i for ladder step w.
+  const widthAt = (i, w) => Math.max(MIN_RENDER_WALK_M * 0.55, walkAt[i] * WALK_FALLBACK_WIDTHS_M[w]);
   const group = chosen.map((c, i) => {
     const met = meets[i];
-    if (c < 0 || !met) return c;
+    if (c < 0 || !met) return c < 0 ? c : `${c}:${Math.round(walkAt[i] / 0.5)}`;
     const gap = met.edge - kerbAt[i];
     if (gap >= MAPPED_WALK_GAP_MIN_M) return `gap:${Math.round(gap / 0.25)}:${met.thickness.toFixed(3)}`;
     return `under:${c}:${met.thickness.toFixed(3)}`;
   });
 
-  recordEnd(cutStart, 0, 1, side, chosen[0] >= 0 ? widths[chosen[0]] : 0);
+  recordEnd(cutStart, 0, 1, side, chosen[0] >= 0 ? widthAt(0, chosen[0]) : 0);
   recordEnd(cutEnd, n - 1, n - 2, -side,
-            chosen[chosen.length - 1] >= 0 ? widths[chosen[chosen.length - 1]] : 0);
+            chosen[chosen.length - 1] >= 0 ? widthAt(chosen.length - 1, chosen[chosen.length - 1]) : 0);
 
   let laid = 0;
   const emit = (from, to) => {
@@ -4830,7 +5028,11 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
     // rather than a gap in the pavement.
     const stretch = spine.slice(from, Math.min(to + 2, spine.length));
     if (stretch.length < 2) return;
-    let width = widths[pick];
+    // One width for the stretch: the median of what its stations asked for.
+    const asked = [];
+    for (let i = from; i <= to; i += 1) asked.push(widthAt(i, pick));
+    asked.sort((p, q) => p - q);
+    let width = asked[Math.floor(asked.length / 2)];
     let y = streetY;
     let thickness = streetThickness;
     const met = meets[from];
@@ -9397,10 +9599,36 @@ function fillRoadwayToKerbs() {
     }
     sink.index.push(base, base + 2, base + 1, base, base + 3, base + 2);
   };
+  // A strip is drawn from station to station, its edges following the kerbs either side,
+  // rather than as one rectangle per station squared to the local tangent: on a curve those
+  // rectangles fanned open on the outside and overlapped on the inside, a sawtooth along
+  // every bend. Two runs at consecutive stations that cover the same part of the cross-
+  // section are one strip; a run with no partner at the station before or after gets a
+  // half-station cap so the strip still starts and ends where the gap does.
+  const drawStrip = (prev, cur) => {
+    const ring = [prev.a, cur.a, cur.b, prev.b];
+    if (cur.island && prev.island) {
+      const top = ROAD_TOP_M + MEDIAN_KERB_M;
+      quad(island, ring, top, 4);
+      face(island, prev.a, cur.a, top, ROAD_TOP_M);
+      face(island, cur.b, prev.b, top, ROAD_TOP_M);
+      counts.islands += 1;
+    } else {
+      quad(asphalt, ring, ROAD_TOP_M - JUNCTION_BOX_DROP_M, 8);
+      counts.asphalt += 1;
+      if (cur.line && prev.line && cur.line.sink === prev.line.sink) {
+        for (let k2 = 0; k2 < cur.line.points.length; k2 += 1) {
+          cur.line.sink.push([prev.line.points[k2], cur.line.points[k2]]);
+        }
+        counts.lines += 1;
+      }
+    }
+  };
   for (const way of DATA.ways) {
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     if (isTunnelWay(way) || isUnmarkedService(way)) continue;
     const dense = densifyWay(way.points, ROAD_FILL_STATION_M);
+    let previous = [];
     for (let i = 0; i < dense.length; i += 1) {
       const before = dense[Math.max(0, i - 1)];
       const after = dense[Math.min(dense.length - 1, i + 1)];
@@ -9412,58 +9640,78 @@ function fillRoadwayToKerbs() {
       const ux = dx / span, uz = dz / span;                       // along
       const nx = dz / span, nz = -dx / span;                      // left, in x/z
       const x = hx, z = -hy;
+      const halfStep = Math.min(ROAD_FILL_STATION_M, span / 2) / 2 + 0.06;
+      const at = (t, s) => [x + nx * t + ux * s, z + nz * t + uz * s];
+      const current = [];
       const hits = rayCurbIntersections(x, z, nx, nz, 22, officialCurbGrid);
       const neg = hits.filter((v) => v < -0.8).pop();
       const pos = hits.find((v) => v > 0.8);
-      if (neg === undefined || pos === undefined || pos - neg > ROAD_FILL_MAX_SPAN_M) continue;
-      const islands = rayCurbIntersections(x, z, nx, nz, 22, officialIslandCurbGrid)
-        .filter((v) => v > neg && v < pos);
-      // The half-station either side along the way that this cross-section stands for.
-      const halfStep = Math.min(ROAD_FILL_STATION_M, span / 2) / 2 + 0.06;
-      // Walk the cross-section, gathering the runs nothing covers.
-      let runStart = null;
-      const runs = [];
-      for (let t = neg + 0.15; t <= pos - 0.15 + 1e-6; t += ROAD_FILL_STEP_M) {
-        const sx = x + nx * t, sz = z + nz * t;
-        const covered = roadwayCovered(sx, sz);
-        if (!covered && runStart === null) runStart = t;
-        if ((covered || t + ROAD_FILL_STEP_M > pos - 0.15) && runStart !== null) {
-          const end = covered ? t - ROAD_FILL_STEP_M / 2 : t + ROAD_FILL_STEP_M / 2;
-          if (end - runStart >= ROAD_FILL_MIN_M) runs.push([runStart - ROAD_FILL_STEP_M / 2, Math.min(end, pos)]);
-          runStart = null;
-        }
-      }
-      for (const [t0, t1] of runs) {
-        const width = t1 - t0;
-        const at = (t, s) => [x + nx * t + ux * s, z + nz * t + uz * s];
-        const ring = [at(t0, -halfStep), at(t1, -halfStep), at(t1, halfStep), at(t0, halfStep)];
-        // Island kerbs at both edges of the run make it an island.
-        const kerbed = (t) => islands.some((v) => Math.abs(v - t) <= 0.45);
-        if (width >= ROAD_FILL_ISLAND_MIN_M && kerbed(t0) && kerbed(t1)) {
-          const top = ROAD_TOP_M + MEDIAN_KERB_M;
-          quad(island, ring, top, 4);
-          face(island, ring[0], ring[3], top, ROAD_TOP_M);
-          face(island, ring[1], ring[2], top, ROAD_TOP_M);
-          counts.islands += 1;
-        } else {
-          quad(asphalt, ring, ROAD_TOP_M - JUNCTION_BOX_DROP_M, 8);
-          counts.asphalt += 1;
-          // A line where two carriageways meet across the strip.
-          const left = carriagewaySourceAt(...at(t0 - 0.35, 0));
-          const right = carriagewaySourceAt(...at(t1 + 0.35, 0));
-          if (left && right && left.source !== right.source && width <= 3.5) {
-            const mid = (t0 + t1) / 2;
-            const opposing = Boolean(left.source.oneway || left.source.osm_oneway)
-              && Boolean(right.source.oneway || right.source.osm_oneway)
-              && Math.abs(((left.bearing - right.bearing) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 3;
-            const sink = opposing ? lines.yellow : lines.white;
-            const offsets = opposing ? [-(MARK_W + DOUBLE_GAP_M) / 2, (MARK_W + DOUBLE_GAP_M) / 2] : [0];
-            for (const off of offsets) sink.push([at(mid + off, -halfStep), at(mid + off, halfStep)]);
-            counts.lines += 1;
+      if (neg !== undefined && pos !== undefined && pos - neg <= ROAD_FILL_MAX_SPAN_M) {
+        const islands = rayCurbIntersections(x, z, nx, nz, 22, officialIslandCurbGrid)
+          .filter((v) => v > neg && v < pos);
+        // Walk the cross-section, gathering the runs nothing covers.
+        let runStart = null;
+        const runs = [];
+        for (let t = neg + 0.15; t <= pos - 0.15 + 1e-6; t += ROAD_FILL_STEP_M) {
+          const sx = x + nx * t, sz = z + nz * t;
+          const covered = roadwayCovered(sx, sz);
+          if (!covered && runStart === null) runStart = t;
+          if ((covered || t + ROAD_FILL_STEP_M > pos - 0.15) && runStart !== null) {
+            const end = covered ? t - ROAD_FILL_STEP_M / 2 : t + ROAD_FILL_STEP_M / 2;
+            if (end - runStart >= ROAD_FILL_MIN_M) runs.push([runStart - ROAD_FILL_STEP_M / 2, Math.min(end, pos)]);
+            runStart = null;
           }
         }
-        stampFill(...at(t0, 0), ...at(t1, 0));
+        for (const [t0, t1] of runs) {
+          const width = t1 - t0;
+          const kerbed = (t) => islands.some((v) => Math.abs(v - t) <= 0.45);
+          const run = { t0, t1, a: at(t0, 0), b: at(t1, 0), halfStep, at,
+                        island: width >= ROAD_FILL_ISLAND_MIN_M && kerbed(t0) && kerbed(t1), line: null };
+          if (!run.island) {
+            // A line where two carriageways meet across the strip.
+            const left = carriagewaySourceAt(...at(t0 - 0.35, 0));
+            const right = carriagewaySourceAt(...at(t1 + 0.35, 0));
+            if (left && right && left.source !== right.source && width <= 3.5) {
+              const mid = (t0 + t1) / 2;
+              const opposing = Boolean(left.source.oneway || left.source.osm_oneway)
+                && Boolean(right.source.oneway || right.source.osm_oneway)
+                && Math.abs(((left.bearing - right.bearing) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 3;
+              const offsets = opposing ? [-(MARK_W + DOUBLE_GAP_M) / 2, (MARK_W + DOUBLE_GAP_M) / 2] : [0];
+              run.line = { sink: opposing ? lines.yellow : lines.white, points: offsets.map((off) => at(mid + off, 0)) };
+            }
+          }
+          current.push(run);
+          stampFill(...run.a, ...run.b);
+        }
       }
+      // Join each run to the one at the station before that covers the same ground.
+      const matched = new Set();
+      for (const run of current) {
+        const partner = previous.find((p) => !matched.has(p) && p.island === run.island
+          && Math.min(p.t1, run.t1) - Math.max(p.t0, run.t0) > 0.3);
+        if (partner) {
+          matched.add(partner);
+          drawStrip(partner, run);
+        } else {
+          // A strip beginning here: capped back half a station.
+          const cap = { ...run, a: run.at(run.t0, -run.halfStep), b: run.at(run.t1, -run.halfStep),
+                        line: run.line && { sink: run.line.sink, points: run.line.points.map(([px2, pz2]) => [px2 - ux * run.halfStep, pz2 - uz * run.halfStep]) } };
+          drawStrip(cap, run);
+        }
+      }
+      for (const p of previous) {
+        if (matched.has(p)) continue;
+        // A strip ending at the station before: capped forward half a station.
+        const cap = { ...p, a: p.at(p.t0, p.halfStep), b: p.at(p.t1, p.halfStep),
+                      line: p.line && { sink: p.line.sink, points: p.line.points.map(([px2, pz2]) => [px2 + ux * p.halfStep, pz2 + uz * p.halfStep]) } };
+        drawStrip(p, cap);
+      }
+      previous = current;
+    }
+    for (const p of previous) {
+      const cap = { ...p, a: p.at(p.t0, p.halfStep), b: p.at(p.t1, p.halfStep),
+                    line: p.line && { sink: p.line.sink, points: p.line.points.map(([px2, pz2]) => [px2, pz2]) } };
+      drawStrip(p, cap);
     }
   }
   const emit = (sink, material, surface, key) => {
@@ -12373,55 +12621,6 @@ async function featureSummary(feature) {
   return lines.join("<br>");
 }
 
-// Which building is under the cursor, from the footprints rather than from the meshes.
-//
-// The meshes are merged now, so a ray that hits one comes back with "the buildings" rather than
-// with a building. The footprints are the identity, they are already in the payload, and asking
-// them is both cheaper than a raycast through fifteen thousand objects and more forgiving: a
-// click on a roof lands inside the footprint under it, which is the building you meant.
-const FOOTPRINT_CELL = 60;
-const footprintGrid = new Map();
-for (const way of DATA.ways) {
-  if (way.kind !== "building" || !way.points || way.points.length < 4) continue;
-  const local = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const [x, z] of local) {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (z < minZ) minZ = z;
-    if (z > maxZ) maxZ = z;
-  }
-  const entry = { way, local, minX, maxX, minZ, maxZ };
-  for (let ix = Math.floor(minX / FOOTPRINT_CELL); ix <= Math.floor(maxX / FOOTPRINT_CELL); ix += 1) {
-    for (let iz = Math.floor(minZ / FOOTPRINT_CELL); iz <= Math.floor(maxZ / FOOTPRINT_CELL); iz += 1) {
-      const key = `${ix}:${iz}`;
-      let bucket = footprintGrid.get(key);
-      if (!bucket) footprintGrid.set(key, bucket = []);
-      bucket.push(entry);
-    }
-  }
-}
-
-function insideFootprint(entry, x, z) {
-  if (x < entry.minX || x > entry.maxX || z < entry.minZ || z > entry.maxZ) return false;
-  let inside = false;
-  const ring = entry.local;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const [xi, zi] = ring[i];
-    const [xj, zj] = ring[j];
-    if ((zi > z) !== (zj > z)
-        && x < ((xj - xi) * (z - zi)) / ((zj - zi) || 1e-9) + xi) inside = !inside;
-  }
-  return inside;
-}
-
-function buildingAt(x, z) {
-  const bucket = footprintGrid.get(`${Math.floor(x / FOOTPRINT_CELL)}:${Math.floor(z / FOOTPRINT_CELL)}`);
-  if (!bucket) return null;
-  for (const entry of bucket) if (insideFootprint(entry, x, z)) return entry.way;
-  return null;
-}
-
 function pickedFeature(clientX, clientY) {
   // Where the ray meets the roofs, and where it meets the ground. A tall building is picked by
   // the first, a low one or a gap between them by the second, and taking whichever is nearer
@@ -12591,7 +12790,7 @@ window.kerbside = {
   mappedWalkBeyondKerb, mappedWalkGrid, MAPPED_WALK_CELL, crossingRoadSpanPoints, crossingPaintLegs,
   officialIslandCurbGrid, isDividedHalf, recentreOnKerbEnvelope, envelopeEdgesAt, sameLevel, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
   crossingDrawGrid, sidewalkCrossingReplacementSpans, crossingDrawPose, densifyWay, crossingRectanglePoints,
-  twinInnerEdgeAt, halfWidthAt, tunnelCoverAt, tunnelCoverIndex, tunnelCoveredPoints, tunnelApproachWidth,
+  twinInnerEdgeAt, halfWidthAt, filletBends, bendsFilleted, tunnelCoverAt, tunnelCoverIndex, tunnelCoveredPoints, tunnelApproachWidth,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
              laid: cornersLaid, legs: cornerLegs.length,
              ends: pavementCornerLaid.size, skipped: addPavementCorners.skipped },
