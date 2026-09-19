@@ -1,0 +1,87 @@
+{
+ "source": "USGS 3DEP CA_SanFrancisco_1_B23 ground returns (class 2), via Entwine",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; 2% of returns held out and compared with the bilinear grid at their position; holes still open are grown into from their edge a cell a step, out to 60 cells, so a block under a wide building has ground",
+ "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
+ "frame": {
+  "mid_lon": -122.41975,
+  "mid_lat": 37.79775,
+  "metres_per_lon": 87962.73524906783,
+  "metres_per_lat": 111320.0,
+  "x0": -2560.966,
+  "y0": -1428.01,
+  "step_m": 2.0,
+  "cols": 2561,
+  "rows": 1429,
+  "base_m": -3.392,
+  "nodata": -32768,
+  "dtype": "int16-le-cm"
+ },
+ "cells_with_ground": 1938904,
+ "cells_filled": 1486601,
+ "cells_no_data": 234164,
+ "tiles": 389,
+ "height_range_m": [
+  -2.39,
+  116.65
+ ],
+ "accuracy": {
+  "held_out_points": 5529190,
+  "all": {
+   "n": 5529190,
+   "rmse_m": 0.125,
+   "mae_m": 0.031,
+   "bias_m": 0.0,
+   "median_abs_m": 0.012,
+   "p90_abs_m": 0.057,
+   "p99_abs_m": 0.366
+  },
+  "roadway": {
+   "n": 1551098,
+   "rmse_m": 0.037,
+   "mae_m": 0.014,
+   "bias_m": -0.002,
+   "median_abs_m": 0.009,
+   "p90_abs_m": 0.026,
+   "p99_abs_m": 0.084
+  },
+  "off_roadway": {
+   "n": 3978092,
+   "rmse_m": 0.146,
+   "mae_m": 0.038,
+   "bias_m": 0.001,
+   "median_abs_m": 0.014,
+   "p90_abs_m": 0.07,
+   "p99_abs_m": 0.453
+  },
+  "by_slope": {
+   "under_5pct": {
+    "n": 3049311,
+    "rmse_m": 0.04,
+    "mae_m": 0.016,
+    "bias_m": 0.0,
+    "median_abs_m": 0.01,
+    "p90_abs_m": 0.034,
+    "p99_abs_m": 0.094
+   },
+   "5_to_15pct": {
+    "n": 1771961,
+    "rmse_m": 0.052,
+    "mae_m": 0.025,
+    "bias_m": 0.0,
+    "median_abs_m": 0.014,
+    "p90_abs_m": 0.056,
+    "p99_abs_m": 0.169
+   },
+   "over_15pct": {
+    "n": 707918,
+    "rmse_m": 0.331,
+    "mae_m": 0.113,
+    "bias_m": -0.0,
+    "median_abs_m": 0.033,
+    "p90_abs_m": 0.262,
+    "p99_abs_m": 1.208
+   }
+  }
+ },
+ "cells_filled_far": 384333
+}
