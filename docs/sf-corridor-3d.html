@@ -421,6 +421,10 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI / 2;
 ground.position.y = LAND_Y;
 root.add(ground);
+//: The planes at the bottom of the world, so the tunnels can be cut out of them: a bore sunk
+//: below the flat ground (TUNNEL_SINK_M) would otherwise have the land plane and the bay
+//: running straight through it at head height.
+const GROUND_PLANES = [ground];
 
 // ---- the bay ----
 //
@@ -456,6 +460,7 @@ const LAND_SPAN_M = 11600.0;
   bay.rotation.x = -Math.PI / 2;
   bay.position.set(cx, BAY_Y, -cy);
   root.add(bay);
+  GROUND_PLANES.push(bay);
 
   // The land the city sits on, over the middle of the bay. Without it the disc would put water
   // through the Mission and the Sunset, which are the wrong side of the coast from here.
@@ -467,6 +472,7 @@ const LAND_SPAN_M = 11600.0;
   land.rotation.x = -Math.PI / 2;
   land.position.set(lx, PENINSULA_Y, -ly);
   root.add(land);
+  GROUND_PLANES.push(land);
 }
 
 function line(points, color, opacity = 1, y = 2, widthHint = 1) {
@@ -1264,9 +1270,9 @@ function crossingBearingDifference(a, b) {
   return diff;
 }
 
-function shouldDrawCrossing(points, width) {
-  const pose = crossingDrawPose(points);
-  if (!pose) return false;
+function crossingDrawConflict(pose, width) {
+  // The crossing already drawn that this one would double, or null. A query only: nothing is
+  // registered, so the audit can ask the same question the draw loop asks.
   const cx = Math.floor(pose.x / CROSSING_DEDUPE_CELL_M);
   const cz = Math.floor(pose.z / CROSSING_DEDUPE_CELL_M);
   const angleLimit = (CROSSING_DEDUPE_ANGLE_DEG * Math.PI) / 180;
@@ -1278,11 +1284,19 @@ function shouldDrawCrossing(points, width) {
       for (const other of bucket) {
         if (Math.hypot(other.x - pose.x, other.z - pose.z) > distanceLimit) continue;
         if (crossingBearingDifference(other.bearing, pose.bearing) > angleLimit) continue;
-        return false;
+        return other;
       }
     }
   }
-  const key = `${cx}:${cz}`;
+  return null;
+}
+
+function shouldDrawCrossing(points, width, tag = null) {
+  const pose = crossingDrawPose(points);
+  if (!pose) return false;
+  if (crossingDrawConflict(pose, width)) return false;
+  if (tag) pose.tag = tag;
+  const key = `${Math.floor(pose.x / CROSSING_DEDUPE_CELL_M)}:${Math.floor(pose.z / CROSSING_DEDUPE_CELL_M)}`;
   let bucket = crossingDrawGrid.get(key);
   if (!bucket) crossingDrawGrid.set(key, bucket = []);
   bucket.push(pose);
@@ -2778,9 +2792,15 @@ function isTunnelWay(way) { return Boolean(way.tunnel_kind) && way.tunnel_kind !
 //: same level, which is the flat model's limit. Declared here because the carriageway grid,
 //: built long before the tunnels are drawn, keeps only these stubs.
 const TUNNEL_STUB_M = 9.0;
-//: The bore is drawn this far in from the mouth at most; less where a surface street crosses
-//: over it sooner, since the flat model draws that street at the bore's own level.
-const TUNNEL_STUB_MAX_M = 30.0;
+//: The hill at a mouth is drawn this far in at most: as far as the bore takes to get under the
+//: flat ground (TUNNEL_RAMP_M below); less where a surface street crosses over it sooner,
+//: since the flat model draws that street at grade.
+const TUNNEL_STUB_MAX_M = 60.0;
+//: The portal's width is read off the city's kerb lines on the approach, this far outside the
+//: mouth, where the walls of the cut are. Declared here because the approach pieces are
+//: aligned to the same reading before the streets are recentred.
+const TUNNEL_APPROACH_FROM_M = 4.0;
+const TUNNEL_APPROACH_TO_M = 30.0;
 const MAX_RENDER_ROAD_M = 24.0;
 const MAX_INFERRED_ROAD_M = 16.5;
 const MIN_RENDER_WALK_M = 0.9;
@@ -2796,7 +2816,7 @@ function laneCountForWay(way) {
 }
 
 //: Road widths that came from the city's kerb lines, one way or another.
-const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half"]);
+const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half", "tunnel_cut"]);
 
 function nominalRoadWidth(way) {
   // Keep official width metadata intact, but render one OSM way as one carriageway.
@@ -2961,6 +2981,9 @@ function clampRoadWidthsToNeighbours(ways) {
   for (const way of streets) {
     // A way drawn between the city's kerbs has its room measured; nothing clamps it.
     if (way._spans !== undefined) continue;
+    // The approach outside a tunnel mouth is the cut between its retaining walls, measured
+    // (alignTunnelApproaches); the streets on the hill above it are not its neighbours.
+    if (way.road_source === "tunnel_cut") continue;
     // With no kerb to draw between, the building line is the next best evidence: a roadway
     // never runs through the houses either side of it. Genoa Place carried a 14.9 m right
     // of way between facades 6 m apart, and its pavement was laid through the buildings.
@@ -3275,6 +3298,9 @@ function recentreStreetsOnOfficialKerbs(ways) {
   for (const way of ways) {
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     if (isUnmarkedService(way) || isTunnelWay(way)) continue;
+    // The approach outside a mouth is already on the cut's midline at the cut's width
+    // (alignTunnelApproaches); the cut's median kerb would read as one wall here.
+    if (way.tunnel_approach) continue;
     const before = way.road_source;
     if (!recentreOnKerbEnvelope(way)) continue;
     if (way.recentred_m) moved += 1;
@@ -3433,6 +3459,39 @@ function rayFootprintDistance(x, z, dx, dz, reach) {
   return best;
 }
 
+
+//: The open approach outside a tunnel mouth (split_tunnel_approaches) is a piece of the
+//: tunnel's OpenStreetMap way, which for Broadway is the westbound bore's own line, 6 m off
+//: the axis of the cut; drawn about that line at the way's recorded width the approach road
+//: ran up the north wall and its pavement stood across the mouth of the south bore. The
+//: approach is moved onto the midline of the cut the city's kerb lines draw outside the
+//: mouth, and made as wide as the cut, the same reading the portal itself is built from
+//: (tunnelApproach).
+function alignTunnelApproaches(ways) {
+  let aligned = 0;
+  for (const way of ways) {
+    if (!way.tunnel_approach || !way.points || way.points.length < 2) continue;
+    const local = way.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+    // The mouth is the end that touches the bore: the last point of a "start" approach, the
+    // first of an "end" one. Outward runs from the mouth along the approach.
+    const [m, n] = way.tunnel_approach === "start"
+      ? [local[local.length - 1], local[local.length - 2]] : [local[0], local[1]];
+    const dx = n[0] - m[0], dz = n[1] - m[1];
+    const len = Math.hypot(dx, dz) || 1;
+    // tunnelApproach measures to the left of inward travel; inward here is -outward, and the
+    // way runs outward for an "end" approach and inward for a "start" one.
+    const found = tunnelApproach({ x: m[0], z: m[1] }, { x: dx / len, z: dz / len });
+    if (!found) continue;
+    const left = way.tunnel_approach === "end" ? -found.left : found.left;
+    if (Math.abs(left) > 0.3) way.points = offsetWay(way.points, left);
+    way.road_m = found.width;
+    way.road_source = "tunnel_cut";
+    way.tunnel_cut_shift_m = +left.toFixed(2);
+    aligned += 1;
+  }
+  return aligned;
+}
+alignTunnelApproaches(DATA.ways);
 
 const recentred = recentreStreetsOnOfficialKerbs(DATA.ways);
 
@@ -5761,7 +5820,7 @@ function addSidewalkCrossingReplacements(points, y) {
   let added = 0;
   for (const span of sidewalkCrossingReplacementSpans(points, crossingWidth)) {
     if (nearMappedCrossing(span)) continue;
-    if (!shouldDrawCrossing(span, crossingWidth)) continue;
+    if (!shouldDrawCrossing(span, crossingWidth, "stand-in")) continue;
     addMerged("ribbon:sidewalk-crossing-replacement",
       ribbon(span, crossingWidth, 0xffffff, 1.0, y, 0.02, "crossing_edges"),
       "crossing_edges");
@@ -8569,16 +8628,117 @@ const TUNNEL_TWIN_MIN_M = 16.0;
 const TUNNEL_PIER_M = 1.2;
 //: No single road bore is wider than this; Broadway's two are about ten metres each.
 const TUNNEL_BORE_MAX_M = 11.0;
-//: The bore's floor is a slab this thick, standing over everything the surface network draws
-//: at ground level along the tunnel's line: pavements, crossings, paint.
-const TUNNEL_FLOOR_M = 0.34;
-//: The portal's width is read off the city's kerb lines on the approach, this far outside the
-//: mouth, where the walls of the cut are.
-const TUNNEL_APPROACH_FROM_M = 4.0;
-const TUNNEL_APPROACH_TO_M = 30.0;
+//: The bore's floor at the mouth, just over the approach road's surface; it descends from
+//: there (TUNNEL_GRADE). It used to be a slab 0.34 m thick standing over the surface street
+//: the flat model drew across the mouth; that street is now on the far side of the mouth
+//: (split_tunnel_approaches).
+const TUNNEL_FLOOR_M = 0.06;    // ROAD_TOP_M: the approach road runs straight onto it
 //: Ground over a bore this near the tunnel's line is the hill it goes through; a building
 //: standing there stands on the hill, not on the road.
 const TUNNEL_HILL_HALF_EXTRA_M = 3.0;
+//: The model is flat: there is no hill for the bore to go through, so the bore goes down
+//: instead. From each mouth its floor descends at TUNNEL_GRADE to TUNNEL_SINK_M below the
+//: ground and runs there to the far mouth, under the streets and houses the flat model draws
+//: at grade on Russian Hill. The hill drawn at the mouth is as long as the descent needs
+//: (TUNNEL_RAMP_M) unless a street crosses the line sooner; past the hill the roof is held
+//: below the surface (TUNNEL_CEILING_CAP_M) -- a flat cut-and-cover roof under the junction
+//: -- until the arch fits. A walker goes in one mouth and out the other.
+const TUNNEL_SINK_M = 8.0;
+const TUNNEL_GRADE = 0.15;
+const TUNNEL_CEILING_CAP_M = -0.25;
+const TUNNEL_RAMP_M = (TUNNEL_CROWN_M + TUNNEL_SHELL_M - TUNNEL_CEILING_CAP_M) / TUNNEL_GRADE;
+const TUNNEL_STATION_M = 3.0;
+//: The raised walkway along each wall of a bore: the maintenance and refuge walk every road
+//: tunnel in the city has, a kerb high and a person wide.
+const TUNNEL_WALK_W_M = 1.0;
+const TUNNEL_WALK_H_M = 0.3;
+//: The lighting: a continuous strip at the crown.
+const TUNNEL_LIGHT_W_M = 0.3;
+const TUNNEL_ARCH_SEGMENTS = 14;
+
+//: The bore's inner section at one station: across (u, positive right) and up (y) from the
+//: floor, the same number of points at every station so sections can be stitched. The roof
+//: is clipped to `cap` (metres above the floor) where it may not rise: a flat roof.
+function tunnelSectionPoints(half, cap = Infinity) {
+  const out = [];
+  const wall = Math.min(TUNNEL_WALL_M, cap);
+  out.push([-half, 0], [-half, wall]);
+  for (let i = 1; i < TUNNEL_ARCH_SEGMENTS; i += 1) {
+    const t = Math.PI * (1 - i / TUNNEL_ARCH_SEGMENTS);
+    out.push([half * Math.cos(t), Math.min(cap, TUNNEL_WALL_M + (TUNNEL_CROWN_M - TUNNEL_WALL_M) * Math.sin(t))]);
+  }
+  out.push([half, wall], [half, 0]);
+  return out;
+}
+
+//: A surface swept along the bore: `section(station)` gives the [u, y] points at each station
+//: (all the same length), placed in that station's frame (right of travel, up). Returns a
+//: mesh, or null.
+function sweepAlongBore(stations, section, material, surface) {
+  const position = [];
+  const uv = [];
+  const index = [];
+  let rows = 0;
+  let count = null;
+  for (const st of stations) {
+    const pts = section(st);
+    if (!pts || !pts.length) continue;
+    if (count === null) count = pts.length;
+    if (pts.length !== count) continue;
+    for (let i = 0; i < pts.length; i += 1) {
+      const [u, y] = pts[i];
+      position.push(st.x + st.rx * u, st.floor + y, st.z + st.rz * u);
+      uv.push(i / (pts.length - 1), st.s / 4);
+    }
+    rows += 1;
+  }
+  if (rows < 2) return null;
+  for (let r = 1; r < rows; r += 1) {
+    for (let i = 1; i < count; i += 1) {
+      const a = (r - 1) * count + (i - 1), b = (r - 1) * count + i;
+      const c = r * count + (i - 1), d = r * count + i;
+      index.push(a, c, b, b, c, d);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.userData.surface = surface;
+  return mesh;
+}
+
+//: The stations of a bore: every TUNNEL_STATION_M along its centreline, with the frame, the
+//: floor's depth and the roof's cap at each.
+function tunnelStations(centre, moundStart, moundEnd) {
+  const local = centre.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  const total = wayLength(centre);
+  const stations = [];
+  const floorAt = (s) => -Math.min(TUNNEL_SINK_M, TUNNEL_GRADE * s, TUNNEL_GRADE * (total - s));
+  let acc = 0;
+  for (let i = 1; i < local.length; i += 1) {
+    const [ax, az] = local[i - 1];
+    const [bx, bz] = local[i];
+    const seg = Math.hypot(bx - ax, bz - az);
+    if (!(seg > 0)) continue;
+    const ux = (bx - ax) / seg, uz = (bz - az) / seg;
+    const steps = Math.max(1, Math.ceil(seg / TUNNEL_STATION_M));
+    for (let k = i === 1 ? 0 : 1; k <= steps; k += 1) {
+      const t = k / steps;
+      const s = acc + seg * t;
+      const inHill = s <= moundStart || s >= total - moundEnd;
+      stations.push({
+        s, x: ax + ux * seg * t, z: az + uz * seg * t, ux, uz, rx: -uz, rz: ux,
+        floor: TUNNEL_FLOOR_M + floorAt(s),
+        cap: inHill ? Infinity : Math.max(TUNNEL_WALK_H_M + 0.4, TUNNEL_CEILING_CAP_M - (TUNNEL_FLOOR_M + floorAt(s))),
+      });
+    }
+    acc += seg;
+  }
+  return stations;
+}
 function tunnelStubs(points) {
   // The first and last TUNNEL_STUB_M of a tunnel way, from each mouth inward.
   const length = wayLength(points);
@@ -8636,8 +8796,19 @@ function tunnelCoveredPoints(way, renderPoints) {
 //: The portal's width: the span between the city's kerb lines on the approach outside the
 //: mouth, where the retaining walls of the cut stand. Null where the city drew none.
 function tunnelApproachWidth(mouth, outward) {
+  const approach = tunnelApproach(mouth, outward);
+  return approach ? approach.width : null;
+}
+
+//: The cut on the approach outside a mouth, from the city's kerb lines: its width, and how
+//: far its midline stands to the left of the way (inward travel). OpenStreetMap's tunnel way
+//: for Broadway is the westbound bore's own line, 6 m off the axis of the portal; drawn about
+//: the way, the north bore stood 3 m outside the north retaining wall of the cut. The
+//: structure is drawn about the cut's midline instead.
+function tunnelApproach(mouth, outward) {
   if (!officialCurbGrid.size) return null;
   const spans = [];
+  const mids = [];
   const ux = outward.x, uz = outward.z;
   const nx = uz, nz = -ux;
   for (let t = TUNNEL_APPROACH_FROM_M; t <= TUNNEL_APPROACH_TO_M; t += 2) {
@@ -8647,10 +8818,36 @@ function tunnelApproachWidth(mouth, outward) {
     const b = hits.find((v) => v > 1.2);
     if (a === undefined || b === undefined || b - a > 40) continue;
     spans.push(b - a);
+    mids.push((a + b) / 2);
   }
   if (spans.length < 3) return null;
   spans.sort((p, q) => p - q);
-  return spans[Math.floor(spans.length / 2)];
+  mids.sort((p, q) => p - q);
+  // n is to the right of inward travel (outward = -inward; n = (uz, -ux) of outward), so the
+  // midline's offset to the left of the way is minus the median along n.
+  return { width: spans[Math.floor(spans.length / 2)], left: -mids[Math.floor(mids.length / 2)] };
+}
+
+//: The tunnel's axis: the covered piece of the way moved sideways onto the midline of the
+//: cut the city's kerbs draw on the approach, where they draw one. The way is one bore's
+//: line where the tunnel has two.
+function tunnelAxis(way, covered) {
+  if (!covered || covered.length < 2) return covered;
+  if (way._tunnelAxisLeft !== undefined) {
+    return way._tunnelAxisLeft ? offsetWay(covered, way._tunnelAxisLeft) : covered;
+  }
+  const lefts = [];
+  const local = covered.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+  for (const [a, b] of [[local[0], local[1]], [local[local.length - 1], local[local.length - 2]]]) {
+    const dx = a[0] - b[0], dz = a[1] - b[1];
+    const len = Math.hypot(dx, dz) || 1;
+    const found = tunnelApproach({ x: a[0], z: a[1] }, { x: dx / len, z: dz / len });
+    if (found) lefts.push(found.left);
+  }
+  const left = lefts.length ? lefts.reduce((p, q) => p + q, 0) / lefts.length : 0;
+  way._tunnelAxisLeft = Math.abs(left) > 0.3 ? left : 0;
+  if (way._tunnelAxisLeft) way.tunnel_axis_shift_m = +left.toFixed(2);
+  return way._tunnelAxisLeft ? offsetWay(covered, way._tunnelAxisLeft) : covered;
 }
 
 //: How far into the bore the surface network stays clear of it: the distance to the first
@@ -8677,7 +8874,8 @@ function tunnelCoverAt(x, z) {
   // drawn, and the buildings on it stand on it.
   let best = 0;
   for (const entry of tunnelCoverIndex) {
-    const { points, halfWidth, cover, zones } = entry;
+    const { points, halfWidth, cover, zones, bbox } = entry;
+    if (bbox && (x < bbox[0] || x > bbox[2] || z < bbox[1] || z > bbox[3])) continue;
     let along = 0;
     for (let i = 1; i < points.length; i += 1) {
       const [ax, az] = points[i - 1];
@@ -8705,6 +8903,153 @@ function tunnelCoverAt(x, z) {
 }
 const tunnelCoverIndex = [];
 
+//: Each bore's footprint in world x/z, the rings the planes at the bottom of the world are cut
+//: along, and the hill at each mouth as an oriented box the surface network is not drawn in.
+const tunnelVoids = [];
+//: Each bore's stations (tunnelStations), for the walker's feet: inside a bore the ground is
+//: the bore's floor, which goes down under the flat world and comes back up at the far mouth.
+const tunnelBores = [];
+
+//: The bore floor under (x, z), or null when (x, z) is in no bore.
+function tunnelFloorAt(x, z) {
+  let best = null;
+  for (const { stations, half } of tunnelBores) {
+    for (let i = 1; i < stations.length; i += 1) {
+      const a = stations[i - 1], b = stations[i];
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz;
+      if (!(len2 > 0)) continue;
+      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / len2));
+      const d = Math.hypot(x - (a.x + dx * t), z - (a.z + dz * t));
+      if (d > half + 0.3) continue;
+      const floor = a.floor + (b.floor - a.floor) * t;
+      if (best === null || floor < best) best = floor;
+    }
+  }
+  return best;
+}
+
+//: What the walker stands on at (x, z): the bore's floor inside a tunnel, the hill over a
+//: mouth on top of it, and the flat ground everywhere else -- as a height above the ground.
+function walkerGroundAt(x, z) {
+  const floor = tunnelFloorAt(x, z);
+  if (floor !== null) return floor;
+  return tunnelCoverIndex.length ? tunnelCoverAt(x, z) : 0;
+}
+const TUNNEL_HILL_BOXES = [];
+const TUNNEL_HILL_BOX_MAX = 8;
+const tunnelCullUniforms = {
+  uTunnelBoxA: { value: Array.from({ length: TUNNEL_HILL_BOX_MAX }, () => new THREE.Vector4()) },
+  uTunnelBoxB: { value: Array.from({ length: TUNNEL_HILL_BOX_MAX }, () => new THREE.Vector4()) },
+  uTunnelBoxCount: { value: 0 },
+};
+
+function registerTunnelHillBox(x, z, ux, uz, length, halfWidth, top) {
+  if (TUNNEL_HILL_BOXES.length >= TUNNEL_HILL_BOX_MAX) return;
+  TUNNEL_HILL_BOXES.push({ x, z, ux, uz, length, halfWidth, top });
+  const i = TUNNEL_HILL_BOXES.length - 1;
+  tunnelCullUniforms.uTunnelBoxA.value[i].set(x, z, ux, uz);
+  tunnelCullUniforms.uTunnelBoxB.value[i].set(length, halfWidth, top, 0);
+  tunnelCullUniforms.uTunnelBoxCount.value = TUNNEL_HILL_BOXES.length;
+}
+
+//: Whether (x, z, y) is inside one of the hills drawn at a tunnel mouth: what the shader
+//: patch below asks of every fragment, for the audit and the probe to ask of a point.
+function underTunnelHill(x, z, y = 0) {
+  for (const b of TUNNEL_HILL_BOXES) {
+    const dx = x - b.x, dz = z - b.z;
+    const along = dx * b.ux + dz * b.uz;
+    const across = dx * -b.uz + dz * b.ux;
+    if (along >= 0 && along <= b.length && Math.abs(across) <= b.halfWidth && y < b.top) return true;
+  }
+  return false;
+}
+
+//: The surface network is not drawn inside the hill at a tunnel mouth. The pavements, ground
+//: cover and paint along the tunnel's line are laid at ground level like everything else in
+//: the flat model, and the bore descends through them: from inside the mouth they stood in
+//: the air across the roadway. Every ground material discards its fragments inside the hill
+//: boxes; the hill, the headwall, the bore's own lining and what stands on the hill are not
+//: patched, so from outside nothing changes.
+function cullUnderTunnelHills(material) {
+  if (!material || material.userData.tunnelCulled) return material;
+  material.userData.tunnelCulled = true;
+  const previous = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    if (previous) previous(shader, renderer);
+    shader.uniforms.uTunnelBoxA = tunnelCullUniforms.uTunnelBoxA;
+    shader.uniforms.uTunnelBoxB = tunnelCullUniforms.uTunnelBoxB;
+    shader.uniforms.uTunnelBoxCount = tunnelCullUniforms.uTunnelBoxCount;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTunnelWorld;")
+      .replace("#include <begin_vertex>",
+               "#include <begin_vertex>\nvTunnelWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>",
+               `#include <common>
+varying vec3 vTunnelWorld;
+uniform vec4 uTunnelBoxA[${TUNNEL_HILL_BOX_MAX}];
+uniform vec4 uTunnelBoxB[${TUNNEL_HILL_BOX_MAX}];
+uniform int uTunnelBoxCount;`)
+      .replace("#include <clipping_planes_fragment>",
+               `#include <clipping_planes_fragment>
+for (int ti = 0; ti < ${TUNNEL_HILL_BOX_MAX}; ti++) {
+  if (ti >= uTunnelBoxCount) break;
+  vec4 ta = uTunnelBoxA[ti];
+  vec4 tb = uTunnelBoxB[ti];
+  vec2 td = vTunnelWorld.xz - ta.xy;
+  float tAlong = dot(td, ta.zw);
+  float tAcross = td.x * -ta.w + td.y * ta.z;
+  if (tAlong >= 0.0 && tAlong <= tb.x && abs(tAcross) <= tb.y && vTunnelWorld.y < tb.z) discard;
+}`);
+  };
+  material.customProgramCacheKey = () => "tunnel-hill-cull";
+  material.needsUpdate = true;
+  return material;
+}
+
+//: Every ground-level material under a group: the streets, their paint and kerbs, the ground
+//: cover. Not the tunnels' own meshes.
+function cullGroupUnderTunnelHills(group) {
+  group.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    if (String((o.userData || {}).surface || "").startsWith("tunnel")) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) cullUnderTunnelHills(m);
+  });
+}
+
+//: The planes at the bottom of the world with the bores cut out of them. A plane is a
+//: rectangle or a disc in its own x/y, laid flat by a quarter turn about x, so a world (x, z)
+//: is (x - px, -(z - pz)) on it.
+function cutTunnelVoidsFromPlanes() {
+  if (!tunnelVoids.length) return 0;
+  let cut = 0;
+  for (const plane of GROUND_PLANES) {
+    const params = plane.geometry.parameters || {};
+    const shape = new THREE.Shape();
+    if (params.radius) {
+      shape.absarc(0, 0, params.radius, 0, Math.PI * 2, false);
+    } else if (params.width && params.height) {
+      const w = params.width / 2, h = params.height / 2;
+      shape.moveTo(-w, -h); shape.lineTo(w, -h); shape.lineTo(w, h); shape.lineTo(-w, h); shape.lineTo(-w, -h);
+    } else continue;
+    const px = plane.position.x, pz = plane.position.z;
+    for (const ring of tunnelVoids) {
+      const hole = new THREE.Path();
+      ring.forEach(([x, z], i) => {
+        const lx = x - px, ly = -(z - pz);
+        if (i === 0) hole.moveTo(lx, ly); else hole.lineTo(lx, ly);
+      });
+      shape.holes.push(hole);
+    }
+    const old = plane.geometry;
+    plane.geometry = new THREE.ShapeGeometry(shape, params.radius ? 96 : 1);
+    old.dispose();
+    cut += 1;
+  }
+  return cut;
+}
+
 function addTunnel(way, renderPoints, roadWidth, roadTop) {
   // A road tunnel is drawn as what can be seen of it from the street: the two mouths, where
   // the lidar put them. At each, a headwall of one design -- the arch, its lining, a parapet
@@ -8721,15 +9066,19 @@ function addTunnel(way, renderPoints, roadWidth, roadTop) {
   // two metres and its west eleven; the bore was as wide as the street on the hill over it
   // left it; and the dark wall faced inward, so the street beyond showed through the arch.
   if (renderPoints.length < 2) return null;
-  const covered = tunnelCoveredPoints(way, renderPoints);
+  const covered = tunnelAxis(way, tunnelCoveredPoints(way, renderPoints));
   if (covered.length < 2) return null;
   const group = new THREE.Group();
   const lining = new THREE.MeshStandardMaterial({
-    color: 0x5f6266, roughness: 0.92, metalness: 0.02, side: THREE.DoubleSide,
+    color: 0x6b6e72, roughness: 0.9, metalness: 0.02, side: THREE.DoubleSide,
+    emissive: 0x1c1d1f,
   });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x08090a, roughness: 1.0, metalness: 0.0,
+  const concrete = new THREE.MeshStandardMaterial({
+    color: 0x9d9e9a, roughness: 0.92, metalness: 0.0, side: THREE.DoubleSide, emissive: 0x141414,
+  });
+  const light = new THREE.MeshBasicMaterial({ color: 0xfff1c8, side: THREE.DoubleSide });
+  const hill = new THREE.MeshStandardMaterial({ color: 0x4f5a45, roughness: 1.0, metalness: 0.0,
                                                 side: THREE.DoubleSide });
-  const hill = new THREE.MeshStandardMaterial({ color: 0x4f5a45, roughness: 1.0, metalness: 0.0 });
   const measured = way.tunnel_portal || {};
   const total = wayLength(covered);
   group.userData.tunnelLengthM = Number(way.tunnel_length_m || total);
@@ -8749,47 +9098,76 @@ function addTunnel(way, renderPoints, roadWidth, roadTop) {
   // One structure, one width: the portal's, read off the city's kerbs on whichever approach
   // has them (Broadway's east approach runs straight into the Mason Street junction and
   // reads nothing; its west approach reads the cut). Wider than sixteen metres it is two
-  // bores with a pier between them.
+  // bores with a pier between them -- Broadway's are two tubes with a wall between, each
+  // carrying one direction, which is what its portal shows.
   const approaches = ends.map((e) => e.approach).filter((v) => v);
   const width = Math.max(MIN_RENDER_ROAD_M, Math.min(40, approaches.length ? Math.max(...approaches) : roadWidth));
   const bores = width > TUNNEL_TWIN_MIN_M ? 2 : 1;
   const boreWidth = Math.min(TUNNEL_BORE_MAX_M, (width - (bores - 1) * TUNNEL_PIER_M) / bores);
-  for (const { label, inwardPoints, pts, inward, mouth } of ends) {
+  const half = boreWidth / 2;
+  const offsets = bores === 2 ? [-(boreWidth + TUNNEL_PIER_M) / 2, (boreWidth + TUNNEL_PIER_M) / 2] : [0];
+  // The hill at each mouth: as long as the descent needs, or as far as the first street
+  // crossing the line, whichever comes first.
+  const mounds = {};
+  for (const { label, mouth, inward } of ends) {
+    mounds[label] = Math.min(tunnelClearRun(way, mouth, inward), TUNNEL_RAMP_M, total / 2);
+  }
+  // The bore's footprint, for the planes at the bottom of the world to be cut along.
+  {
+    const reach = width / 2 + TUNNEL_SHELL_M + 1.0;
+    const left = offsetWay(covered, reach).map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+    const right = offsetWay(covered, -reach).map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
+    if (left.length > 1 && right.length > 1) tunnelVoids.push(left.concat(right.reverse()));
+  }
+  // The bores, swept the whole way between the mouths, going down under the flat ground.
+  const oneway = Boolean(way.oneway || way.osm_oneway);
+  for (const off of offsets) {
+    // The centreline of this bore, offset from the way's: the headwall's holes are cut at
+    // +off to the left of travel, and offsetWay's positive side is the left too.
+    const line = offsetWay(covered, off);
+    const stations = tunnelStations(line, mounds.start || 0, mounds.end || 0);
+    tunnelBores.push({ stations, half });
+    const inner = sweepAlongBore(stations, (st) => tunnelSectionPoints(half, st.cap), lining, "tunnel");
+    if (inner) group.add(inner);
+    const floor = sweepAlongBore(stations, () => [[-half, 0], [half, 0]],
+                                 surfaceMaterial("road", 0xffffff, 1.0), "tunnel_floor");
+    if (floor) group.add(floor);
+    // The walkways, one along each wall.
+    for (const side of [-1, 1]) {
+      const inside = half - TUNNEL_WALK_W_M;
+      const walk = sweepAlongBore(stations, () => side < 0
+        ? [[-half, TUNNEL_WALK_H_M], [-inside, TUNNEL_WALK_H_M], [-inside, 0]]
+        : [[inside, 0], [inside, TUNNEL_WALK_H_M], [half, TUNNEL_WALK_H_M]], concrete, "tunnel_walk");
+      if (walk) group.add(walk);
+    }
+    // The paint: a two-way bore has its double yellow, a one-way bore a broken white lane line.
+    const laneRoom = boreWidth - 2 * TUNNEL_WALK_W_M;
+    const marks = oneway
+      ? [{ u: 0, color: 0xdfe3e0, dash: true }]
+      : [{ u: -(MARK_W + DOUBLE_GAP_M) / 2, color: 0xd8a92e }, { u: (MARK_W + DOUBLE_GAP_M) / 2, color: 0xd8a92e }];
+    if (laneRoom >= 5.2) {
+      for (const mark of marks) {
+        const paint = new THREE.MeshStandardMaterial({ color: mark.color, roughness: 0.82, side: THREE.DoubleSide,
+                                                       emissive: mark.color, emissiveIntensity: 0.25 });
+        const strip = sweepAlongBore(stations, (st) => {
+          if (mark.dash && (st.s % (DASH_M + GAP_M)) > DASH_M) return [[mark.u - MARK_W / 2, 0.012], [mark.u - MARK_W / 2, 0.012]];
+          return [[mark.u - MARK_W / 2, 0.012], [mark.u + MARK_W / 2, 0.012]];
+        }, paint, "tunnel_marking");
+        if (strip) group.add(strip);
+      }
+    }
+    // The lights, along the crown.
+    const strip = sweepAlongBore(stations, (st) => {
+      const top = Math.min(st.cap, TUNNEL_CROWN_M) - 0.08;
+      return [[-TUNNEL_LIGHT_W_M / 2, top], [TUNNEL_LIGHT_W_M / 2, top]];
+    }, light, "tunnel_light");
+    if (strip) group.add(strip);
+  }
+  for (const { label, pts, inward, mouth } of ends) {
     const here = pts[0];
     const approach = approaches.length > 0;
-    const half = boreWidth / 2;
-    const offsets = bores === 2 ? [-(boreWidth + TUNNEL_PIER_M) / 2, (boreWidth + TUNNEL_PIER_M) / 2] : [0];
-    const stub = Math.min(tunnelClearRun(way, mouth, inward), total / 2);
-    const stubPoints = trimWayEnds(inwardPoints, 0, Math.max(0, total - stub));
+    const stub = mounds[label];
     const yaw = Math.atan2(inward.x, inward.z);
-    const rightX = inward.z, rightZ = -inward.x;             // to the right of travel inward
-    for (const off of offsets) {
-      const laneLine = stubPoints.map((p) => { const [x, y] = xy(p[0], p[1]); return lonLatFromXZ(x + rightX * off, -y + rightZ * off); });
-      // The road in the mouth: a slab thick enough to stand over the surface street the flat
-      // model draws at the bore's own level -- Bush Street's crossing lay on the Stockton
-      // Tunnel's floor -- so what shows through the arch is the bore's road and nothing else.
-      addMerged(`ribbon:road:${(TUNNEL_FLOOR_M).toFixed(2)}`,
-                ribbon(laneLine, boreWidth, 0xffffff, 1.0, TUNNEL_FLOOR_M / 2, TUNNEL_FLOOR_M, "road"), "road");
-      // The lining, swept along the stub.
-      const lanePts = laneLine.map((p) => { const [x, y] = xy(p[0], p[1]); return new THREE.Vector3(x, TUNNEL_FLOOR_M, -y); });
-      const path = new THREE.CatmullRomCurve3(lanePts, false, "centripetal");
-      const outer = tunnelArchShape(half, true);
-      outer.holes.push(new THREE.Path(tunnelArchShape(half, false).getPoints(28)));
-      const shell = new THREE.ExtrudeGeometry(outer, {
-        steps: Math.max(4, Math.round(path.getLength() / 3)), bevelEnabled: false, extrudePath: path,
-      });
-      const bore = new THREE.Mesh(shell, lining);
-      bore.userData.surface = "tunnel";
-      group.add(bore);
-      // Where the light gives out: a dark wall across the bore at the stub's inner end, seen
-      // from either side.
-      const last = lanePts[lanePts.length - 1];
-      const cap = new THREE.Mesh(new THREE.ShapeGeometry(tunnelArchShape(half, false)), dark);
-      cap.position.set(last.x, TUNNEL_FLOOR_M, last.z);
-      cap.rotation.y = yaw;
-      cap.userData.surface = "tunnel_dark";
-      group.add(cap);
-    }
     // The headwall: one design at both ends, the arches cut through it.
     const W = width / 2 + TUNNEL_PORTAL_MARGIN_M;
     const face = new THREE.Shape();
@@ -8813,25 +9191,55 @@ function addTunnel(way, renderPoints, roadWidth, roadTop) {
     group.add(portal);
     // The hill over the bore: as high as the lidar measured the ground behind this mouth, and
     // never lower than the headwall in front of it. It is what stops the surface network
-    // showing through the arch, and what the buildings up there stand on.
+    // showing through the arch, and what the buildings up there stand on. The throat behind
+    // the headwall has the arches cut through it; the body of the hill behind that is a shell
+    // -- top, sides and back -- with the bores descending inside it, so from the portal the
+    // eye goes straight into the lining and from the surface the hill is solid.
     const cover = Math.max(H, measured[label] || 0);
-    // The same face as the headwall, the bores cut through it, extruded the length of the
-    // stub: a hill with the tunnel going into it, rather than a block the tunnel is lost in.
+    registerTunnelHillBox(mouth.x, mouth.z, inward.x, inward.z, stub + TUNNEL_PORTAL_DEPTH_M, W, cover);
+    const throatDepth = Math.min(stub, TUNNEL_PORTAL_DEPTH_M + 1.0);
+    // The face reaches below the arches' feet, so each hole lies wholly inside it: a hole
+    // that crosses the outline is not a hole to the triangulator, and the arch filled in.
+    const foot = -TUNNEL_SHELL_M;
     const hillFace = new THREE.Shape();
-    hillFace.moveTo(-W, 0); hillFace.lineTo(W, 0); hillFace.lineTo(W, cover); hillFace.lineTo(-W, cover); hillFace.lineTo(-W, 0);
+    hillFace.moveTo(-W, foot); hillFace.lineTo(W, foot); hillFace.lineTo(W, cover); hillFace.lineTo(-W, cover); hillFace.lineTo(-W, foot);
     for (const off of offsets) {
-      // The hole is the lining's outside, so the lining is what shows inside the bore.
-      const arch = tunnelArchShape(half, true).getPoints(28).map((q) => new THREE.Vector2(q.x + off, Math.max(0, q.y)));
+      const arch = tunnelArchShape(half, true).getPoints(28).map((q) => new THREE.Vector2(q.x + off, q.y));
       hillFace.holes.push(new THREE.Path(arch));
     }
-    const mound = new THREE.Mesh(new THREE.ExtrudeGeometry(hillFace, { depth: stub, bevelEnabled: false }), hill);
-    mound.position.set(here.x + inward.x * TUNNEL_PORTAL_DEPTH_M, TUNNEL_FLOOR_M - 0.05, here.z + inward.z * TUNNEL_PORTAL_DEPTH_M);
-    mound.rotation.y = yaw;
-    mound.userData.surface = "tunnel_hill";
-    mound.userData.coverM = +cover.toFixed(2);
-    mound.userData.measured = Boolean(measured[label]);
-    group.add(mound);
-    halves.push({ label, width, bores, stub, cover });
+    const throat = new THREE.Mesh(new THREE.ExtrudeGeometry(hillFace, { depth: throatDepth, bevelEnabled: false }), hill);
+    throat.position.set(here.x + inward.x * TUNNEL_PORTAL_DEPTH_M, TUNNEL_FLOOR_M - 0.05, here.z + inward.z * TUNNEL_PORTAL_DEPTH_M);
+    throat.rotation.y = yaw;
+    throat.userData.surface = "tunnel_hill";
+    throat.userData.coverM = +cover.toFixed(2);
+    throat.userData.measured = Boolean(measured[label]);
+    group.add(throat);
+    const bodyDepth = stub - throatDepth;
+    if (bodyDepth > 0.5) {
+      // Top, two sides, back: no front (the throat closes it) and no bottom.
+      const y0 = TUNNEL_FLOOR_M - 0.05, y1 = TUNNEL_FLOOR_M - 0.05 + cover;
+      const z0 = 0, z1 = bodyDepth;
+      const v = [
+        -W, y1, z0,  W, y1, z0,  W, y1, z1,  -W, y1, z1,          // top
+        -W, y0, z0,  -W, y1, z0,  -W, y1, z1,  -W, y0, z1,        // left side
+        W, y0, z0,  W, y1, z0,  W, y1, z1,  W, y0, z1,            // right side
+        -W, y0, z1,  W, y0, z1,  W, y1, z1,  -W, y1, z1,          // back
+      ];
+      const idx = [];
+      for (let q = 0; q < 4; q += 1) { const b = q * 4; idx.push(b, b + 1, b + 2, b, b + 2, b + 3); }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
+      geometry.setIndex(idx);
+      geometry.computeVertexNormals();
+      const body = new THREE.Mesh(geometry, hill);
+      body.position.set(here.x + inward.x * (TUNNEL_PORTAL_DEPTH_M + throatDepth), 0,
+                        here.z + inward.z * (TUNNEL_PORTAL_DEPTH_M + throatDepth));
+      body.rotation.y = yaw;
+      body.userData.surface = "tunnel_hill";
+      body.userData.coverM = +cover.toFixed(2);
+      group.add(body);
+    }
+    halves.push({ label, width, bores, stub, cover, sinkM: TUNNEL_SINK_M, gradePct: TUNNEL_GRADE * 100 });
   }
   group.userData.halves = halves;
   return group;
@@ -9122,7 +9530,7 @@ const ROAD_TOP_M = 0.06;
 for (const way of DATA.ways) {
   if (way.kind !== "street" || !isRoadTunnel(way) || !Array.isArray(way.tunnel_cover)
       || !way.tunnel_cover.length || !way.points || way.points.length < 2) continue;
-  const covered = tunnelCoveredPoints(way, densifyWay(way.points));
+  const covered = tunnelAxis(way, tunnelCoveredPoints(way, densifyWay(way.points)));
   if (covered.length < 2) continue;
   const local = covered.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; });
   let width = renderedRoadWidth(way);
@@ -9135,12 +9543,15 @@ for (const way of DATA.ways) {
     const len = Math.hypot(dx, dz) || 1;
     const approach = tunnelApproachWidth({ x: a[0], z: a[1] }, { x: dx / len, z: dz / len });
     if (approach) width = Math.max(width, approach);
-    const stub = Math.min(tunnelClearRun(way, { x: a[0], z: a[1] }, { x: -dx / len, z: -dz / len }), total / 2);
+    const stub = Math.min(tunnelClearRun(way, { x: a[0], z: a[1] }, { x: -dx / len, z: -dz / len }), TUNNEL_RAMP_M, total / 2);
     const cover = Math.max(H, (way.tunnel_portal || {})[label] || 0);
-    zones.push(label === "start" ? [0, stub + TUNNEL_PORTAL_DEPTH_M, cover]
-                                 : [total - stub - TUNNEL_PORTAL_DEPTH_M, total, cover]);
+    zones.push(label === "start" ? [TUNNEL_PORTAL_DEPTH_M, stub + TUNNEL_PORTAL_DEPTH_M, cover]
+                                 : [total - stub - TUNNEL_PORTAL_DEPTH_M, total - TUNNEL_PORTAL_DEPTH_M, cover]);
   }
-  tunnelCoverIndex.push({ points: local, halfWidth: width / 2, cover: way.tunnel_cover, zones });
+  const reach = width / 2 + TUNNEL_HILL_HALF_EXTRA_M;
+  const bbox = [Math.min(...local.map((q) => q[0])) - reach, Math.min(...local.map((q) => q[1])) - reach,
+                Math.max(...local.map((q) => q[0])) + reach, Math.max(...local.map((q) => q[1])) + reach];
+  tunnelCoverIndex.push({ points: local, halfWidth: width / 2, cover: way.tunnel_cover, zones, bbox });
 }
 for (const way of DATA.ways) {
   if (way.kind !== "crossing" || !way.points || way.points.length < 2) continue;
@@ -10349,6 +10760,7 @@ function fenceMaterial(style) {
 
 function addGround(mesh, what) {
   mesh.userData.surface = what;
+  cullUnderTunnelHills(mesh.material);
   groups.ground.add(mesh);
   return mesh;
 }
@@ -11047,6 +11459,7 @@ function buildCourts(ground) {
   }
 
   buildCourts(ground);
+  cullGroupUnderTunnelHills(groups.ground);
   // The ground is down; now the things that stand on it.
   if (groups.furniture.visible) ensureLazyLayer("furniture");
 })();
@@ -11063,6 +11476,10 @@ const isBuilt = (key) => key.startsWith("part|") || key.startsWith("plane|")
   || key.startsWith("roof|") || key.startsWith("wall|") || key.startsWith("garage|");
 flushMerged(groups.streets, (key) => !isBuilt(key));
 flushMerged(groups.mapped3d, isBuilt);
+// The tunnels are sunk below the flat ground: the planes under the world are cut along them,
+// and nothing at ground level is drawn inside the hill at a mouth.
+cutTunnelVoidsFromPlanes();
+cullGroupUnderTunnelHills(groups.streets);
 
 // ---- the dropped kerb at every garage ----
 //
@@ -12167,7 +12584,7 @@ function placeCamera() {
     // Out of the walker's eyes: the camera stands at eye height where the walker stands and
     // looks the way the arrows walk, so forward is forward. Dragging turns the head.
     const eye = avatar.position.clone();
-    eye.y = AVATAR_EYE_Y;
+    eye.y = AVATAR_EYE_Y + walkerGroundAt(avatar.position.x, avatar.position.z);
     const forward = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw)).negate();
     const aim = eye.clone().add(forward.multiplyScalar(10)).add(new THREE.Vector3(0, Math.tan(state.look) * 10, 0));
     camera.position.copy(eye);
@@ -12802,7 +13219,8 @@ function animateAvatar(distance, direction, moving) {
   }
   const swing = moving ? Math.sin(avatar.userData.walkPhase) : 0;
   const lift = moving ? Math.abs(Math.sin(avatar.userData.walkPhase * 2)) * 0.045 * AVATAR_SCALE : 0;
-  avatar.position.y = AVATAR_STAND_Y + lift;
+  // The feet follow the ground: down the bore of a tunnel, up onto the hill at its mouth.
+  avatar.position.y = AVATAR_STAND_Y + lift + walkerGroundAt(avatar.position.x, avatar.position.z);
   avatar.userData.leftLeg.rotation.x = swing * 0.58;
   avatar.userData.rightLeg.rotation.x = -swing * 0.58;
   avatar.userData.leftArm.rotation.x = -swing * 0.48;
@@ -12861,6 +13279,8 @@ animate();
 // ground. Between them a caller with no screen can both see the model and measure it.
 window.kerbside = {
   scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
+  tunnelFloorAt, walkerGroundAt, tunnelBores, underTunnelHill, TUNNEL_HILL_BOXES,
+  goTo, setFirstPerson, placeCamera, state, avatar,
   xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
@@ -12897,9 +13317,9 @@ window.kerbside = {
 
   /** A photograph of one place, from a camera this call positions. */
   shoot({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
-          quality = 0.72 } = {}) {
+          quality = 0.72, targetY = 0 } = {}) {
     const [x, y] = xy(lon, lat);
-    const target = new THREE.Vector3(x, 0, -y);
+    const target = new THREE.Vector3(x, targetY, -y);
     const yaw = (heading * Math.PI) / 180;
     const pitch = (tilt * Math.PI) / 180;
     const cam = new THREE.PerspectiveCamera(fov, w / h, 0.5, 6000);
