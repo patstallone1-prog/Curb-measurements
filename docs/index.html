@@ -944,6 +944,10 @@ function intersectionWalkwayCutback(width) {
 const OFFICIAL_CURB_CELL_M = 20.0;
 const officialCurbGrid = new Map();
 const officialIslandCurbGrid = new Map();
+//: The middle of a divided street where the lidar found no raised median (role "median",
+//: source "lidar"): the inner edge of each half for the kerb envelope, and nothing else --
+//: a painted centre is not a kerb and must not part a crossing or stop a pavement.
+const officialMedianGrid = new Map();
 
 function addOfficialCurbGridSegment(grid, ax, az, bx, bz) {
   const x0 = Math.floor(Math.min(ax, bx) / OFFICIAL_CURB_CELL_M);
@@ -963,9 +967,11 @@ function addOfficialCurbGridSegment(grid, ax, az, bx, bz) {
 function indexOfficialCurbGeometry(lines) {
   officialCurbGrid.clear();
   officialIslandCurbGrid.clear();
+  officialMedianGrid.clear();
   for (const line of lines || []) {
     if (!line.p || line.p.length < 2) continue;
-    const grid = line.r === "island" ? officialIslandCurbGrid : officialCurbGrid;
+    const grid = line.r === "island" ? officialIslandCurbGrid
+      : line.r === "median" ? officialMedianGrid : officialCurbGrid;
     for (let i = 1; i < line.p.length; i += 1) {
       const [ax, ay] = xy(line.p[i - 1][0], line.p[i - 1][1]);
       const [bx, by] = xy(line.p[i][0], line.p[i][1]);
@@ -1409,10 +1415,136 @@ function arrowKind(token) {
 //: The parked cars' lane along a kerb, where the city's parking policies say one is.
 const PARKING_LANE_M = 2.4;
 
+// ---- the cross-sections -----------------------------------------------------------------
+//
+// A street arrives with `xs`: a station every four metres, each carrying the two kerbs the
+// city's curb-line profile put there, and the bands between them -- parking from the city's
+// policies, bike lanes from the map, travel lanes chosen from hypotheses against width priors
+// -- as smc.facts.cross_section built them. Everything laid across the road here reads those
+// bands rather than dividing a width by a count: the lane lines, the double yellow, the arrows
+// and the bike lane. A station the solver could not close is `unresolved` and gets no paint.
+//
+// The page draws the roadway between the kerbs it measured itself (the kerb envelope), which
+// can differ by a few centimetres from the profile the facts were built on, and by more where
+// the facts fell back to the recorded width. So the bands are closed to the page's own width
+// at each station: the fixed bands keep their widths and the travel lanes take the difference,
+// within the same priors; where that is impossible the station is not painted.
+const CROSS_SECTION_KIND = { p: "parking", b: "bike", f: "buffer", x: "transit", t: "travel",
+                             n: "turn", m: "median", h: "shoulder", l: "loading", u: "unresolved" };
+const CROSS_SECTION_LANE_MIN_M = 2.55;
+const CROSS_SECTION_LANE_MAX_M = 5.2;
+
+function crossSectionRowAt(way, along) {
+  const rows = way && way.xs;
+  if (!rows || !rows.length) return null;
+  let best = rows[0];
+  for (const row of rows) if (Math.abs(row[0] - along) < Math.abs(best[0] - along)) best = row;
+  return best;
+}
+
+//: The bands at a station closed to the page's drawn width: [{kind, dir, left, right}] from
+//: the left kerb (+half) inward, or null where the station is unresolved or cannot close.
+function crossSectionBands(way, along, half) {
+  const row = crossSectionRowAt(way, along);
+  if (!row || row[4] === "u") return null;
+  const bands = row[5].map((b) => ({ kind: CROSS_SECTION_KIND[b[0]] || b[0], width: b[1], dir: b[4] || 0, sub: b[5] || "" }));
+  if (bands.some((b) => b.kind === "unresolved")) return null;
+  const travel = bands.filter((b) => b.kind === "travel" || b.kind === "turn");
+  if (!travel.length) return null;
+  const fixed = bands.filter((b) => !(b.kind === "travel" || b.kind === "turn")).reduce((sum, b) => sum + b.width, 0);
+  const lane = (2 * half - fixed) / travel.length;
+  if (lane < CROSS_SECTION_LANE_MIN_M || lane > CROSS_SECTION_LANE_MAX_M) return null;
+  let edge = half;
+  const out = [];
+  for (const b of bands) {
+    const width = (b.kind === "travel" || b.kind === "turn") ? lane : b.width;
+    out.push({ kind: b.kind, dir: b.dir, sub: b.sub, left: edge, right: edge - width });
+    edge -= width;
+  }
+  return out;
+}
+
+//: The bands of the resolved station nearest the way's middle, for the things placed once
+//: per way (the arrows, the bike lane's line, the transition profile).
+function crossSectionBandsNearMiddle(way, half) {
+  const rows = way && way.xs;
+  if (!rows || !rows.length) return null;
+  const mid = rows[Math.floor(rows.length / 2)][0];
+  const order = rows.slice().sort((a, b) => Math.abs(a[0] - mid) - Math.abs(b[0] - mid));
+  for (const row of order) {
+    const bands = crossSectionBands(way, row[0], half);
+    if (bands) return bands;
+  }
+  return null;
+}
+
+//: What is painted between two neighbouring bands.
+function crossSectionMarkKind(a, b) {
+  const travelish = (x) => x.kind === "travel" || x.kind === "turn";
+  if (travelish(a) && travelish(b)) {
+    if (a.sub === "shared" || b.sub === "shared") return null;
+    // Opposing directions meet at the centre: the double yellow. A turn lane in the middle
+    // has a yellow on each side of it.
+    if (a.kind === "turn" || b.kind === "turn" || (a.dir && b.dir && a.dir !== b.dir)) return "centre";
+    return "lane";
+  }
+  if (a.kind === "bike" || b.kind === "bike") return "edge";
+  if (a.kind === "transit" || b.kind === "transit") return "edge";
+  if (a.kind === "median" || b.kind === "median") return "edge";
+  return null;                       // parking against traffic: no line, the T's come later
+}
+
+//: The paint for a way from its cross-sections: runs of boundary polylines, each with a kind.
+//: `points` is the polyline to paint along and `cutStart` how far along the way it begins.
+function crossSectionMarks(way, points, cutStart) {
+  if (!way.xs || !points || points.length < 2) return null;
+  const alongs = alongDistances(points);
+  const marks = [];
+  let open = new Map();              // boundary index -> {kind, points}
+  const close = () => { for (const run of open.values()) if (run.points.length >= 2) marks.push(run); open = new Map(); };
+  let signature = null;
+  for (let i = 0; i < points.length; i += 1) {
+    const along = cutStart + alongs[i];
+    const bands = crossSectionBands(way, along, halfWidthAt(way, along));
+    if (!bands) { close(); signature = null; continue; }
+    const sig = bands.map((b) => `${b.kind}${b.dir}${b.sub}`).join("|");
+    if (sig !== signature) { close(); signature = sig; }
+    for (let k = 0; k < bands.length - 1; k += 1) {
+      const kind = crossSectionMarkKind(bands[k], bands[k + 1]);
+      if (!kind) continue;
+      const offset = bands[k].right;
+      const [x, y] = xy(points[i][0], points[i][1]);
+      const [ax, ay] = xy(points[Math.max(0, i - 1)][0], points[Math.max(0, i - 1)][1]);
+      const [bx, by] = xy(points[Math.min(points.length - 1, i + 1)][0], points[Math.min(points.length - 1, i + 1)][1]);
+      const len = Math.hypot(bx - ax, by - ay) || 1;
+      const nx = -(by - ay) / len, ny = (bx - ax) / len;   // left of travel
+      let run = open.get(k);
+      if (!run) open.set(k, run = { kind, points: [] });
+      run.points.push(lonLatFromXZ(x + nx * offset, -(y + ny * offset)));
+    }
+  }
+  close();
+  return marks;
+}
+
 //: The travel lanes of a way: the carriageway less its parking lanes, as [left edge offset,
 //: right edge offset] from the centreline, left of travel positive. Lane lines, the centre
 //: line, arrows and the bike lane are all placed inside this, not across the parked cars.
+//: From the cross-sections where the way has them; the parking-side arithmetic is the
+//: fallback for a way that does not.
+function travelSpanAt(way, along, half) {
+  const bands = crossSectionBands(way, along, half);
+  if (!bands) return null;
+  const travel = bands.filter((b) => b.kind === "travel" || b.kind === "turn");
+  return [travel[0].left, travel[travel.length - 1].right];
+}
+
 function travelSpan(way, roadWidth) {
+  const bands = crossSectionBandsNearMiddle(way, roadWidth / 2);
+  if (bands) {
+    const travel = bands.filter((b) => b.kind === "travel" || b.kind === "turn");
+    return [travel[0].left, travel[travel.length - 1].right];
+  }
   const sides = Array.isArray(way && way.parking_sides) ? way.parking_sides : [];
   const parkLeft = sides.includes(1) ? PARKING_LANE_M : 0;
   const parkRight = sides.includes(-1) ? PARKING_LANE_M : 0;
@@ -1585,6 +1717,15 @@ function insideBikeLane(x, z, slack = 0.0) {
 }
 
 function bikeLaneOffset(roadWidth, way = null, side = 1) {
+  // From the cross-section where the way has one: the bike band's own centre on that side.
+  if (way && way.xs && way.xs.length) {
+    const bands = crossSectionBandsNearMiddle(way, roadWidth / 2);
+    if (bands) {
+      const bikes = bands.filter((b) => b.kind === "bike");
+      const mine = side > 0 ? bikes[0] : bikes[bikes.length - 1];
+      if (mine && Math.sign((mine.left + mine.right) / 2) === side) return Math.abs((mine.left + mine.right) / 2);
+    }
+  }
   // Against the kerb, or against the parked cars where the kerb is a parking lane: a class II
   // lane runs between the parking and the travel lane, which is where the cyclist is.
   const sides = Array.isArray(way && way.parking_sides) ? way.parking_sides : [];
@@ -3077,10 +3218,59 @@ function officialKerbOffsetsAt(x, z, nx, nz, road) {
 }
 
 //: Half of a divided road: a one-way way that OpenStreetMap says has a footway on one side
-//: only. The other side is the median, and the other half of the road is beyond it.
+//: only -- and whose other half is there, running the other way beside it. The footway test
+//: alone called every one-way street with one mapped sidewalk a half of something: Clay,
+//: Bush, Geary, Pine, Leavenworth, drawn as wide as their lanes with the "median" side open,
+//: which was most of the divided_half bucket's 3 m tail. The twin is found once, before the
+//: kerb envelope is read (indexDividedTwins); a way not yet indexed keeps the footway test.
+const DIVIDED_TWIN_MIN_M = 4.0;
+const DIVIDED_TWIN_MAX_M = 40.0;
+
 function isDividedHalf(way) {
-  return Boolean(way.oneway || way.osm_oneway) && Array.isArray(way.walk_sides)
-    && way.walk_sides.length === 1;
+  if (!(Boolean(way.oneway || way.osm_oneway) && Array.isArray(way.walk_sides)
+        && way.walk_sides.length === 1)) return false;
+  return way._twin === undefined ? true : way._twin;
+}
+
+function indexDividedTwins(ways) {
+  const oneways = ways.filter((w) => w.kind === "street" && w.points && w.points.length >= 2
+    && Boolean(w.oneway || w.osm_oneway));
+  // A nameless one-way way has no twin to find: it is a link, not half of a street.
+  for (const w of oneways) w._twin = false;
+  const halves = oneways.filter((w) => w.name);
+  const byName = new Map();
+  for (const w of halves) {
+    if (!byName.has(w.name)) byName.set(w.name, []);
+    byName.get(w.name).push(w);
+  }
+  const local = new Map();
+  const frameOf = (w) => {
+    if (!local.has(w)) local.set(w, w.points.map((p) => { const [x, y] = xy(p[0], p[1]); return [x, -y]; }));
+    return local.get(w);
+  };
+  let twins = 0;
+  for (const w of halves) {
+    w._twin = false;
+    const pa = frameOf(w);
+    const ua = [pa[pa.length - 1][0] - pa[0][0], pa[pa.length - 1][1] - pa[0][1]];
+    const la = Math.hypot(ua[0], ua[1]) || 1;
+    for (const other of byName.get(w.name)) {
+      if (other === w) continue;
+      const pb = frameOf(other);
+      const ub = [pb[pb.length - 1][0] - pb[0][0], pb[pb.length - 1][1] - pb[0][1]];
+      const lb = Math.hypot(ub[0], ub[1]) || 1;
+      if ((ua[0] * ub[0] + ua[1] * ub[1]) / (la * lb) > -0.85) continue;   // not opposite ways
+      // The other half runs beside this one: its middle is a road's width away, alongside.
+      const mid = pb[Math.floor(pb.length / 2)];
+      let best = Infinity;
+      for (let i = 1; i < pa.length; i += 1) {
+        const d = Math.sqrt(distanceToSegmentSquared(mid[0], mid[1], pa[i - 1][0], pa[i - 1][1], pa[i][0], pa[i][1]));
+        if (d < best) best = d;
+      }
+      if (best >= DIVIDED_TWIN_MIN_M && best <= DIVIDED_TWIN_MAX_M) { w._twin = true; twins += 1; break; }
+    }
+  }
+  return twins;
 }
 
 //: A divided half's carriageway is as wide as its lanes; it has no kerb-to-kerb width of its
@@ -3128,8 +3318,12 @@ function envelopeEdgesAt(x, z, nx, nz, way, reach) {
     const side = way.walk_sides[0];
     const kerb = side > 0 ? pos(kerbs) : neg(kerbs);
     if (kerb === undefined) return null;
-    const island = side > 0 ? islands.filter((v) => v < kerb - 2.5 && v > -12).pop()
-      : islands.find((v) => v > kerb + 2.5 && v < 12);
+    // The inner edge: the city's island kerb, or the median the lidar measured (a raised
+    // one is an island line too; a painted centre is a median line), or the lanes' width.
+    const inner = islands.concat(officialMedianGrid.size
+      ? rayCurbIntersections(x, z, nx, nz, reach, officialMedianGrid) : []).sort((p, q) => p - q);
+    const island = side > 0 ? inner.filter((v) => v < kerb - 2.5 && v > -14).pop()
+      : inner.find((v) => v > kerb + 2.5 && v < 14);
     if (island !== undefined) return side > 0 ? [island, kerb] : [kerb, island];
     const width = dividedHalfWidth(way);
     return side > 0 ? [kerb - width, kerb] : [kerb, kerb + width];
@@ -3152,7 +3346,10 @@ function envelopeEdgesAt(x, z, nx, nz, way, reach) {
     // and gets more room.
     return plausible(a, b, 6.0) ? [a, b] : null;
   }
-  if (plausible(a, b, 3.0) && b - a >= 4.2 && (a !== neg(kerbs) || b !== pos(kerbs))) return [a, b];
+  // The island pair is judged as loosely as a one-way lane: OpenStreetMap's line for the
+  // street on the hill over the Broadway tunnel runs 1.6 m from one wall and 6.4 m from the
+  // other, and at the stricter ratio the walls were rejected and the 28 m cut taken instead.
+  if (plausible(a, b, 6.0) && b - a >= 4.2 && (a !== neg(kerbs) || b !== pos(kerbs))) return [a, b];
   const ka = neg(kerbs), kb = pos(kerbs);
   return plausible(ka, kb, 3.0) ? [ka, kb] : null;
 }
@@ -3492,6 +3689,7 @@ function alignTunnelApproaches(ways) {
   return aligned;
 }
 alignTunnelApproaches(DATA.ways);
+indexDividedTwins(DATA.ways);
 
 const recentred = recentreStreetsOnOfficialKerbs(DATA.ways);
 
@@ -4705,6 +4903,22 @@ function addPavementCorners() {
 
 function laneMarkingProfile(way, road = renderedRoadWidth(way)) {
   const oneway = Boolean(way.oneway || way.osm_oneway);
+  // From the cross-sections where the way has them, read at its middle station.
+  if (way.xs && way.xs.length) {
+    const bands = crossSectionBandsNearMiddle(way, road / 2);
+    if (bands) {
+      const travel = bands.filter((b) => b.kind === "travel" || b.kind === "turn");
+      const forward = travel.filter((b) => b.dir === 1).length;
+      const backward = travel.filter((b) => b.dir === -1).length;
+      const shared = travel.some((b) => b.sub === "shared");
+      return { oneway, total: travel.length, forward, backward,
+               opposing: !oneway && !shared && backward > 0 && forward > 0,
+               road, left: travel[0].left, right: travel[travel.length - 1].right,
+               travel: travel[0].left - travel[travel.length - 1].right, fromCrossSection: true };
+    }
+    return { oneway, total: 0, forward: 0, backward: 0, opposing: false, road,
+             left: road / 2, right: -road / 2, travel: road, fromCrossSection: true };
+  }
   const tagged = way.lanes || 0;
   const forward = way.lanes_fwd || (oneway ? tagged : Math.floor(tagged / 2));
   const backward = way.lanes_back || (oneway ? 0 : Math.floor(tagged / 2));
@@ -4987,6 +5201,10 @@ function addLaneTransitionMarkings(way, renderPoints, roadWidth, roadTop) {
   if (!herePaints.length) return;
   for (const [other, atStart] of [[startOther, true], [endOther, false]]) {
     if (!other) continue;
+    // A junction where the lanes do not carry through and no turn arrow says where the
+    // difference goes (smc.facts.cross_section.match_junction) gets no taper: the taper is
+    // a guess at where a lane goes, and the fact says the guess is not supported.
+    if (way.xs_junction && way.xs_junction[atStart ? "start" : "end"]) continue;
     const otherProfile = laneMarkingProfile(other);
     if (here.oneway !== otherProfile.oneway || here.opposing !== otherProfile.opposing) continue;
     if (Math.abs(here.total - otherProfile.total) > 1) continue;
@@ -9773,7 +9991,24 @@ addBikeLaneMarkings(way, renderPoints, widthMeters, roadTop);
     // San Francisco paints on a two-way street (a broken line means overtaking is allowed
     // and is the exception here). Both sit inside the travel lanes: with parking down one
     // side the yellow is off the road's middle, as it is in the street.
-    if (markingPoints.length >= 2) {
+    if (markingPoints.length >= 2 && way.xs) {
+      // From the cross-sections: each boundary between bands is its own run, painted for
+      // what the two bands are, and a station the solver could not close paints nothing.
+      const apart = (MARK_W + DOUBLE_GAP_M) / 2;
+      for (const mark of crossSectionMarks(way, markingPoints, markCutStart) || []) {
+        for (const run of markingRunsClearOfJunctions(mark.points, way)) {
+          if (mark.kind === "centre") {
+            for (const side of [1, -1]) {
+              const line = paintedLine(offsetWay(run, side * apart), MARK_W, 0xd8a92e, roadTop + 0.02);
+              if (line) addMerged("marking:centre", line, "marking");
+            }
+          } else {
+            const line = paintedLine(run, MARK_W, 0xdfe3e0, roadTop + 0.015, mark.kind === "lane" ? { dash: true } : {});
+            if (line) addMerged(`marking:${mark.kind}`, line, "marking");
+          }
+        }
+      }
+    } else if (markingPoints.length >= 2) {
       for (const mark of laneMarkingPaints(laneMarkingProfile(way, road))) {
         for (const run of markingRuns) {
           const line = paintedLine(offsetWay(run, mark.offset), MARK_W, mark.color,
@@ -13290,7 +13525,7 @@ window.kerbside = {
   nearestKerbAt, furnitureAnchor, bestFacadeWall, wallPoint, shopBays, carriagewayGrid, CARRIAGEWAY_CELL,
   pavementTopAt, parkingLayout, rayCurbIntersections, officialCurbGrid, officialKerbOffsetsAt,
   mappedWalkBeyondKerb, mappedWalkGrid, MAPPED_WALK_CELL, crossingRoadSpanPoints, crossingPaintLegs,
-  officialIslandCurbGrid, isDividedHalf, recentreOnKerbEnvelope, envelopeEdgesAt, sameLevel, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
+  officialIslandCurbGrid, officialMedianGrid, isDividedHalf, recentreOnKerbEnvelope, envelopeEdgesAt, sameLevel, roadwayCovered, roadFillGrid, filledAt, cornerLegs, cornerLegsAt, cornerNeighbour, bulbDepthAt, legBulb, cornerQuad, pavementCornerCuts,
   crossingDrawGrid, sidewalkCrossingReplacementSpans, crossingDrawPose, densifyWay, crossingRectanglePoints,
   twinInnerEdgeAt, halfWidthAt, filletBends, bendsFilleted, tunnelCoverAt, tunnelCoverIndex, tunnelCoveredPoints, tunnelApproachWidth,
   corners: { cuts: pavementCornerCuts.size, valid: [...pavementCornerCuts.values()].filter((c) => c.valid).length,
