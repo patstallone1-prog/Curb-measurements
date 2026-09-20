@@ -2697,7 +2697,9 @@ function liftSampledColour(hex) {
 
 //: A facade read off the building's own photographs and matched to the closest render
 //: (smc.facades.match) is believed at this confidence and above; below it, the die.
-const FACADE_MATCH_MIN_CONFIDENCE = 0.5;
+//: High until the catalogue's prototypes are fitted to labelled walls (smc.facades.match
+//: CATALOGUE_STATUS): the first pass over the corridor called 3% of houses stucco.
+const FACADE_MATCH_MIN_CONFIDENCE = 0.75;
 
 function pickMaterial(seed, height, archetype, facade = null) {
   if (facade && facade.conf >= FACADE_MATCH_MIN_CONFIDENCE) {
