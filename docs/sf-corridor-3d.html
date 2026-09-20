@@ -125,7 +125,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
   </div>
 </div>
 <div id="addr" hidden></div>
-<div id="tip"><b>Click anywhere to go there</b> &mdash; the walker is you, and arriving brings the camera down to street level. Arrow keys walk it at 15&nbsp;mph, relative to the way you are facing. Drag to orbit, wheel or pinch to zoom. The survey layers are off by default: turn them on for where photographs were taken, which blocks are covered, and which streets nobody has captured yet.</div>
+<div id="tip"><b>Click anywhere to go there</b> &mdash; the walker is you, and arriving brings the camera down to street level. Arrow keys walk it at 12&nbsp;mph in first person, relative to the way you are facing. Drag to orbit, wheel or pinch to zoom &mdash; in first person the wheel zooms your view up to 2x. The survey layers are off by default: turn them on for where photographs were taken, which blocks are covered, and which streets nobody has captured yet.</div>
 <!-- The payload is fetched rather than inlined. At ten megabytes it dominated the repository:
      eight rebuilds cost 82 MB of history, because a rewritten binary never deduplicates against
      its previous version. Fetched, the page is a few kilobytes, the data changes independently,
@@ -2697,9 +2697,10 @@ function liftSampledColour(hex) {
 
 //: A facade read off the building's own photographs and matched to the closest render
 //: (smc.facades.match) is believed at this confidence and above; below it, the die.
-//: High until the catalogue's prototypes are fitted to labelled walls (smc.facades.match
-//: CATALOGUE_STATUS): the first pass over the corridor called 3% of houses stucco.
-const FACADE_MATCH_MIN_CONFIDENCE = 0.75;
+//: From here up the match is drawn. On 39 labelled walls the fitted catalogue was right 26
+//: times over all, 14 of 18 at this confidence and above (smc.facades.match CATALOGUE_STATUS);
+//: below it the seeded die still chooses.
+const FACADE_MATCH_MIN_CONFIDENCE = 0.6;
 
 function pickMaterial(seed, height, archetype, facade = null) {
   if (facade && facade.conf >= FACADE_MATCH_MIN_CONFIDENCE) {
@@ -13086,6 +13087,9 @@ function setFirstPerson(on) {
   if (button) button.setAttribute("aria-pressed", on ? "true" : "false");
   // At eye height the kerb is half a metre away; the orbit camera's near plane would cut it.
   camera.near = on ? 0.12 : 0.5;
+  // Leaving the walker's eyes puts the zoom back; entering starts at 1x.
+  state.zoom = 1;
+  camera.fov = FIRST_PERSON_FOV;
   camera.updateProjectionMatrix();
   placeCamera();
 }
@@ -13107,7 +13111,13 @@ canvas.addEventListener("pointermove", (e) => {
 canvas.addEventListener("pointerup", () => { dragging = false; });
 canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
-  if (state.firstPerson) return;
+  if (state.firstPerson) {
+    // Zoom by field of view, 1x to 2x; the walker stays where it is.
+    state.zoom = Math.max(1, Math.min(FIRST_PERSON_MAX_ZOOM, (state.zoom || 1) * Math.exp(-e.deltaY * 0.001)));
+    camera.fov = FIRST_PERSON_FOV / state.zoom;
+    camera.updateProjectionMatrix();
+    return;
+  }
   state.dist = Math.max(8, Math.min(2600, state.dist * Math.exp(e.deltaY * 0.001)));
   placeCamera();
 }, { passive: false });
@@ -13292,7 +13302,14 @@ resize();
 // Orbiting a model tells you its shape; walking it tells you its scale. A simple person is
 // still cheap enough to keep the map self-contained, but reads as a body rather than as a
 // marker: shoulders, feet, head height, gait and facing all make the kerb scale easier to feel.
-const STREET_SPEED = 8.94;     // 20 mph in metres per second, at street level
+const STREET_SPEED = 8.94;     // 20 mph in metres per second, at street level, orbiting
+//: In the walker's own eyes the pace is a brisk 12 mph: fast enough to cross a block without
+//: tedium, slow enough that a kerb and a doorway can be looked at as they pass.
+const FIRST_PERSON_SPEED = 5.36;   // 12 mph
+//: The first-person view zooms by narrowing its field: the wheel takes it from the full
+//: 50 degrees down to half that, a 2x look at a sign or a kerb across the street.
+const FIRST_PERSON_FOV = 50;
+const FIRST_PERSON_MAX_ZOOM = 2.0;
 // Above that the speed scales with how far the camera has pulled back, so the walker always
 // crosses the screen at the same rate. Walking a block at 20 mph is right when you are standing
 // in it; from two thousand metres up the same 20 mph is a stationary dot, and crossing the
@@ -13743,7 +13760,8 @@ function stepAvatar(now) {
   if (held.has("ArrowRight")) move.add(rightward);
   if (held.has("ArrowLeft")) move.sub(rightward);
   if (!move.lengthSq()) return;
-  const scaled = STREET_SPEED * Math.max(1, state.dist / SPEED_REFERENCE_DIST);
+  const scaled = state.firstPerson ? FIRST_PERSON_SPEED
+    : STREET_SPEED * Math.max(1, state.dist / SPEED_REFERENCE_DIST);
   move.normalize().multiplyScalar(scaled * dt);
   avatar.position.add(move);
   animateAvatar(move.length(), move, true);
