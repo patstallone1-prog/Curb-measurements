@@ -11909,6 +11909,7 @@ function buildCourts(ground) {
     const proto = treeVariant(kind);
     for (const part of proto.children) {
       const mesh = new THREE.InstancedMesh(part.geometry, part.material, list.length);
+      mesh.userData.surface = `tree:${kind}`;   // named for the tile exporter and the audit
       for (let i = 0; i < list.length; i += 1) {
         const tree = list[i];
         const [x, y] = xy(tree.p[0], tree.p[1]);
