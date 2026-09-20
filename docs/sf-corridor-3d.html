@@ -633,7 +633,15 @@ if (TERRAIN_FRAME) {
 //: along that edge, again and again, until none is -- a long thin strip splits along its
 //: length only. Neighbours sharing an edge share the midpoint, so a split edge does not open.
 const TERRAIN_REFINE_M = 8.0;
-function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M) {
+//: And shorter than that wherever the ground curves: an edge whose midpoint the ground stands
+//: this far above or below its chord is split too, down to TERRAIN_REFINE_MIN_M. A flat block
+//: stays coarse; the brow of a hill and the foot of a retaining wall get the vertices.
+const TERRAIN_CHORD_M = 0.25;
+const TERRAIN_REFINE_MIN_M = 4.0;
+//: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
+//: stair stands, and chasing every step to the grid's own cell size ran a yard to millions.
+const TERRAIN_REFINE_GROWTH = 4;
+function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_CHORD_M) {
   const position = geometry.getAttribute("position");
   // A multi-material geometry's index ranges are its material groups; splitting would move them.
   if (!position || (geometry.groups && geometry.groups.length)) return geometry;
@@ -644,6 +652,13 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M) {
   const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: position.count }, (_, i) => i);
   let count = position.count;
   const px = (i) => arrays[0][i * 3], pz = (i) => arrays[0][i * 3 + 2];
+  // Does the ground leave this edge's chord by more than the tolerance at its midpoint?
+  const budget = position.count * TERRAIN_REFINE_GROWTH + 50000;
+  const bends = (a, b, len) => {
+    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M || count > budget) return false;
+    const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
+    return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord;
+  };
   const midpoints = new Map();
   const midpoint = (a, b) => {
     const key = a < b ? `${a}:${b}` : `${b}:${a}`;
@@ -669,10 +684,19 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M) {
       const bc = Math.hypot(px(b) - px(c), pz(b) - pz(c));
       const ca = Math.hypot(px(c) - px(a), pz(c) - pz(a));
       const longest = Math.max(ab, bc, ca);
-      if (!(longest > maxEdge)) { out.push(a, b, c); continue; }
+      let edge = longest > maxEdge ? (longest === ab ? 0 : longest === bc ? 1 : 2) : -1;
+      if (edge < 0) {
+        // Not long, but does the ground bend under it? The longest bending edge is split.
+        if (ab >= bc && ab >= ca && bends(a, b, ab)) edge = 0;
+        else if (bc >= ca && bends(b, c, bc)) edge = 1;
+        else if (bends(c, a, ca)) edge = 2;
+        else if (bends(a, b, ab)) edge = 0;
+        else if (bends(b, c, bc)) edge = 1;
+      }
+      if (edge < 0) { out.push(a, b, c); continue; }
       split += 1;
-      if (longest === ab) { const m = midpoint(a, b); stack.push(a, m, c, m, b, c); }
-      else if (longest === bc) { const m = midpoint(b, c); stack.push(a, b, m, a, m, c); }
+      if (edge === 0) { const m = midpoint(a, b); stack.push(a, m, c, m, b, c); }
+      else if (edge === 1) { const m = midpoint(b, c); stack.push(a, b, m, a, m, c); }
       else { const m = midpoint(c, a); stack.push(a, b, m, m, b, c); }
     }
   }
@@ -2671,7 +2695,15 @@ function liftSampledColour(hex) {
   return colour.getHex();
 }
 
-function pickMaterial(seed, height, archetype) {
+//: A facade read off the building's own photographs and matched to the closest render
+//: (smc.facades.match) is believed at this confidence and above; below it, the die.
+const FACADE_MATCH_MIN_CONFIDENCE = 0.5;
+
+function pickMaterial(seed, height, archetype, facade = null) {
+  if (facade && facade.conf >= FACADE_MATCH_MIN_CONFIDENCE) {
+    const matched = MATERIALS.find((m) => m.name === facade.m);
+    if (matched) return matched;
+  }
   const style = ARCHETYPE_STYLE[archetype];
   if (style) {
     const allowed = MATERIALS.filter((m) => style.materials.includes(m.name));
@@ -8837,7 +8869,7 @@ function buildingMesh(feature) {
   if (hillLift !== 0) { geom.translate(0, hillLift, 0); feature._hillLiftM = +hillLift.toFixed(2); }
   const measured = feature.height_source === "osm_height" || feature.height_source === "osm_levels"
     || feature.height_source === "overture_height";
-  const material = pickMaterial(seed, height, feature.archetype);
+  const material = pickMaterial(seed, height, feature.archetype, feature.facade || null);
   const style = ARCHETYPE_STYLE[feature.archetype];
   const palette = style ? style.colours : material.colours;
   // A colour taken off a photograph of this building, where one was. Otherwise the palette,
