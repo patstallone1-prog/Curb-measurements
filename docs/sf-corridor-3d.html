@@ -625,10 +625,71 @@ if (TERRAIN_FRAME) {
   root.add(terrainMesh);
 }
 
+//: A surface lifted vertex by vertex only follows the ground where it has vertices. A yard
+//: drawn as one polygon across a block, a footprint, a fence panel between two posts, the
+//: underlay behind a whole block's pavement: lifted at their corners they cut straight through
+//: the hill between them, and the hill showed through as dark patches and the surfaces stood
+//: off it as slabs. Before lifting, every triangle with an edge longer than this is bisected
+//: along that edge, again and again, until none is -- a long thin strip splits along its
+//: length only. Neighbours sharing an edge share the midpoint, so a split edge does not open.
+const TERRAIN_REFINE_M = 8.0;
+function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M) {
+  const position = geometry.getAttribute("position");
+  // A multi-material geometry's index ranges are its material groups; splitting would move them.
+  if (!position || (geometry.groups && geometry.groups.length)) return geometry;
+  const names = ["position", "normal", "uv", "color"].filter((n) => geometry.getAttribute(n));
+  const sources = names.map((n) => geometry.getAttribute(n));
+  const arrays = names.map((n, i) => Array.from(sources[i].array.subarray(0, sources[i].count * sources[i].itemSize)));
+  const sizes = sources.map((a) => a.itemSize);
+  const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: position.count }, (_, i) => i);
+  let count = position.count;
+  const px = (i) => arrays[0][i * 3], pz = (i) => arrays[0][i * 3 + 2];
+  const midpoints = new Map();
+  const midpoint = (a, b) => {
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    let m = midpoints.get(key);
+    if (m !== undefined) return m;
+    m = count;
+    count += 1;
+    for (let k = 0; k < arrays.length; k += 1) {
+      const n = sizes[k];
+      for (let c = 0; c < n; c += 1) arrays[k].push((arrays[k][a * n + c] + arrays[k][b * n + c]) / 2);
+    }
+    midpoints.set(key, m);
+    return m;
+  };
+  const out = [];
+  const stack = [];
+  let split = 0;
+  for (let t = 0; t + 2 < index.length; t += 3) {
+    stack.push(index[t], index[t + 1], index[t + 2]);
+    while (stack.length) {
+      const c = stack.pop(), b = stack.pop(), a = stack.pop();
+      const ab = Math.hypot(px(a) - px(b), pz(a) - pz(b));
+      const bc = Math.hypot(px(b) - px(c), pz(b) - pz(c));
+      const ca = Math.hypot(px(c) - px(a), pz(c) - pz(a));
+      const longest = Math.max(ab, bc, ca);
+      if (!(longest > maxEdge)) { out.push(a, b, c); continue; }
+      split += 1;
+      if (longest === ab) { const m = midpoint(a, b); stack.push(a, m, c, m, b, c); }
+      else if (longest === bc) { const m = midpoint(b, c); stack.push(a, b, m, a, m, c); }
+      else { const m = midpoint(c, a); stack.push(a, b, m, m, b, c); }
+    }
+  }
+  if (!split) return geometry;
+  const refined = new THREE.BufferGeometry();
+  names.forEach((n, k) => refined.setAttribute(n, new THREE.Float32BufferAttribute(arrays[k], sizes[k])));
+  refined.setIndex(out);
+  refined.userData = geometry.userData;
+  geometry.dispose();
+  return refined;
+}
+
 //: Everything at ground level under an object is lifted onto the ground: merged street
 //: surfaces vertex by vertex, an instanced tree or post at each instance's foot, a positioned
 //: mesh at its position. The tunnels are not: their stations already carry the ground and
-//: the cover the lidar measured over them. Each mesh is lifted once.
+//: the cover the lidar measured over them. Each mesh is lifted once, refined first
+//: (refineForTerrain) so that it follows the hill between its corners.
 function liftOntoGround(object) {
   if (!TERRAIN_FRAME) return 0;
   let lifted = 0;
@@ -650,8 +711,9 @@ function liftOntoGround(object) {
       lifted += 1;
       return;
     }
-    const attribute = o.geometry && o.geometry.getAttribute("position");
-    if (!attribute) return;
+    if (!o.geometry || !o.geometry.getAttribute("position")) return;
+    o.geometry = refineForTerrain(o.geometry);
+    const attribute = o.geometry.getAttribute("position");
     // Vertices are lifted in the world frame; a mesh that is placed rather than built where
     // it stands gets the lift on its own local axes.
     const world = o.matrixWorld;
@@ -8936,8 +8998,9 @@ function facadePanel(wall) {
     transparent: true, opacity: 0,
   });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(length, wall.h), material);
-  mesh.position.set((ax + bx) / 2 + nx * FACADE_STANDOFF_M, wall.h / 2,
-                    -(ay + by) / 2 + nz * FACADE_STANDOFF_M);
+  // The panel's foot is on the ground at the wall, where the photograph's kerb is.
+  const px = (ax + bx) / 2 + nx * FACADE_STANDOFF_M, pz = -(ay + by) / 2 + nz * FACADE_STANDOFF_M;
+  mesh.position.set(px, wall.h / 2 + groundLiftAt(px, pz), pz);
   // A plane faces +z; rotating by pi minus the bearing turns it to face the way the wall does.
   mesh.rotation.y = Math.PI - bearing;
   mesh.userData.facade = wall;
@@ -9932,6 +9995,8 @@ for (const way of DRAW_ORDER) {
  side: THREE.DoubleSide,
  }));
  mesh.position.y = BEACH_Y;
+ mesh.userData.surface = "beach";
+ mesh.userData.liftedOntoGround = true;   // the beach is at the water's edge, not on the hill
  groups.ground.add(mesh);
  }
  continue;
@@ -9952,6 +10017,10 @@ for (const way of DRAW_ORDER) {
         envMapIntensity: 0.5, side: THREE.DoubleSide,
       }));
       mesh.position.y = WATER_Y;
+      // Water is at sea level and stays there: lifted onto the terrain it stood over the
+      // hillside as a sheet of reflecting blue wherever its polygon ran inland.
+      mesh.userData.surface = "water";
+      mesh.userData.liftedOntoGround = true;
       groups.streets.add(mesh);
     }
     continue;
@@ -11849,9 +11918,6 @@ flushMerged(groups.streets, (key) => !isBuilt(key));
 flushMerged(groups.mapped3d, isBuilt);
 // A garage door is at the level of the driveway outside it, which is the street's ground there.
 for (const mesh of groups.mapped3d.children) if (mesh.userData.surface === "garage") liftOntoGround(mesh);
-// The tunnels are sunk below the flat ground: the planes under the world are cut along them,
-// and everything at ground level stands on the ground the lidar measured.
-liftOntoGround(groups.streets);
 
 // ---- the dropped kerb at every garage ----
 //
@@ -11941,7 +12007,12 @@ function dropKerbsAtDriveways(ways) {
   });
   return lowered;
 }
+// Before the lift, while every height is still the flat model's: the drop reads the gutter as
+// ROAD_TOP_M, and run after the lift it let every kerb and pavement near a driveway on a hill
+// down to sea level -- a crater at each garage, eighty metres deep on Nob Hill.
 const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
+// Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
+liftOntoGround(groups.streets);
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
