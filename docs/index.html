@@ -51,6 +51,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
 #addr b { font-size:13px; }
 #addr .sub { color:var(--muted); }
 #tip { position:fixed; left:368px; bottom:14px; width:min(520px, calc(100vw - 382px)); color:var(--muted); font-size:12px; }
+#progress { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(12,18,24,0.88); color:#e8eef2; padding:14px 22px; border-radius:8px; font-size:15px; letter-spacing:0.01em; z-index:20; pointer-events:none; }
 @media (max-width: 760px) {
   .hud { width:calc(100vw - 28px); bottom:auto; max-height:70vh; }
   .meta { grid-template-columns:repeat(2, 1fr); }
@@ -60,6 +61,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
 </head>
 <body>
 <canvas id="scene"></canvas>
+<div id="progress" hidden>Loading the corridor&hellip;</div>
 <div class="hud" id="hud" data-open="true">
   <div class="panel">
     <div class="bar">
@@ -254,10 +256,17 @@ for (const off of ["coverage", "observations", "sequences", "gaps", "kerbs", "ch
 Object.values(groups).forEach((g) => root.add(g));
 
 const lazyLayerBuilders = new Map();
+//: A layer asked for before it is registered. The build yields to the browser now, so the
+//: ground, which arrives by fetch, can finish and ask for the furniture that stands on it
+//: while the script is still laying streets and has not reached the furniture's registration.
+//: Asked for early, a layer is built the moment it is registered; dropped, it never was.
+const lazyLayersWanted = new Set();
 function registerLazyLayer(layer, builder) {
   lazyLayerBuilders.set(layer, { builder, promise: null });
+  if (lazyLayersWanted.has(layer)) ensureLazyLayer(layer);
 }
 function ensureLazyLayer(layer) {
+  lazyLayersWanted.add(layer);
   const entry = lazyLayerBuilders.get(layer);
   if (!entry || entry.promise) return;
   entry.promise = Promise.resolve()
@@ -408,6 +417,32 @@ function groundBaseFor(points) {
     low = Math.min(low, terrainHeightAt(x, -y));
   }
   return Number.isFinite(low) ? low : 0;
+}
+//: The build hands the browser a frame every so often. Without that the whole corridor was one
+//: synchronous run of half a minute or more, which on a phone is "Page unresponsive" and a
+//: kill; with it the same work takes a little longer and shows its progress.
+//: How long the build may hold the thread before it hands a frame back. Long enough that
+//: the yields themselves cost little (a frame is sixteen milliseconds), short enough that the
+//: page scrolls and the progress reads.
+const YIELD_BUDGET_MS = 60;
+let lastYieldAt = performance.now();
+function yieldFrame(progress) {
+  const box = document.getElementById("progress");
+  if (box && progress !== undefined) { box.textContent = progress; box.hidden = false; }
+  lastYieldAt = performance.now();
+  // A frame when the browser gives one; a timer when it does not, so that a page building in a
+  // background tab -- where requestAnimationFrame never fires -- still finishes building.
+  return new Promise((resolve) => {
+    let settled = false;
+    const go = () => { if (!settled) { settled = true; resolve(); } };
+    requestAnimationFrame(() => setTimeout(go, 0));
+    setTimeout(go, 50);
+  });
+}
+//: Yield only when the budget is spent: the caller can ask on every iteration.
+function maybeYield(progress) {
+  if (performance.now() - lastYieldAt < YIELD_BUDGET_MS) return null;
+  return yieldFrame(progress);
 }
 //: The lift of the building being built. Its walls are lifted in their own geometry; the
 //: detail hung on them -- shopfronts, awnings, signs, roof furniture, the merged parts -- is
@@ -588,42 +623,60 @@ root.add(ground);
 // camera has something to land on. It is coarser than the height grid the surfaces are
 // lifted by -- one vertex every TERRAIN_MESH_STRIDE cells -- because it is the backdrop, not
 // the measurement; the measurement is in every lifted vertex.
-const TERRAIN_MESH_STRIDE = 2;
+//: Every fourth cell: an eight-metre grid. The surfaces standing on it are refined to twelve
+//: metres, so a finer backdrop under them was a million triangles a frame for nothing.
+const TERRAIN_MESH_STRIDE = 4;
 const TERRAIN_MESH_UNDER_M = 0.35;
-let terrainMesh = null;
+//: The backdrop is cut into tiles of this many mesh vertices a side, each culled on its own.
+//: As one mesh it was 1.8 million triangles that could never be culled, drawn under every
+//: view including a first-person one looking at a single block.
+const TERRAIN_TILE_VERTICES = 128;
+const terrainTiles = [];
 if (TERRAIN_FRAME) {
   const f = TERRAIN_FRAME;
   const cols = Math.floor((f.cols - 1) / TERRAIN_MESH_STRIDE) + 1;
   const rows = Math.floor((f.rows - 1) / TERRAIN_MESH_STRIDE) + 1;
-  const position = new Float32Array(cols * rows * 3);
-  for (let r = 0; r < rows; r += 1) {
-    for (let c = 0; c < cols; c += 1) {
-      const x = f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
-      const north = f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
-      const i = (r * cols + c) * 3;
-      position[i] = x;
-      position[i + 1] = cutLiftAt(x, -north) - TERRAIN_MESH_UNDER_M;
-      position[i + 2] = -north;
+  const heightAt = (c, r) => cutLiftAt(f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m,
+                                       -(f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m)) - TERRAIN_MESH_UNDER_M;
+  const material = new THREE.MeshStandardMaterial({ color: 0x4a4a45, roughness: 0.99, metalness: 0.0 });
+  // Tiles share their edge row and column, so there is no seam between them.
+  for (let r0 = 0; r0 + 1 < rows; r0 += TERRAIN_TILE_VERTICES - 1) {
+    for (let c0 = 0; c0 + 1 < cols; c0 += TERRAIN_TILE_VERTICES - 1) {
+      const r1 = Math.min(rows - 1, r0 + TERRAIN_TILE_VERTICES - 1);
+      const c1 = Math.min(cols - 1, c0 + TERRAIN_TILE_VERTICES - 1);
+      const w = c1 - c0 + 1, h = r1 - r0 + 1;
+      const position = new Float32Array(w * h * 3);
+      for (let r = 0; r < h; r += 1) {
+        for (let c = 0; c < w; c += 1) {
+          const i = (r * w + c) * 3;
+          position[i] = f.x0 + ((c0 + c) * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
+          position[i + 1] = heightAt(c0 + c, r0 + r);
+          position[i + 2] = -(f.y0 + ((r0 + r) * TERRAIN_MESH_STRIDE + 0.5) * f.step_m);
+        }
+      }
+      const index = new Uint32Array((w - 1) * (h - 1) * 6);
+      let k = 0;
+      for (let r = 0; r + 1 < h; r += 1) {
+        for (let c = 0; c + 1 < w; c += 1) {
+          const a = r * w + c, b = a + 1, d = a + w, e = d + 1;
+          index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e;
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+      geometry.setIndex(new THREE.BufferAttribute(index, 1));
+      geometry.computeVertexNormals();
+      geometry.computeBoundingSphere();
+      const tile = new THREE.Mesh(geometry, material);
+      tile.userData.surface = "terrain";
+      terrainTiles.push(tile);
+      root.add(tile);
     }
   }
-  const index = [];
-  for (let r = 0; r + 1 < rows; r += 1) {
-    for (let c = 0; c + 1 < cols; c += 1) {
-      const a = r * cols + c, b = a + 1, d = a + cols, e = d + 1;
-      index.push(a, d, b, b, d, e);
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  geometry.setIndex(index);
-  geometry.computeVertexNormals();
-  terrainMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    color: 0x4a4a45, roughness: 0.99, metalness: 0.0,
-  }));
-  terrainMesh.userData.surface = "terrain";
-  terrainMesh.frustumCulled = false;
-  root.add(terrainMesh);
 }
+//: The backdrop as one object for the ray that finds the ground under a click.
+const terrainMesh = terrainTiles.length ? new THREE.Group() : null;
+if (terrainMesh) { terrainMesh.userData.surface = "terrain"; }
 
 //: A surface lifted vertex by vertex only follows the ground where it has vertices. A yard
 //: drawn as one polygon across a block, a footprint, a fence panel between two posts, the
@@ -632,12 +685,25 @@ if (TERRAIN_FRAME) {
 //: off it as slabs. Before lifting, every triangle with an edge longer than this is bisected
 //: along that edge, again and again, until none is -- a long thin strip splits along its
 //: length only. Neighbours sharing an edge share the midpoint, so a split edge does not open.
-const TERRAIN_REFINE_M = 8.0;
+//: Twelve metres, not eight: on a straight grade the chord of a twelve-metre edge lies on the
+//: ground exactly, and where the ground curves the bend rule below splits it further. At eight
+//: metres everywhere the streets alone were fifteen million triangles.
+const TERRAIN_REFINE_M = 12.0;
 //: And shorter than that wherever the ground curves: an edge whose midpoint the ground stands
 //: this far above or below its chord is split too, down to TERRAIN_REFINE_MIN_M. A flat block
 //: stays coarse; the brow of a hill and the foot of a retaining wall get the vertices.
 const TERRAIN_CHORD_M = 0.25;
-const TERRAIN_REFINE_MIN_M = 4.0;
+const TERRAIN_REFINE_MIN_M = 5.0;
+//: By surface, [longest edge, chord]: what lies under something else -- the underlay behind a
+//: pavement, the footprint under a building -- is refined coarsely and never for curvature,
+//: because nobody sees its chords. A parking lot or a front path is refined for length only:
+//: the grid under a multi-storey garage or a flight of steps is a staircase, and chasing every
+//: step of it ran a hundred and fifty lots to over a million triangles. A yard or a park, both.
+const TERRAIN_REFINE_BY_SURFACE = {
+  walk_underlay: [24.0, 0], footprint: [24.0, 0], garage: [24.0, 0],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0],
+  yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
+};
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
 //: stair stands, and chasing every step to the grid's own cell size ran a yard to millions.
 const TERRAIN_REFINE_GROWTH = 4;
@@ -659,9 +725,10 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
     const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
     return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord;
   };
+  // Keyed by the pair as one number: a string key here was a third of the lift's time.
   const midpoints = new Map();
   const midpoint = (a, b) => {
-    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    const key = a < b ? a * 16777216 + b : b * 16777216 + a;
     let m = midpoints.get(key);
     if (m !== undefined) return m;
     m = count;
@@ -717,11 +784,29 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
 function liftOntoGround(object) {
   if (!TERRAIN_FRAME) return 0;
   let lifted = 0;
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3();
   object.updateMatrixWorld(true);
-  object.traverse((o) => {
-    if (!o.isMesh || o.userData.liftedOntoGround) return;
-    if (String(o.userData.surface || "").startsWith("tunnel") || o.userData.surface === "terrain") return;
+  object.traverse((o) => { lifted += liftOneMesh(o); });
+  return lifted;
+}
+//: The same, a frame at a time: the merged street surfaces are millions of vertices.
+async function liftOntoGroundAsync(object, label) {
+  if (!TERRAIN_FRAME) return 0;
+  let lifted = 0;
+  object.updateMatrixWorld(true);
+  const meshes = [];
+  object.traverse((o) => { if (o.isMesh) meshes.push(o); });
+  for (let i = 0; i < meshes.length; i += 1) {
+    lifted += liftOneMesh(meshes[i]);
+    await maybeYield(`${label}: ${Math.round(100 * i / meshes.length)}%`);
+  }
+  return lifted;
+}
+const LIFT_M4 = new THREE.Matrix4(), LIFT_Q = new THREE.Quaternion(), LIFT_POS = new THREE.Vector3(), LIFT_SCL = new THREE.Vector3();
+function liftOneMesh(o) {
+  const m = LIFT_M4, q = LIFT_Q, pos = LIFT_POS, scl = LIFT_SCL;
+  {
+    if (!o.isMesh || o.userData.liftedOntoGround) return 0;
+    if (String(o.userData.surface || "").startsWith("tunnel") || o.userData.surface === "terrain") return 0;
     o.userData.liftedOntoGround = true;
     if (o.isInstancedMesh) {
       for (let i = 0; i < o.count; i += 1) {
@@ -732,11 +817,12 @@ function liftOntoGround(object) {
         o.setMatrixAt(i, m);
       }
       o.instanceMatrix.needsUpdate = true;
-      lifted += 1;
-      return;
+      if (o.computeBoundingSphere) o.computeBoundingSphere();
+      return 1;
     }
-    if (!o.geometry || !o.geometry.getAttribute("position")) return;
-    o.geometry = refineForTerrain(o.geometry);
+    if (!o.geometry || !o.geometry.getAttribute("position")) return 0;
+    const [limit, chord] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
+    o.geometry = refineForTerrain(o.geometry, limit, chord);
     const attribute = o.geometry.getAttribute("position");
     // Vertices are lifted in the world frame; a mesh that is placed rather than built where
     // it stands gets the lift on its own local axes.
@@ -751,11 +837,12 @@ function liftOntoGround(object) {
       attribute.setXYZ(i, attribute.getX(i) + up.x, attribute.getY(i) + up.y, attribute.getZ(i) + up.z);
     }
     attribute.needsUpdate = true;
-    if (o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+    // The bounds are what the culling reads; a tile lifted eighty metres up Nob Hill with the
+    // sphere it had at sea level would vanish whenever the camera looked at it.
+    o.geometry.computeBoundingSphere();
     if (o.geometry.boundingBox) o.geometry.computeBoundingBox();
-    lifted += 1;
-  });
-  return lifted;
+    return 1;
+  }
 }
 
 // ---- the bay ----
@@ -1077,14 +1164,29 @@ function materialKey(material) {
     (material.alphaTest ?? 0).toFixed(2),
     material.side,
     material.polygonOffset ? `${material.polygonOffsetFactor}/${material.polygonOffsetUnits}` : "-",
+    // These change the pixels too, and now that buckets share material objects a bucket whose
+    // colour rides on its vertices must never borrow a material that ignores them.
+    material.vertexColors ? "vc" : "-",
+    (material.envMapIntensity ?? 1).toFixed(2),
+    material.emissive ? material.emissive.getHexString() : "-",
+    material.depthWrite === false ? "nodw" : "dw",
   ].join(":");
 }
 
+//: One material object per fingerprint. Two buckets that draw the same pixels -- a roof and a
+//: yard wall in the same texture, say -- used to hold two material objects, and the renderer
+//: re-bound every uniform between them; with one object it sorts them together and binds once.
+const CANONICAL_MATERIALS = new Map();
 function addMerged(key, mesh, surface) {
   if (!mesh || !mesh.geometry) return;
-  const full = `${key}|${materialKey(mesh.material)}`;
+  const fingerprint = materialKey(mesh.material);
+  const full = `${key}|${fingerprint}`;
   let bucket = MERGED.get(full);
-  if (!bucket) MERGED.set(full, bucket = { material: mesh.material, surface, parts: [] });
+  if (!bucket) {
+    let material = CANONICAL_MATERIALS.get(fingerprint);
+    if (!material) CANONICAL_MATERIALS.set(fingerprint, material = mesh.material);
+    MERGED.set(full, bucket = { material, surface, parts: [] });
+  }
   // The mesh's own placement has to be baked in: a merged geometry has no transform of its own,
   // and every one of these was positioned rather than built where it stands.
   mesh.updateMatrix();
@@ -1105,60 +1207,255 @@ function addMerged(key, mesh, surface) {
 
 const IDENTITY = new THREE.Matrix4();
 
+//: Merged meshes are cut into tiles this wide, each culled on its own. Merged by material alone,
+//: a bucket was one mesh spanning the corridor that could never be culled: standing on one block
+//: in first person drew every kerb in the corridor -- twenty-seven million triangles a frame,
+//: a few frames a second on an ordinary laptop. Tiled, a street corner draws its own tiles.
+//: At this size the whole corridor on screen is a little over a thousand draw calls.
+const MERGE_TILE_M = 400.0;
+//: A tile is worth its draw call when it carries about this many vertices. A bucket whose
+//: tiles would be thinner is cut at twice the size, and thinner still it stays one mesh: the
+//: buildings' hundred and seventy texture buckets carry two million triangles between them,
+//: and tiled at four hundred metres they were three thousand draw calls for nothing.
+const MERGE_TILE_MIN_VERTICES = 40000;
+//: What the merge did, for the console: parts in, meshes out, triangles.
+const mergeStats = { parts: 0, meshes: 0, triangles: 0 };
+
 function flushMerged(group, match = () => true) {
   let saved = 0;
   for (const [key, bucket] of [...MERGED]) {
     if (!match(key)) continue;
     MERGED.delete(key);
-    const positions = [];
-    const uvs = [];
-    const normals = [];
-    const colours = [];
-    const indices = [];
-    for (const geometry of bucket.parts) {
-      const position = geometry.getAttribute("position");
-      if (!position) continue;
-      const uv = geometry.getAttribute("uv");
-      const normal = geometry.getAttribute("normal");
-      // The colour a building carries on its vertices, because its tint can no longer live on
-      // its material -- there is one material now for a hundred and fifty buildings. Dropping
-      // this attribute in the merge, which is what happened first, leaves the shader reading a
-      // colour that is not there: every building in the city came out black.
-      const colour = geometry.getAttribute("color");
-      const base = positions.length / 3;
-      for (let i = 0; i < position.count; i += 1) {
-        positions.push(position.getX(i), position.getY(i), position.getZ(i));
-        // A merged geometry has one attribute set or none, so a part without UVs still has to
-        // contribute two numbers per vertex or every vertex after it reads the wrong pair.
-        uvs.push(uv ? uv.getX(i) : 0, uv ? uv.getY(i) : 0);
-        normals.push(normal ? normal.getX(i) : 0, normal ? normal.getY(i) : 1,
-                     normal ? normal.getZ(i) : 0);
-        colours.push(colour ? colour.getX(i) : 1, colour ? colour.getY(i) : 1,
-                     colour ? colour.getZ(i) : 1);
+    const parts = bucket.parts.filter((geometry) => geometry.getAttribute("position"));
+    let total = 0;
+    for (const geometry of parts) total += geometry.getAttribute("position").count;
+    // Each part goes in the tile under the middle of its box; a part is never split. The tile
+    // size is the smallest at which the tiles are worth their draw calls.
+    let tiles = new Map([["all", parts]]);
+    if (total >= 2 * MERGE_TILE_MIN_VERTICES) {
+      for (const geometry of parts) geometry.computeBoundingBox();
+      for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+        const attempt = new Map();
+        for (const geometry of parts) {
+          const box = geometry.boundingBox;
+          const tile = `${Math.floor((box.min.x + box.max.x) / (2 * size))}:${Math.floor((box.min.z + box.max.z) / (2 * size))}`;
+          let list = attempt.get(tile);
+          if (!list) attempt.set(tile, list = []);
+          list.push(geometry);
+        }
+        if (total / attempt.size >= MERGE_TILE_MIN_VERTICES) { tiles = attempt; break; }
       }
-      const index = geometry.getIndex();
-      if (index) {
-        for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
-      } else {
-        for (let i = 0; i < position.count; i += 1) indices.push(base + i);
-      }
-      geometry.dispose();
-      saved += 1;
     }
-    if (!indices.length) continue;
-    const merged = new THREE.BufferGeometry();
-    merged.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    merged.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    merged.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    merged.setAttribute("color", new THREE.Float32BufferAttribute(colours, 3));
-    merged.setIndex(indices);
-    const mesh = new THREE.Mesh(merged, bucket.material);
-    // The class survives the merge, so the probe and the audit can still say what is underfoot.
-    mesh.userData.surface = bucket.surface;
-    mesh.frustumCulled = false;      // one mesh spanning the corridor is always on screen
-    group.add(mesh);
+    for (const list of tiles.values()) {
+      const merged = mergeParts(list);
+      if (!merged) continue;
+      const mesh = new THREE.Mesh(merged, bucket.material);
+      // The class survives the merge, so the probe and the audit can still say what is underfoot.
+      mesh.userData.surface = bucket.surface;
+      // A tile is culled when it is off screen. A bucket small enough to stay one mesh spans the
+      // corridor and is always on screen; culling it would only cost the test.
+      mesh.frustumCulled = tiles.size > 1;
+      if (mesh.frustumCulled) merged.computeBoundingSphere();
+      group.add(mesh);
+      saved += list.length;
+      mergeStats.meshes += 1;
+      mergeStats.triangles += merged.index.count / 3;
+    }
+    mergeStats.parts += parts.length;
   }
   return saved;
+}
+
+//: One geometry from many, straight into typed arrays. The merge used to grow four JavaScript
+//: arrays a number at a time and convert them at the end -- for fifteen million triangles that
+//: is a few hundred million pushes and a heap the size of the payload several times over.
+function mergeParts(parts) {
+  let vertices = 0, indices = 0;
+  for (const geometry of parts) {
+    const count = geometry.getAttribute("position").count;
+    const index = geometry.getIndex();
+    vertices += count;
+    indices += index ? index.count : count;
+  }
+  if (!indices) return null;
+  const positions = new Float32Array(vertices * 3);
+  const uvs = new Float32Array(vertices * 2);
+  const normals = new Float32Array(vertices * 3);
+  const colours = new Float32Array(vertices * 3);
+  const merged = vertices > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  let v = 0, k = 0;
+  for (const geometry of parts) {
+    const position = geometry.getAttribute("position");
+    const uv = geometry.getAttribute("uv");
+    const normal = geometry.getAttribute("normal");
+    // The colour a building carries on its vertices, because its tint can no longer live on
+    // its material -- there is one material now for a hundred and fifty buildings. Dropping
+    // this attribute in the merge, which is what happened first, leaves the shader reading a
+    // colour that is not there: every building in the city came out black.
+    const colour = geometry.getAttribute("color");
+    const n = position.count;
+    for (let i = 0; i < n; i += 1) {
+      const p3 = (v + i) * 3, p2 = (v + i) * 2;
+      positions[p3] = position.getX(i); positions[p3 + 1] = position.getY(i); positions[p3 + 2] = position.getZ(i);
+      // A merged geometry has one attribute set or none, so a part without UVs still has to
+      // contribute two numbers per vertex or every vertex after it reads the wrong pair.
+      if (uv) { uvs[p2] = uv.getX(i); uvs[p2 + 1] = uv.getY(i); }
+      if (normal) { normals[p3] = normal.getX(i); normals[p3 + 1] = normal.getY(i); normals[p3 + 2] = normal.getZ(i); }
+      else normals[p3 + 1] = 1;
+      if (colour) { colours[p3] = colour.getX(i); colours[p3 + 1] = colour.getY(i); colours[p3 + 2] = colour.getZ(i); }
+      else { colours[p3] = 1; colours[p3 + 1] = 1; colours[p3 + 2] = 1; }
+    }
+    const index = geometry.getIndex();
+    if (index) for (let i = 0; i < index.count; i += 1) merged[k++] = v + index.getX(i);
+    else for (let i = 0; i < n; i += 1) merged[k++] = v + i;
+    v += n;
+    geometry.dispose();
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colours, 3));
+  geometry.setIndex(new THREE.BufferAttribute(merged, 1));
+  return geometry;
+}
+
+//: The same tiling for a group whose meshes were laid straight into it -- the ground cover, the
+//: street furniture -- rather than through the merge. Every mesh over MERGE_TILE_MIN_VERTICES
+//: is cut along tile lines, triangle by triangle, into pieces culled on their own; an instanced
+//: mesh is split by where its instances stand. Run before the group is lifted, so that the
+//: pieces get their bounds from the lift.
+function tileGroup(group) {
+  let cut = 0;
+  for (const mesh of group.children.slice()) {
+    if (!mesh.isMesh || !mesh.geometry) continue;
+    const pieces = mesh.isInstancedMesh ? tileInstanced(mesh) : tileMesh(mesh);
+    if (!pieces) continue;
+    group.remove(mesh);
+    for (const piece of pieces) group.add(piece);
+    cut += 1;
+  }
+  return cut;
+}
+const tileKeyOf = (x, z) => `${Math.floor(x / MERGE_TILE_M)}:${Math.floor(z / MERGE_TILE_M)}`;
+function inheritMesh(piece, mesh) {
+  piece.position.copy(mesh.position);
+  piece.quaternion.copy(mesh.quaternion);
+  piece.scale.copy(mesh.scale);
+  piece.userData = { ...mesh.userData };
+  piece.name = mesh.name;
+  piece.renderOrder = mesh.renderOrder;
+  piece.castShadow = mesh.castShadow;
+  piece.receiveShadow = mesh.receiveShadow;
+  piece.frustumCulled = true;
+  return piece;
+}
+function tileMesh(mesh) {
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute("position");
+  // A multi-material geometry's index ranges are its material groups; cutting would move them.
+  if (!position || position.count < 2 * MERGE_TILE_MIN_VERTICES || (geometry.groups && geometry.groups.length)) return null;
+  mesh.updateMatrixWorld(true);
+  const index = geometry.getIndex();
+  const triangles = Math.floor((index ? index.count : position.count) / 3);
+  const vertexAt = (t, j) => index ? index.getX(t * 3 + j) : t * 3 + j;
+  // Each triangle's centre, once; then the tile size at which the tiles are worth drawing.
+  const centres = new Float32Array(triangles * 2);
+  const v = new THREE.Vector3();
+  for (let t = 0; t < triangles; t += 1) {
+    let cx = 0, cz = 0;
+    for (let j = 0; j < 3; j += 1) {
+      const i = vertexAt(t, j);
+      v.set(position.getX(i), position.getY(i), position.getZ(i)).applyMatrix4(mesh.matrixWorld);
+      cx += v.x; cz += v.z;
+    }
+    centres[t * 2] = cx / 3; centres[t * 2 + 1] = cz / 3;
+  }
+  let byTile = null;
+  for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+    const attempt = new Map();
+    for (let t = 0; t < triangles; t += 1) {
+      const key = `${Math.floor(centres[t * 2] / size)}:${Math.floor(centres[t * 2 + 1] / size)}`;
+      let list = attempt.get(key);
+      if (!list) attempt.set(key, list = []);
+      list.push(t);
+    }
+    if (position.count / attempt.size >= MERGE_TILE_MIN_VERTICES) { byTile = attempt; break; }
+  }
+  if (!byTile || byTile.size < 2) return null;
+  const names = ["position", "normal", "uv", "color"].filter((n) => geometry.getAttribute(n));
+  const pieces = [];
+  for (const tris of byTile.values()) {
+    const remap = new Map();
+    const order = [];
+    const idx = new Uint32Array(tris.length * 3);
+    let k = 0;
+    for (const t of tris) {
+      for (let j = 0; j < 3; j += 1) {
+        const i = vertexAt(t, j);
+        let m = remap.get(i);
+        if (m === undefined) { m = order.length; order.push(i); remap.set(i, m); }
+        idx[k++] = m;
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    for (const n of names) {
+      const src = geometry.getAttribute(n);
+      const size = src.itemSize;
+      const arr = new Float32Array(order.length * size);
+      for (let a = 0; a < order.length; a += 1) {
+        for (let c = 0; c < size; c += 1) arr[a * size + c] = src.getComponent(order[a], c);
+      }
+      g.setAttribute(n, new THREE.BufferAttribute(arr, size));
+    }
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    g.computeBoundingSphere();
+    pieces.push(inheritMesh(new THREE.Mesh(g, mesh.material), mesh));
+  }
+  geometry.dispose();
+  return pieces;
+}
+//: An instanced mesh is split where a tile would still hold this many instances: a tile of
+//: three conifers is a draw call for three trees.
+const INSTANCED_TILE_MIN = 250;
+function tileInstanced(mesh) {
+  if (mesh.count < 2 * INSTANCED_TILE_MIN) return null;
+  mesh.updateMatrixWorld(true);
+  const m = new THREE.Matrix4();
+  const at = new Float32Array(mesh.count * 2);
+  for (let i = 0; i < mesh.count; i += 1) {
+    mesh.getMatrixAt(i, m);
+    m.premultiply(mesh.matrixWorld);
+    at[i * 2] = m.elements[12]; at[i * 2 + 1] = m.elements[14];
+  }
+  let byTile = null;
+  for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+    const attempt = new Map();
+    for (let i = 0; i < mesh.count; i += 1) {
+      const key = `${Math.floor(at[i * 2] / size)}:${Math.floor(at[i * 2 + 1] / size)}`;
+      let list = attempt.get(key);
+      if (!list) attempt.set(key, list = []);
+      list.push(i);
+    }
+    if (mesh.count / attempt.size >= INSTANCED_TILE_MIN) { byTile = attempt; break; }
+  }
+  if (!byTile || byTile.size < 2) return null;
+  const colour = new THREE.Color();
+  const pieces = [];
+  for (const ids of byTile.values()) {
+    const piece = new THREE.InstancedMesh(mesh.geometry, mesh.material, ids.length);
+    ids.forEach((i, j) => {
+      mesh.getMatrixAt(i, m);
+      piece.setMatrixAt(j, m);
+      if (mesh.instanceColor) { mesh.getColorAt(i, colour); piece.setColorAt(j, colour); }
+    });
+    piece.instanceMatrix.needsUpdate = true;
+    if (piece.instanceColor) piece.instanceColor.needsUpdate = true;
+    inheritMesh(piece, mesh);
+    piece.computeBoundingSphere();
+    pieces.push(piece);
+  }
+  return pieces;
 }
 
 function offsetWay(points, metres) {
@@ -7018,9 +7315,72 @@ function rotatedBoxPart(group, x, y, z, w, h, d, color, roughness = 0.82, rotati
   return mesh;
 }
 
+//: The small canvases the planes carry -- a shopfront, a sign, a price board -- packed into
+//: shared atlases. A shopfront's canvas is keyed by its trade, its variant and the frame's
+//: colour, and the frame takes the building's tint: nine hundred and fifty shopfronts were
+//: nine hundred distinct textures, so nine hundred draw calls, for a few thousand triangles.
+//: Drawn into atlases of PLANE_ATLAS_PX a side, one family per canvas size, and the plane's
+//: UVs moved to its cell, they share a material per atlas: nine draw calls. A canvas that
+//: repeats across its plane cannot be atlased and is left as it is.
+const PLANE_ATLAS_PX = 2048;
+//: A gutter round each cell, filled with the cell's own edge, so that the mip levels do not
+//: blend one shopfront into its neighbour in the atlas.
+const PLANE_ATLAS_PAD = 4;
+const planeAtlases = new Map();
+const planeAtlasSlots = new Map();
+function atlasSlotFor(map) {
+  if (!map || !map.image) return null;
+  const image = map.image;
+  const w = Number(image.width) || 0, h = Number(image.height) || 0;
+  if (!w || !h || w > 512 || h > 512 || typeof image.getContext !== "function") return null;
+  if (map.wrapS === THREE.RepeatWrapping || map.wrapT === THREE.RepeatWrapping) return null;
+  if (map.repeat.x !== 1 || map.repeat.y !== 1 || map.offset.x !== 0 || map.offset.y !== 0) return null;
+  let slot = planeAtlasSlots.get(map.uuid);
+  if (slot) return slot;
+  const family = `${w}x${h}`;
+  let atlases = planeAtlases.get(family);
+  if (!atlases) planeAtlases.set(family, atlases = []);
+  const cellW = w + 2 * PLANE_ATLAS_PAD, cellH = h + 2 * PLANE_ATLAS_PAD;
+  const cols = Math.floor(PLANE_ATLAS_PX / cellW), rows = Math.floor(PLANE_ATLAS_PX / cellH);
+  if (!cols || !rows) return null;
+  let atlas = atlases[atlases.length - 1];
+  if (!atlas || atlas.used >= cols * rows) {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = PLANE_ATLAS_PX;
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = map.colorSpace;
+    texture.anisotropy = map.anisotropy;
+    atlas = { canvas, ctx: canvas.getContext("2d"), texture, used: 0 };
+    atlases.push(atlas);
+  }
+  const i = atlas.used++;
+  const x0 = (i % cols) * cellW, y0 = Math.floor(i / cols) * cellH;
+  const ctx = atlas.ctx;
+  // The gutter first, as the image's own edges stretched, then the image over the middle.
+  ctx.drawImage(image, 0, 0, w, 1, x0, y0, cellW, PLANE_ATLAS_PAD + 1);
+  ctx.drawImage(image, 0, h - 1, w, 1, x0, y0 + PLANE_ATLAS_PAD + h - 1, cellW, PLANE_ATLAS_PAD + 1);
+  ctx.drawImage(image, 0, 0, 1, h, x0, y0 + PLANE_ATLAS_PAD, PLANE_ATLAS_PAD + 1, h);
+  ctx.drawImage(image, w - 1, 0, 1, h, x0 + PLANE_ATLAS_PAD + w - 1, y0 + PLANE_ATLAS_PAD, PLANE_ATLAS_PAD + 1, h);
+  ctx.drawImage(image, x0 + PLANE_ATLAS_PAD, y0 + PLANE_ATLAS_PAD);
+  atlas.texture.needsUpdate = true;
+  // A canvas is drawn from the top down and a texture read from the bottom up.
+  slot = { texture: atlas.texture,
+           u0: (x0 + PLANE_ATLAS_PAD) / PLANE_ATLAS_PX, v0: 1 - (y0 + PLANE_ATLAS_PAD + h) / PLANE_ATLAS_PX,
+           su: w / PLANE_ATLAS_PX, sv: h / PLANE_ATLAS_PX };
+  planeAtlasSlots.set(map.uuid, slot);
+  return slot;
+}
+
 function planePart(group, x, y, z, w, h, map, rotationY = 0) {
+  const geometry = new THREE.PlaneGeometry(w, h);
+  const slot = atlasSlotFor(map);
+  if (slot) {
+    const uv = geometry.getAttribute("uv");
+    for (let i = 0; i < uv.count; i += 1) uv.setXY(i, slot.u0 + uv.getX(i) * slot.su, slot.v0 + uv.getY(i) * slot.sv);
+    map = slot.texture;
+  }
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, h),
+    geometry,
     new THREE.MeshStandardMaterial({
       map, color: 0xffffff, transparent: true, alphaTest: 0.22,
       roughness: 0.62, metalness: 0.04, side: THREE.DoubleSide,
@@ -8560,7 +8920,12 @@ function emitRoofParts() {
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.kind = "roof";
-    groups.mapped3d.add(mesh);
+    mesh.userData.surface = "roof_furniture";
+    // Twelve boxes a planter, thirteen thousand planters: a million and a quarter triangles
+    // that nobody sees from the street. Tiled, so that the distance cull can drop them.
+    const pieces = tileInstanced(mesh);
+    if (pieces) pieces.forEach((piece) => groups.mapped3d.add(piece));
+    else groups.mapped3d.add(mesh);
   }
   ROOF_PARTS.clear();
 }
@@ -10017,7 +10382,9 @@ const DRAW_ORDER = DATA.ways.slice().sort((a, b) => {
     : (w.kind === "sidewalk" || w.kind === "path" ? 0 : 1);
   return rank(a) - rank(b);
 });
+let builtWays = 0;
 for (const way of DRAW_ORDER) {
+ if ((++builtWays & 31) === 0) await maybeYield(`Building the streets: ${Math.round(100 * builtWays / DRAW_ORDER.length)}%`);
  WAY_LIFT = way.kind === "street" && wayFollowsCut(way) ? cutLiftAt
    : way.kind === "crossing" && way.points && way.points.length >= 2 ? lineLiftFor(way.points) : null;
  if (way.kind === "beach") {
@@ -11935,7 +12302,8 @@ function buildCourts(ground) {
   }
 
   buildCourts(ground);
-  liftOntoGround(groups.ground);
+  tileGroup(groups.ground);
+  await liftOntoGroundAsync(groups.ground, "Standing the ground cover on the hill");
   // The ground is down; now the things that stand on it.
   if (groups.furniture.visible) ensureLazyLayer("furniture");
 })();
@@ -12048,7 +12416,7 @@ function dropKerbsAtDriveways(ways) {
 // down to sea level -- a crater at each garage, eighty metres deep on Nob Hill.
 const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
 // Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
-liftOntoGround(groups.streets);
+await liftOntoGroundAsync(groups.streets, "Standing the streets on the ground");
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
@@ -13008,6 +13376,7 @@ function renderStreetFurniture(furniture) {
       + `${Number(placed.bus_zone_paint || 0).toLocaleString()} transit zones painted.`;
     note.userData = placed;
   }
+  tileGroup(groups.furniture);
 }
 
 registerLazyLayer("furniture", async () => {
@@ -13638,7 +14007,7 @@ function groundAt(clientX, clientY) {
   // The ground is the terrain where there is one -- a click on Russian Hill lands on the
   // hill, not on the sea-level plane under it -- and the flat plane elsewhere.
   if (terrainMesh) {
-    const hits = ray.intersectObject(terrainMesh, false);
+    const hits = ray.intersectObjects(terrainTiles, false);
     if (hits.length) {
       const hit = hits[0].point.clone();
       hit.y += TERRAIN_MESH_UNDER_M;
@@ -13770,10 +14139,99 @@ function stepAvatar(now) {
   placeCamera();
 }
 
+//: The resolution is set by the frame time, measured, not by what the GPU is called. The first
+//: FRAME_SAMPLE frames after loading are timed; if their median is over the budget and the
+//: canvas is drawn at more than one device pixel per CSS pixel, the ratio is halved and the
+//: sample taken again. A Retina display at 2x is four times the pixels of 1x; a laptop that
+//: cannot fill them in forty milliseconds gets a sharp-enough picture that moves instead.
+const FRAME_BUDGET_MS = 40;
+const FRAME_SAMPLE = 90;
+let frameSamples = [];
+let lastFrameAt = 0;
+function adaptResolution(now) {
+  if (!frameSamples) return;
+  const dt = lastFrameAt ? now - lastFrameAt : 0;
+  lastFrameAt = now;
+  // The first frame, and a frame after the tab was hidden, measure nothing.
+  if (dt <= 0 || dt > 1000) return;
+  frameSamples.push(dt);
+  if (frameSamples.length < FRAME_SAMPLE) return;
+  const sorted = frameSamples.slice().sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  const ratio = renderer.getPixelRatio();
+  if (median > FRAME_BUDGET_MS && ratio > 1) {
+    const next = Math.max(1, ratio / 2);
+    renderer.setPixelRatio(next);
+    resize();
+    console.info(`kerbside: median frame ${median.toFixed(0)} ms at ${ratio}x over ${FRAME_SAMPLE} frames; drawing at ${next}x`);
+    frameSamples = [];
+    return;
+  }
+  console.info(`kerbside: median frame ${median.toFixed(0)} ms at ${ratio}x over ${FRAME_SAMPLE} frames`);
+  frameSamples = null;
+}
+window.kerbsideFrameStats = () => ({ samples: frameSamples ? frameSamples.length : null, pixelRatio: renderer.getPixelRatio() });
+
+//: How far a fine surface is drawn from the camera, by its class. A kerb is twelve centimetres
+//: tall and a lane line ten wide: past a few hundred metres neither covers a pixel, and at eye
+//: level the blocks in between hide them anyway -- but the frustum test cannot know that, and
+//: a first-person view down the Embarcadero drew every kerb to the far end of the corridor.
+//: Culled by distance a tile at a time, on top of the frustum, scaled by the zoom. Surfaces
+//: not listed -- the roadway, the pavement, the buildings, the ground -- are drawn to the fog.
+const DETAIL_RANGE_M = {
+  kerb: 500, marking: 400, crossing_edges: 400, crossing: 700, walk_underlay: 600, footprint: 600,
+  wall: 800, front_walk: 700, tree_pit: 400, "tree:street": 1200, "tree:broad": 1500, "tree:columnar": 1200,
+  "furniture:post": 500, "furniture:sign_plate": 400, "furniture:sign_back": 400, "furniture:bike_rack": 300,
+  "furniture:shelter": 900, "furniture:curb_zone": 500, "furniture:bus_zone": 700, sign: 400, detail: 700,
+  roof_furniture: 600,
+};
+let detailTiles = [];
+let detailTilesFrame = 0;
+const DETAIL_REINDEX_FRAMES = 60;
+const detailCentre = new THREE.Vector3();
+function cullDetailByDistance(frame, eye = camera) {
+  // The ground and the furniture arrive after the first frame: the list is rebuilt now and then.
+  if (frame % DETAIL_REINDEX_FRAMES === 0) {
+    detailTiles = [];
+    root.traverse((o) => {
+      if (o.isMesh && o.frustumCulled && o.geometry && o.geometry.boundingSphere
+          && DETAIL_RANGE_M[o.userData.surface] !== undefined) detailTiles.push(o);
+    });
+  }
+  const zoom = FIRST_PERSON_FOV / eye.fov;
+  for (const tile of detailTiles) {
+    const sphere = tile.geometry.boundingSphere;
+    detailCentre.copy(sphere.center).applyMatrix4(tile.matrixWorld);
+    const gap = eye.position.distanceTo(detailCentre) - sphere.radius;
+    tile.visible = gap < DETAIL_RANGE_M[tile.userData.surface] * zoom;
+  }
+}
+let frameCount = 0;
+
 function animate(now) {
   requestAnimationFrame(animate);
+  // The first frame drawn is the end of loading.
+  const progress = document.getElementById("progress");
+  if (progress && !progress.hidden) progress.hidden = true;
   stepAvatar(now || performance.now());
+  cullDetailByDistance(frameCount++);
   renderer.render(scene, camera);
+  adaptResolution(now || performance.now());
+}
+{
+  // What was built, for anyone reading the console: the merge's parts and meshes, the triangles
+  // by group, the time. Measured on this machine; the same page on another will differ.
+  const byGroup = {};
+  for (const [name, group] of Object.entries(groups)) {
+    let triangles = 0;
+    group.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const count = o.geometry.index ? o.geometry.index.count : (o.geometry.getAttribute("position") || { count: 0 }).count;
+      triangles += Math.floor(count / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    if (triangles) byGroup[name] = `${(triangles / 1e6).toFixed(2)}M`;
+  }
+  console.info(`kerbside: built in ${(performance.now() / 1000).toFixed(1)} s; merged ${mergeStats.parts.toLocaleString()} parts into ${mergeStats.meshes.toLocaleString()} tiled meshes; triangles by group`, byGroup);
 }
 animate();
 
@@ -13791,7 +14249,7 @@ window.kerbside = {
   scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
   tunnelFloorAt, walkerGroundAt, tunnelBores, terrainHeightAt, groundLiftAt, TERRAIN,
   cutLiftAt, approachRoadAt, wayFollowsCut, APPROACH_CUTS, junctionBoxHulls,
-  goTo, setFirstPerson, placeCamera, state, avatar,
+  goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats,
   xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
@@ -13861,10 +14319,14 @@ window.kerbside = {
     if (!this._shotEnvironment) this._shotEnvironment = skyEnvironment(this._shot, SKY);
     const environment = scene.environment;
     scene.environment = this._shotEnvironment;
+    // The fine surfaces are culled by distance from the map's camera; the photograph is taken
+    // from its own, so they are culled for it, and put back for the map's next frame.
+    cullDetailByDistance(0, cam);
     try {
       this._shot.render(scene, cam);
     } finally {
       scene.environment = environment;
+      cullDetailByDistance(0);
     }
     return this._shot.domElement.toDataURL("image/jpeg", quality);
   },
