@@ -1,0 +1,88 @@
+{
+ "source": "USGS 3DEP CA_SantaClaraCounty_2020 ground returns (class 2), via Entwine",
+ "region": "san-jose-downtown",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
+ "frame": {
+  "mid_lon": -121.89,
+  "mid_lat": 37.335,
+  "metres_per_lon": 88510.88323814009,
+  "metres_per_lat": 111320.0,
+  "x0": -1447.663,
+  "y0": -1233.2,
+  "step_m": 2.0,
+  "cols": 1448,
+  "rows": 1234,
+  "base_m": 13.42,
+  "nodata": -32768,
+  "dtype": "int16-le-cm"
+ },
+ "cells_with_ground": 1272312,
+ "cells_filled": 514520,
+ "cells_no_data": 0,
+ "cells_filled_far": 54393,
+ "tiles": 195,
+ "height_range_m": [
+  14.42,
+  38.9
+ ],
+ "accuracy": {
+  "held_out_points": 1708176,
+  "all": {
+   "n": 1708176,
+   "rmse_m": 0.167,
+   "mae_m": 0.043,
+   "bias_m": 0.0,
+   "median_abs_m": 0.014,
+   "p90_abs_m": 0.071,
+   "p99_abs_m": 0.573
+  },
+  "roadway": {
+   "n": 431691,
+   "rmse_m": 0.054,
+   "mae_m": 0.017,
+   "bias_m": 0.001,
+   "median_abs_m": 0.01,
+   "p90_abs_m": 0.029,
+   "p99_abs_m": 0.152
+  },
+  "off_roadway": {
+   "n": 1276485,
+   "rmse_m": 0.19,
+   "mae_m": 0.052,
+   "bias_m": 0.0,
+   "median_abs_m": 0.015,
+   "p90_abs_m": 0.092,
+   "p99_abs_m": 0.655
+  },
+  "by_slope": {
+   "under_5pct": {
+    "n": 1277312,
+    "rmse_m": 0.063,
+    "mae_m": 0.021,
+    "bias_m": 0.0,
+    "median_abs_m": 0.011,
+    "p90_abs_m": 0.039,
+    "p99_abs_m": 0.204
+   },
+   "5_to_15pct": {
+    "n": 305783,
+    "rmse_m": 0.15,
+    "mae_m": 0.051,
+    "bias_m": -0.001,
+    "median_abs_m": 0.021,
+    "p90_abs_m": 0.106,
+    "p99_abs_m": 0.46
+   },
+   "over_15pct": {
+    "n": 125081,
+    "rmse_m": 0.533,
+    "mae_m": 0.251,
+    "bias_m": 0.0,
+    "median_abs_m": 0.099,
+    "p90_abs_m": 0.606,
+    "p99_abs_m": 2.322
+   }
+  }
+ }
+}

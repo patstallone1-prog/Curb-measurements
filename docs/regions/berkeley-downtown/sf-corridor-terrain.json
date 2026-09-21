@@ -1,0 +1,88 @@
+{
+ "source": "USGS 3DEP CA_AlamedaCo_3_2021 ground returns (class 2), via Entwine",
+ "region": "berkeley-downtown",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
+ "frame": {
+  "mid_lon": -122.265,
+  "mid_lat": 37.8725,
+  "metres_per_lon": 87873.65131823608,
+  "metres_per_lat": 111320.0,
+  "x0": -998.737,
+  "y0": -954.9,
+  "step_m": 2.0,
+  "cols": 999,
+  "rows": 955,
+  "base_m": 36.003,
+  "nodata": -32768,
+  "dtype": "int16-le-cm"
+ },
+ "cells_with_ground": 577348,
+ "cells_filled": 376697,
+ "cells_no_data": 0,
+ "cells_filled_far": 22481,
+ "tiles": 100,
+ "height_range_m": [
+  37.0,
+  293.59
+ ],
+ "accuracy": {
+  "held_out_points": 87539,
+  "all": {
+   "n": 87539,
+   "rmse_m": 0.472,
+   "mae_m": 0.108,
+   "bias_m": -0.0,
+   "median_abs_m": 0.022,
+   "p90_abs_m": 0.144,
+   "p99_abs_m": 1.919
+  },
+  "roadway": {
+   "n": 15403,
+   "rmse_m": 0.108,
+   "mae_m": 0.033,
+   "bias_m": -0.001,
+   "median_abs_m": 0.014,
+   "p90_abs_m": 0.053,
+   "p99_abs_m": 0.445
+  },
+  "off_roadway": {
+   "n": 72136,
+   "rmse_m": 0.518,
+   "mae_m": 0.124,
+   "bias_m": -0.0,
+   "median_abs_m": 0.025,
+   "p90_abs_m": 0.172,
+   "p99_abs_m": 2.23
+  },
+  "by_slope": {
+   "under_5pct": {
+    "n": 42074,
+    "rmse_m": 0.053,
+    "mae_m": 0.024,
+    "bias_m": -0.0,
+    "median_abs_m": 0.014,
+    "p90_abs_m": 0.052,
+    "p99_abs_m": 0.128
+   },
+   "5_to_15pct": {
+    "n": 26908,
+    "rmse_m": 0.153,
+    "mae_m": 0.048,
+    "bias_m": 0.0,
+    "median_abs_m": 0.025,
+    "p90_abs_m": 0.091,
+    "p99_abs_m": 0.35
+   },
+   "over_15pct": {
+    "n": 18557,
+    "rmse_m": 1.006,
+    "mae_m": 0.388,
+    "bias_m": -0.002,
+    "median_abs_m": 0.095,
+    "p90_abs_m": 0.95,
+    "p99_abs_m": 4.85
+   }
+  }
+ }
+}

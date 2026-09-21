@@ -1,0 +1,88 @@
+{
+ "source": "USGS 3DEP CA_SanFrancisco_1_B23 ground returns (class 2), via Entwine",
+ "region": "sf-mission",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
+ "frame": {
+  "mid_lon": -122.41624999999999,
+  "mid_lat": 37.759,
+  "metres_per_lon": 88008.85696784695,
+  "metres_per_lat": 111320.0,
+  "x0": -1110.1,
+  "y0": -1344.52,
+  "step_m": 2.0,
+  "cols": 1111,
+  "rows": 1345,
+  "base_m": 3.354,
+  "nodata": -32768,
+  "dtype": "int16-le-cm"
+ },
+ "cells_with_ground": 350622,
+ "cells_filled": 292748,
+ "cells_no_data": 850925,
+ "cells_filled_far": 99999,
+ "tiles": 56,
+ "height_range_m": [
+  4.35,
+  94.23
+ ],
+ "accuracy": {
+  "held_out_points": 987159,
+  "all": {
+   "n": 987159,
+   "rmse_m": 0.21,
+   "mae_m": 0.051,
+   "bias_m": 0.0,
+   "median_abs_m": 0.013,
+   "p90_abs_m": 0.075,
+   "p99_abs_m": 0.839
+  },
+  "roadway": {
+   "n": 306885,
+   "rmse_m": 0.039,
+   "mae_m": 0.016,
+   "bias_m": -0.001,
+   "median_abs_m": 0.01,
+   "p90_abs_m": 0.032,
+   "p99_abs_m": 0.109
+  },
+  "off_roadway": {
+   "n": 680274,
+   "rmse_m": 0.251,
+   "mae_m": 0.067,
+   "bias_m": 0.001,
+   "median_abs_m": 0.016,
+   "p90_abs_m": 0.103,
+   "p99_abs_m": 1.055
+  },
+  "by_slope": {
+   "under_5pct": {
+    "n": 550964,
+    "rmse_m": 0.051,
+    "mae_m": 0.019,
+    "bias_m": 0.001,
+    "median_abs_m": 0.011,
+    "p90_abs_m": 0.039,
+    "p99_abs_m": 0.113
+   },
+   "5_to_15pct": {
+    "n": 319187,
+    "rmse_m": 0.164,
+    "mae_m": 0.043,
+    "bias_m": -0.0,
+    "median_abs_m": 0.015,
+    "p90_abs_m": 0.077,
+    "p99_abs_m": 0.531
+   },
+   "over_15pct": {
+    "n": 117008,
+    "rmse_m": 0.533,
+    "mae_m": 0.225,
+    "bias_m": -0.0,
+    "median_abs_m": 0.054,
+    "p90_abs_m": 0.615,
+    "p99_abs_m": 2.765
+   }
+  }
+ }
+}

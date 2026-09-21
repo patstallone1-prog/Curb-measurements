@@ -1,0 +1,223 @@
+{
+ "regions": [
+  {
+   "name": "sf-corridor",
+   "title": "San Francisco: Marina to the Financial District",
+   "path": "sf-corridor-3d.html",
+   "built": true,
+   "note": "The corridor: the city's kerb lines, the footway survey, the lidar."
+  },
+  {
+   "name": "sf-mission",
+   "title": "Mission District",
+   "path": "regions/sf-mission/sf-corridor-3d.html",
+   "built": true,
+   "city": "san-francisco",
+   "description": "Mission District: flat grid, dense storefronts, painted facades, heavy imagery",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "done",
+    "official": "done",
+    "build": "done",
+    "audit": "done",
+    "lidar": "running"
+   },
+   "built_at": "2026-09-20T05:34:13Z",
+   "active": {},
+   "note": "built from the map alone"
+  },
+  {
+   "name": "sf-soma",
+   "title": "South of Market",
+   "path": "regions/sf-soma/sf-corridor-3d.html",
+   "built": false,
+   "city": "san-francisco",
+   "description": "South of Market: wide one-way arterials, warehouses, new towers, freeway ramps",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "failed"
+   },
+   "active": {},
+   "note": "built from the map alone"
+  },
+  {
+   "name": "sf-haight-castro",
+   "title": "Haight, Duboce, Castro",
+   "path": "regions/sf-haight-castro/sf-corridor-3d.html",
+   "built": true,
+   "city": "san-francisco",
+   "description": "Haight, Duboce, Castro: Victorians, hills, Muni tunnel portals",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "done",
+    "official": "done",
+    "build": "done",
+    "audit": "done",
+    "lidar": "done"
+   },
+   "built_at": "2026-09-20T17:38:50Z",
+   "active": {},
+   "note": "built from the map alone"
+  },
+  {
+   "name": "sf-richmond",
+   "title": "Inner and Central Richmond",
+   "path": "regions/sf-richmond/sf-corridor-3d.html",
+   "built": false,
+   "city": "san-francisco",
+   "description": "Inner and Central Richmond: the avenues, Geary, fog, few tall buildings",
+   "stages": {
+    "discover": "done",
+    "osm": "failed"
+   },
+   "active": {},
+   "note": "built from the map alone"
+  },
+  {
+   "name": "sf-sunset",
+   "title": "Sunset",
+   "path": "regions/sf-sunset/sf-corridor-3d.html",
+   "built": true,
+   "city": "san-francisco",
+   "description": "Sunset: rows of near-identical houses, the L Taraval, wide flat avenues",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "done",
+    "official": "done",
+    "build": "done",
+    "audit": "done"
+   },
+   "built_at": "2026-09-20T19:34:43Z",
+   "active": {},
+   "note": "built from the map alone"
+  },
+  {
+   "name": "oakland-downtown",
+   "title": "Downtown Oakland, Broadway, Lake Merritt's west shore",
+   "path": "regions/oakland-downtown/sf-corridor-3d.html",
+   "built": true,
+   "city": "oakland",
+   "description": "Downtown Oakland, Broadway, Lake Merritt's west shore: the first region outside San Francisco",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "done",
+    "official": "done",
+    "lidar": "done",
+    "build": "done",
+    "audit": "done"
+   },
+   "built_at": "2026-09-21T14:57:45Z",
+   "active": {
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
+    "building_height": "lidar",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "none",
+    "lanes": "osm+priors"
+   },
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
+  },
+  {
+   "name": "berkeley-downtown",
+   "title": "Downtown Berkeley and the campus edge",
+   "path": "regions/berkeley-downtown/sf-corridor-3d.html",
+   "built": true,
+   "city": "berkeley",
+   "description": "Downtown Berkeley and the campus edge: Shattuck, Telegraph, protected bike lanes",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "imagery": "done",
+    "official": "done",
+    "terrain": "done",
+    "lidar": "done",
+    "build": "done",
+    "audit": "done"
+   },
+   "built_at": "2026-09-21T03:52:30Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "lidar",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "none",
+    "lanes": "osm+priors"
+   },
+   "note": "building_height from lidar; terrain from lidar"
+  },
+  {
+   "name": "palo-alto-downtown",
+   "title": "University Avenue and the streets either side",
+   "path": "regions/palo-alto-downtown/sf-corridor-3d.html",
+   "built": true,
+   "city": "palo-alto",
+   "description": "University Avenue and the streets either side: low, leafy, angled parking",
+   "stages": {
+    "osm": "done",
+    "imagery": "done",
+    "official": "done",
+    "discover": "done",
+    "terrain": "done",
+    "lidar": "done",
+    "build": "done",
+    "audit": "done"
+   },
+   "built_at": "2026-09-21T04:37:48Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "lidar",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "none",
+    "lanes": "osm+priors"
+   },
+   "note": "building_height from lidar; terrain from lidar"
+  },
+  {
+   "name": "san-jose-downtown",
+   "title": "Downtown San Jose",
+   "path": "regions/san-jose-downtown/sf-corridor-3d.html",
+   "built": true,
+   "city": "san-jose",
+   "description": "Downtown San Jose: light rail in the street, big blocks, the SAP Center",
+   "stages": {
+    "discover": "done",
+    "osm": "done",
+    "terrain": "done",
+    "imagery": "done",
+    "official": "done",
+    "build": "done",
+    "audit": "done",
+    "lidar": "done"
+   },
+   "built_at": "2026-09-20T21:49:22Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "none",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "none",
+    "lanes": "osm+priors"
+   },
+   "note": "terrain from lidar"
+  }
+ ]
+}

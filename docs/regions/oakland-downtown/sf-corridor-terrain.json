@@ -1,0 +1,88 @@
+{
+ "source": "USGS 3DEP CA_AlamedaCo_2_2021 ground returns (class 2), via Entwine",
+ "region": "oakland-downtown",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
+ "frame": {
+  "mid_lon": -122.27250000000001,
+  "mid_lat": 37.805,
+  "metres_per_lon": 87954.1015555659,
+  "metres_per_lat": 111320.0,
+  "x0": -1219.426,
+  "y0": -1233.2,
+  "step_m": 2.0,
+  "cols": 1220,
+  "rows": 1234,
+  "base_m": -2.558,
+  "nodata": -32768,
+  "dtype": "int16-le-cm"
+ },
+ "cells_with_ground": 884661,
+ "cells_filled": 523435,
+ "cells_no_data": 97384,
+ "cells_filled_far": 167392,
+ "tiles": 168,
+ "height_range_m": [
+  -1.56,
+  33.03
+ ],
+ "accuracy": {
+  "held_out_points": 729638,
+  "all": {
+   "n": 729638,
+   "rmse_m": 0.546,
+   "mae_m": 0.121,
+   "bias_m": -0.001,
+   "median_abs_m": 0.011,
+   "p90_abs_m": 0.126,
+   "p99_abs_m": 2.735
+  },
+  "roadway": {
+   "n": 200538,
+   "rmse_m": 0.041,
+   "mae_m": 0.011,
+   "bias_m": -0.001,
+   "median_abs_m": 0.007,
+   "p90_abs_m": 0.019,
+   "p99_abs_m": 0.078
+  },
+  "off_roadway": {
+   "n": 529100,
+   "rmse_m": 0.641,
+   "mae_m": 0.163,
+   "bias_m": -0.001,
+   "median_abs_m": 0.014,
+   "p90_abs_m": 0.256,
+   "p99_abs_m": 3.274
+  },
+  "by_slope": {
+   "under_5pct": {
+    "n": 529719,
+    "rmse_m": 0.103,
+    "mae_m": 0.022,
+    "bias_m": 0.0,
+    "median_abs_m": 0.008,
+    "p90_abs_m": 0.037,
+    "p99_abs_m": 0.259
+   },
+   "5_to_15pct": {
+    "n": 120339,
+    "rmse_m": 0.29,
+    "mae_m": 0.07,
+    "bias_m": -0.0,
+    "median_abs_m": 0.018,
+    "p90_abs_m": 0.106,
+    "p99_abs_m": 1.262
+   },
+   "over_15pct": {
+    "n": 79580,
+    "rmse_m": 1.593,
+    "mae_m": 0.86,
+    "bias_m": -0.007,
+    "median_abs_m": 0.315,
+    "p90_abs_m": 2.434,
+    "p99_abs_m": 6.629
+   }
+  }
+ }
+}
