@@ -4,7 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta name="kerbside-assets" content="" />
-<title>Kerbside Downtown San Jose: light rail in the street, big blocks, the SAP Center 3D</title>
+<meta name="kerbside-regions" content="../../regions.json" />
+<title>Kerbside Downtown San Jose 3D</title>
 <style>
 :root { color-scheme: dark; --bg:#071013; --panel:#10191e; --line:#274048; --ink:#edf5f5; --muted:#8fa4a6; --pink:#ff4d8f; --green:#4fbe86; --amber:#e0a84e; --cyan:#54c8e8; }
 * { box-sizing: border-box; }
@@ -16,6 +17,7 @@ body { margin:0; background:var(--bg); color:var(--ink); font-family:Inter, ui-s
 .hud .panel { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:2px; }
 .hud[data-open="false"] .panel { flex:0 0 auto; padding:12px 16px; }
 #find { width:100%; padding:9px 10px; border-radius:7px; border:1px solid var(--line);
+#region { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.06); color:#e8eef2; font-size:13px; }
         background:rgba(7,16,19,.75); color:var(--ink); font:inherit; }
 #find::placeholder { color:var(--muted); }
 #hits { list-style:none; margin:6px 0 0; padding:0; max-height:190px; overflow:auto; }
@@ -65,13 +67,18 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
 <div class="hud" id="hud" data-open="true">
   <div class="panel">
     <div class="bar">
-      <h1>Kerbside Downtown San Jose: light rail in the street, big blocks, the SAP Center 3D</h1>
+      <h1>Kerbside Downtown San Jose 3D</h1>
       <button id="fold" aria-expanded="true" aria-controls="hud" title="Collapse">&minus;</button>
     </div>
     <div class="collapsible">
+    <div class="group" id="regiongroup" style="margin-top:4px" hidden>
+      <h2>Region</h2>
+      <select id="region" aria-label="Region"></select>
+      <div class="sub" id="regionnote"></div>
+    </div>
     <div class="group" style="margin-top:4px">
       <h2>Go to a corner or address</h2>
-      <input id="find" type="search" autocomplete="off" placeholder="Columbus &amp; Broadway, or 600 Montgomery" />
+      <input id="find" type="search" autocomplete="off" placeholder="Almaden Avenue &amp; Autumn Court, or an address" />
       <ul id="hits"></ul>
     </div>
     <div class="meta">
@@ -181,6 +188,42 @@ document.getElementById("detailnote").textContent = DETAIL_MANIFEST.shards.lengt
   ? `Full source detail — ${(detailBytes / 1e6).toFixed(1)} MB in two lossless archive shards; the nearby half loads automatically when you inspect a feature.`
   : "Full source detail is unavailable in this build; render geometry remains complete.";
 
+// The other regions this site has built, from an index build_pages.py writes beside the
+// site's root (tools/build_pages.py: regions.json). The page in a region's own folder is told
+// where that index is by the meta tag; without one, or where it is missing, the switcher stays
+// hidden and the page is the one region it was built for.
+(async () => {
+  const meta = document.querySelector('meta[name="kerbside-regions"]');
+  const index = meta && meta.content;
+  if (!index) return;
+  let regions;
+  try {
+    const response = await fetch(index, { cache: "no-cache" });
+    if (!response.ok) return;
+    regions = await response.json();
+  } catch (err) {
+    return;
+  }
+  const list = (regions && regions.regions) || [];
+  if (list.length < 2) return;
+  const select = document.getElementById("region");
+  const group = document.getElementById("regiongroup");
+  const here = location.pathname.replace(/\/[^/]*$/, "/");
+  const root = index.replace(/regions\.json$/, "");
+  for (const region of list) {
+    const option = document.createElement("option");
+    option.value = new URL(root + region.path, location.href).pathname;
+    option.textContent = `${region.title}${region.built ? "" : " (not built)"}`;
+    option.disabled = !region.built;
+    if (option.value.replace(/[^/]*$/, "") === here) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => { location.href = select.value; });
+  const current = list.find((r) => new URL(root + r.path, location.href).pathname.replace(/[^/]*$/, "") === here);
+  document.getElementById("regionnote").textContent = current && current.note ? current.note : "";
+  group.hidden = false;
+})();
+
 const canvas = document.getElementById("scene");
 // A logarithmic depth buffer, because this scene spans five orders of magnitude: a 126 mm kerb
 // has to stay distinct from the road it sits on while a two-kilometre corridor is on screen. With
@@ -256,10 +299,17 @@ for (const off of ["coverage", "observations", "sequences", "gaps", "kerbs", "ch
 Object.values(groups).forEach((g) => root.add(g));
 
 const lazyLayerBuilders = new Map();
+//: A layer asked for before it is registered. The build yields to the browser now, so the
+//: ground, which arrives by fetch, can finish and ask for the furniture that stands on it
+//: while the script is still laying streets and has not reached the furniture's registration.
+//: Asked for early, a layer is built the moment it is registered; dropped, it never was.
+const lazyLayersWanted = new Set();
 function registerLazyLayer(layer, builder) {
   lazyLayerBuilders.set(layer, { builder, promise: null });
+  if (lazyLayersWanted.has(layer)) ensureLazyLayer(layer);
 }
 function ensureLazyLayer(layer) {
+  lazyLayersWanted.add(layer);
   const entry = lazyLayerBuilders.get(layer);
   if (!entry || entry.promise) return;
   entry.promise = Promise.resolve()
@@ -284,7 +334,23 @@ function xy(lon, lat) { return [(lon - midLon) * metersPerLon, (lat - midLat) * 
 // there: the merged street surfaces vertex by vertex, a building at the lowest corner of its
 // footprint, a tree or a post at its foot, the walker at each step, the camera where it lands.
 const TERRAIN_FRAME = TERRAIN ? TERRAIN.meta.frame : null;
-//: Where the terrain has no data (outside the lidar, under the bay) the ground is flat at 0.
+// ---- the sea ------------------------------------------------------------------------------
+//
+//: The height of the water's surface, measured: the median of the grid's returns off the water
+//: (smc.terrain.waterline writes it into the grid's metadata, and set every cell inside the
+//: map's water polygons to it). Ground at or under the surface, plus a margin for the returns'
+//: own spread, is water: the backdrop is drawn as sea there, at SEA_Y, and nothing stands on it.
+const SEA_SURFACE_M = (TERRAIN && TERRAIN.meta.waterline && TERRAIN.meta.waterline.surface_m !== null
+  && TERRAIN.meta.waterline.surface_m !== undefined) ? TERRAIN.meta.waterline.surface_m : -0.14;
+//: The returns off the water spread a quarter of a metre either side of the surface.
+const WATERLINE_M = SEA_SURFACE_M + 0.45;
+//: Where the sea is drawn: a hand above the returns, so that no water-surface return shows
+//: through the sea as a grey fleck.
+const SEA_Y = SEA_SURFACE_M + 0.12;
+//: Over open water with no returns at all -- outside the lidar, the middle of the bay -- the
+//: ground is a low quay's height above the sea, so that a pier drawn there stands out of it.
+const OPEN_WATER_GROUND_M = SEA_SURFACE_M + 0.6;
+//: Where the terrain has no data (outside the lidar, under the bay) the ground is the sea's.
 function terrainHeightAt(x, z) {
   if (!TERRAIN_FRAME) return 0;
   const f = TERRAIN_FRAME;
@@ -301,7 +367,7 @@ function terrainHeightAt(x, z) {
   // outside the surveyed ground.
   const vals = [v00, v10, v01, v11];
   const good = vals.filter((v) => v !== f.nodata);
-  if (!good.length) return 0;
+  if (!good.length) return OPEN_WATER_GROUND_M;
   const fill = good[0];
   const g = vals.map((v) => (v === f.nodata ? fill : v));
   const cm = g[0] * (1 - tx) * (1 - ty) + g[1] * tx * (1 - ty) + g[2] * (1 - tx) * ty + g[3] * tx * ty;
@@ -414,11 +480,37 @@ function groundBaseFor(points) {
 //: The build hands the browser a frame every so often. Without that the whole corridor was one
 //: synchronous run of half a minute or more, which on a phone is "Page unresponsive" and a
 //: kill; with it the same work takes a little longer and shows its progress.
-const YIELD_EVERY_WAYS = 200;
+//: How long the build may hold the thread before it hands a frame back. Long enough that
+//: the yields themselves cost little (a frame is sixteen milliseconds), short enough that the
+//: page scrolls and the progress reads.
+const YIELD_BUDGET_MS = 60;
+let lastYieldAt = performance.now();
 function yieldFrame(progress) {
   const box = document.getElementById("progress");
   if (box && progress !== undefined) { box.textContent = progress; box.hidden = false; }
-  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  lastYieldAt = performance.now();
+  // A frame when the browser gives one; a timer when it does not. In a hidden tab neither is
+  // any good -- requestAnimationFrame never fires and a timer is held to once a second, which
+  // made a build of five hundred yields a build of eight minutes for anyone who opened the
+  // page and looked at another tab -- so there the yield is a message to itself, which the
+  // browser delivers at once and which still lets the event loop turn.
+  return new Promise((resolve) => {
+    let settled = false;
+    const go = () => { if (!settled) { settled = true; resolve(); } };
+    if (typeof document !== "undefined" && document.hidden) { yieldWaiters.push(go); yieldChannel.port2.postMessage(0); return; }
+    requestAnimationFrame(() => setTimeout(go, 0));
+    setTimeout(go, 50);
+  });
+}
+const yieldChannel = new MessageChannel();
+const yieldWaiters = [];
+yieldChannel.port1.onmessage = () => { const go = yieldWaiters.shift(); if (go) go(); };
+// An open port keeps Node's event loop alive, and the page smoke test runs this page in Node.
+if (typeof yieldChannel.port1.unref === "function") yieldChannel.port1.unref();
+//: Yield only when the budget is spent: the caller can ask on every iteration.
+function maybeYield(progress) {
+  if (performance.now() - lastYieldAt < YIELD_BUDGET_MS) return null;
+  return yieldFrame(progress);
 }
 //: The lift of the building being built. Its walls are lifted in their own geometry; the
 //: detail hung on them -- shopfronts, awnings, signs, roof furniture, the merged parts -- is
@@ -570,11 +662,15 @@ const depth = northY - southY;
 // a disc fifty kilometres wide has a very coarse depth gradient across a screen, and the water
 // came up through the streets in patches. Depth precision is the constraint here, not headroom:
 // there is a clear twenty-five centimetres before the roadway at 0.06.
-const BAY_Y = -0.16;
-const PENINSULA_Y = -0.14;
+//: The plate and the base plane stay under the sea; the bay and the map's water polygons
+//: are drawn at the sea's own surface (SEA_Y), so that they meet the backdrop's water.
+//: The land plate stands above the water, as land does: the apron eases the grid's edge down
+//: to it, and at -0.14 m -- under the measured surface -- the whole apron was drawn as sea.
+const PENINSULA_Y = WATERLINE_M + 0.3;
 const LAND_Y = -0.12;
-const WATER_Y = -0.05;
-const BEACH_Y = -0.02;
+const BAY_Y = SEA_Y - 0.05;
+const WATER_Y = SEA_Y + 0.01;
+const BEACH_Y = SEA_Y + 0.03;
 
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(width, depth, 1, 1),
@@ -599,42 +695,108 @@ root.add(ground);
 // camera has something to land on. It is coarser than the height grid the surfaces are
 // lifted by -- one vertex every TERRAIN_MESH_STRIDE cells -- because it is the backdrop, not
 // the measurement; the measurement is in every lifted vertex.
+//: Every other cell: a four-metre grid. At eight metres the backdrop's own chords rose through
+//: the pavement at every sharp grade break -- at the foot of Grenard Terrace by half a metre.
 const TERRAIN_MESH_STRIDE = 2;
 const TERRAIN_MESH_UNDER_M = 0.35;
-let terrainMesh = null;
-if (TERRAIN_FRAME) {
-  const f = TERRAIN_FRAME;
-  const cols = Math.floor((f.cols - 1) / TERRAIN_MESH_STRIDE) + 1;
-  const rows = Math.floor((f.rows - 1) / TERRAIN_MESH_STRIDE) + 1;
-  const position = new Float32Array(cols * rows * 3);
-  for (let r = 0; r < rows; r += 1) {
-    for (let c = 0; c < cols; c += 1) {
-      const x = f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
-      const north = f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
-      const i = (r * cols + c) * 3;
-      position[i] = x;
-      position[i + 1] = cutLiftAt(x, -north) - TERRAIN_MESH_UNDER_M;
-      position[i + 2] = -north;
+//: The backdrop is cut into tiles of this many mesh vertices a side, each culled on its own.
+//: As one mesh it was 1.8 million triangles that could never be culled, drawn under every
+//: view including a first-person one looking at a single block.
+const TERRAIN_TILE_VERTICES = 128;
+//: Beyond the grid the backdrop carries on: an apron this wide, at APRON_STEP_M, whose height
+//: eases from the grid's edge to the land plate's. Without it the box ended in a cliff, with
+//: the edge streets and buildings standing over a plate three to twenty metres below them.
+const TERRAIN_APRON_M = 2400.0;
+const TERRAIN_APRON_STEP_M = 32.0;
+const TERRAIN_APRON_DECAY_M = 700.0;
+const TERRAIN_LAND = new THREE.Color(0x4a4a45);
+const TERRAIN_SEA = new THREE.Color(0x2c6187);
+const TERRAIN_PLATE = new THREE.Color(0x3d5142);
+const terrainTiles = [];
+//: The backdrop's height and colour at a point: land under the ground, or the sea where the
+//: ground is at or under the waterline. ``apron`` is how far outside the grid the point lies.
+function backdropAt(x, z, apron = 0) {
+  // Outside the grid the lookup clamps to the grid's edge cell, so the apron carries that
+  // cell's land or water outward: water past a wet edge, land past a dry one.
+  const edge = cutLiftAt(x, z);
+  if (edge < WATERLINE_M) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
+  let h = edge;
+  if (apron > 0) {
+    // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
+    // grey ring round the city.
+    const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
+    h = PENINSULA_Y + (h - PENINSULA_Y) * s;
+    return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, s) };
+  }
+  return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_LAND };
+}
+function addBackdropTile(xs, zs, apronOf) {
+  const w = xs.length, h = zs.length;
+  const position = new Float32Array(w * h * 3);
+  const colour = new Float32Array(w * h * 3);
+  for (let r = 0; r < h; r += 1) {
+    for (let c = 0; c < w; c += 1) {
+      const i = (r * w + c) * 3;
+      const at = backdropAt(xs[c], zs[r], apronOf ? apronOf(xs[c], zs[r]) : 0);
+      position[i] = xs[c]; position[i + 1] = at.y; position[i + 2] = zs[r];
+      colour[i] = at.colour.r; colour[i + 1] = at.colour.g; colour[i + 2] = at.colour.b;
     }
   }
-  const index = [];
-  for (let r = 0; r + 1 < rows; r += 1) {
-    for (let c = 0; c + 1 < cols; c += 1) {
-      const a = r * cols + c, b = a + 1, d = a + cols, e = d + 1;
-      index.push(a, d, b, b, d, e);
+  const index = new Uint32Array((w - 1) * (h - 1) * 6);
+  let k = 0;
+  for (let r = 0; r + 1 < h; r += 1) {
+    for (let c = 0; c + 1 < w; c += 1) {
+      const a = r * w + c, b = a + 1, d = a + w, e = d + 1;
+      index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e;
     }
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  geometry.setIndex(index);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
+  geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.computeVertexNormals();
-  terrainMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    color: 0x4a4a45, roughness: 0.99, metalness: 0.0,
-  }));
-  terrainMesh.userData.surface = "terrain";
-  terrainMesh.frustumCulled = false;
-  root.add(terrainMesh);
+  geometry.computeBoundingSphere();
+  const tile = new THREE.Mesh(geometry, TERRAIN_MATERIAL);
+  tile.userData.surface = "terrain";
+  terrainTiles.push(tile);
+  root.add(tile);
 }
+const TERRAIN_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.99, metalness: 0.0 });
+if (TERRAIN_FRAME) {
+  const f = TERRAIN_FRAME;
+  const cols = Math.floor((f.cols - 1) / TERRAIN_MESH_STRIDE) + 1;
+  const rows = Math.floor((f.rows - 1) / TERRAIN_MESH_STRIDE) + 1;
+  const xOf = (c) => f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
+  const zOf = (r) => -(f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m);
+  // Tiles share their edge row and column, so there is no seam between them.
+  for (let r0 = 0; r0 + 1 < rows; r0 += TERRAIN_TILE_VERTICES - 1) {
+    for (let c0 = 0; c0 + 1 < cols; c0 += TERRAIN_TILE_VERTICES - 1) {
+      const r1 = Math.min(rows - 1, r0 + TERRAIN_TILE_VERTICES - 1);
+      const c1 = Math.min(cols - 1, c0 + TERRAIN_TILE_VERTICES - 1);
+      const xs = [], zs = [];
+      for (let c = c0; c <= c1; c += 1) xs.push(xOf(c));
+      for (let r = r0; r <= r1; r += 1) zs.push(zOf(r));
+      addBackdropTile(xs, zs, null);
+    }
+  }
+  // The apron: a ring of coarse tiles round the grid. Its inner row and column are the grid's
+  // own edge vertices, so it meets the grid without a seam.
+  const west = xOf(0), east = xOf(cols - 1), north = zOf(rows - 1), south = zOf(0);
+  const steps = Math.ceil(TERRAIN_APRON_M / TERRAIN_APRON_STEP_M);
+  const outward = (from, sign) => { const out = [from]; for (let i = 1; i <= steps; i += 1) out.push(from + sign * i * TERRAIN_APRON_STEP_M); return out; };
+  const along = (from, to) => { const out = []; const n = Math.max(1, Math.ceil((to - from) / TERRAIN_APRON_STEP_M)); for (let i = 0; i <= n; i += 1) out.push(from + (to - from) * i / n); return out; };
+  const apronOf = (x, z) => Math.max(0, west - x, x - east, north - z, z - south);
+  const xsIn = along(west, east), zsIn = along(north, south);
+  const xsW = outward(west, -1).reverse(), xsE = outward(east, 1);
+  const zsN = outward(north, -1).reverse(), zsS = outward(south, 1);
+  addBackdropTile(xsIn, zsN, apronOf); addBackdropTile(xsIn, zsS, apronOf);
+  addBackdropTile(xsW, zsIn, apronOf); addBackdropTile(xsE, zsIn, apronOf);
+  addBackdropTile(xsW, zsN, apronOf); addBackdropTile(xsE, zsN, apronOf);
+  addBackdropTile(xsW, zsS, apronOf); addBackdropTile(xsE, zsS, apronOf);
+}
+//: The backdrop as one object for the ray that finds the ground under a click.
+const terrainMesh = terrainTiles.length ? new THREE.Group() : null;
+if (terrainMesh) { terrainMesh.userData.surface = "terrain"; }
 
 //: A surface lifted vertex by vertex only follows the ground where it has vertices. A yard
 //: drawn as one polygon across a block, a footprint, a fence panel between two posts, the
@@ -643,16 +805,35 @@ if (TERRAIN_FRAME) {
 //: off it as slabs. Before lifting, every triangle with an edge longer than this is bisected
 //: along that edge, again and again, until none is -- a long thin strip splits along its
 //: length only. Neighbours sharing an edge share the midpoint, so a split edge does not open.
-const TERRAIN_REFINE_M = 8.0;
-//: What lies under something else -- the underlay behind a pavement, the footprint under a
-//: building -- is refined coarsely: nobody sees its chords. A yard or a park, in between.
-const TERRAIN_REFINE_BY_SURFACE = { walk_underlay: 20.0, footprint: 20.0, yard: 12.0, park: 12.0,
-                                    service_yard: 12.0, court: 12.0, garage: 20.0 };
+//: Twelve metres, not eight: on a straight grade the chord of a twelve-metre edge lies on the
+//: ground exactly, and where the ground curves the bend rule below splits it further. At eight
+//: metres everywhere the streets alone were fifteen million triangles.
+const TERRAIN_REFINE_M = 12.0;
 //: And shorter than that wherever the ground curves: an edge whose midpoint the ground stands
 //: this far above or below its chord is split too, down to TERRAIN_REFINE_MIN_M. A flat block
 //: stays coarse; the brow of a hill and the foot of a retaining wall get the vertices.
+//: A quarter of a metre, down to edges of four. The tolerance has to sit above the grid's own
+//: noise -- the lidar ground is good to about a decimetre -- or the bend rule fires on noise
+//: everywhere and refines the whole city to its smallest edge: at 0.12 m and 2.5 m the scene
+//: was 238 million triangles. What put yards a metre off the hill was not this tolerance but
+//: the refinement budget running out (see refineForTerrain).
 const TERRAIN_CHORD_M = 0.25;
-const TERRAIN_REFINE_MIN_M = 5.0;
+const TERRAIN_REFINE_MIN_M = 4.0;
+//: By surface, [longest edge, chord]. What lies under something else -- the underlay behind a
+//: pavement, the footprint under a building -- is refined coarsely for length, but still for
+//: curvature: a chord that sags below the ground is unseen, a chord that stands above it pokes
+//: up through the pavement laid over it as a bare patch, which is what "missing tiles in the
+//: middle of the sidewalk" was. A parking lot or a front path is refined for length only: the
+//: grid under a multi-storey garage or a flight of steps is a staircase, and chasing every step
+//: of it ran a hundred and fifty lots to over a million triangles. A yard or a park, both.
+//: The underlay's top is 23 cm under the pavement's; its chords may leave the ground by less
+//: than that, or they stand up through it.
+const TERRAIN_UNDER_CHORD_M = 0.2;
+const TERRAIN_REFINE_BY_SURFACE = {
+  walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0],
+  yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
+};
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
 //: stair stands, and chasing every step to the grid's own cell size ran a yard to millions.
 const TERRAIN_REFINE_GROWTH = 4;
@@ -667,25 +848,67 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: position.count }, (_, i) => i);
   let count = position.count;
   const px = (i) => arrays[0][i * 3], pz = (i) => arrays[0][i * 3 + 2];
-  // Does the ground leave this edge's chord by more than the tolerance at its midpoint?
-  const budget = position.count * TERRAIN_REFINE_GROWTH + 50000;
-  const bends = (a, b, len) => {
-    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M || count > budget) return false;
+  // The bend rule may not run away, but it must be allowed to finish: a budget of a few times
+  // the vertices the mesh started with ran out a third of the way through the corridor's
+  // yards -- one mesh, a hundred and thirty thousand vertices -- and left the rest on chords a
+  // metre off the hill. The budget is what the area the mesh covers could need at the finest
+  // cut, which is bounded whatever the ground does under it.
+  // The mesh's own area -- its triangles', not its box's: the corridor's yards are one mesh
+  // whose box is the corridor -- at the finest cut, two triangles per MIN_M square.
+  let area = 0;
+  for (let t = 0; t + 2 < index.length; t += 3) {
+    const a = index[t], b = index[t + 1], c = index[t + 2];
+    area += Math.abs((px(b) - px(a)) * (pz(c) - pz(a)) - (px(c) - px(a)) * (pz(b) - pz(a))) / 2;
+  }
+  const areaBudget = area / (TERRAIN_REFINE_MIN_M * TERRAIN_REFINE_MIN_M) * 2;
+  const budget = Math.max(position.count * TERRAIN_REFINE_GROWTH + 50000, areaBudget);
+  // Where an edge is cut, and whether. Every part is refined on its own -- a pavement ribbon, the
+  // corner piece beside it, the kerb tile in front -- and two parts that meet along a line used
+  // to bisect it differently, so that on a hill one side stood on the ground where the other
+  // was still on its chord: a crack the width of the chord's error, at every seam, "sloppy
+  // edges". The cuts are now decided by the edge's endpoints alone: a long edge is cut where
+  // it crosses a line of a fixed world lattice maxEdge apart (the crossing nearest its middle),
+  // and a short one whose midpoint the ground leaves by more than the tolerance is cut in the
+  // middle. Two parts sharing an edge make the same cuts, so the seam stays closed.
+  const lattice = maxEdge;
+  const cutAt = (a, b, len) => {
+    if (len >= TERRAIN_REFINE_MIN_M) {
+      let best = -1, bestOff = Infinity;
+      for (const [pa, pb] of [[px(a), px(b)], [pz(a), pz(b)]]) {
+        const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
+        for (let k = Math.floor(lo / lattice) + 1; k * lattice < hi; k += 1) {
+          const t0 = (k * lattice - pa) / (pb - pa);
+          if (t0 > 1e-4 && t0 < 1 - 1e-4 && Math.abs(t0 - 0.5) < bestOff) { best = t0; bestOff = Math.abs(t0 - 0.5); }
+        }
+      }
+      if (best >= 0) return best;
+    }
+    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M / 4 || count > budget) return -1;
     const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
-    return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord;
+    const bend = Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2);
+    // Down to the minimum edge for a bend over the tolerance; to half that for a bend over twice
+    // it and a quarter for four times -- a retaining wall or a flight of steps in the grid, which
+    // a four-metre edge can only drape over, and which the grid's own decimetre of noise never
+    // reaches.
+    if (bend > chord * 4 || (bend > chord * 2 && len > TERRAIN_REFINE_MIN_M / 2) || (bend > chord && len > TERRAIN_REFINE_MIN_M)) return 0.5;
+    return -1;
   };
-  const midpoints = new Map();
-  const midpoint = (a, b) => {
-    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-    let m = midpoints.get(key);
+  // Keyed by the pair as one number: a string key here was a third of the lift's time. The same
+  // pair is always cut at the same parameter, so the key needs no more.
+  const cuts = new Map();
+  const cut = (a, b, t0) => {
+    const key = a < b ? a * 16777216 + b : b * 16777216 + a;
+    let m = cuts.get(key);
     if (m !== undefined) return m;
+    const s = a < b ? t0 : 1 - t0;          // the parameter from the lower index, so both orders agree
+    const lo = Math.min(a, b), hi = Math.max(a, b);
     m = count;
     count += 1;
     for (let k = 0; k < arrays.length; k += 1) {
       const n = sizes[k];
-      for (let c = 0; c < n; c += 1) arrays[k].push((arrays[k][a * n + c] + arrays[k][b * n + c]) / 2);
+      for (let c = 0; c < n; c += 1) arrays[k].push(arrays[k][lo * n + c] * (1 - s) + arrays[k][hi * n + c] * s);
     }
-    midpoints.set(key, m);
+    cuts.set(key, m);
     return m;
   };
   const out = [];
@@ -698,21 +921,18 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
       const ab = Math.hypot(px(a) - px(b), pz(a) - pz(b));
       const bc = Math.hypot(px(b) - px(c), pz(b) - pz(c));
       const ca = Math.hypot(px(c) - px(a), pz(c) - pz(a));
-      const longest = Math.max(ab, bc, ca);
-      let edge = longest > maxEdge ? (longest === ab ? 0 : longest === bc ? 1 : 2) : -1;
-      if (edge < 0) {
-        // Not long, but does the ground bend under it? The longest bending edge is split.
-        if (ab >= bc && ab >= ca && bends(a, b, ab)) edge = 0;
-        else if (bc >= ca && bends(b, c, bc)) edge = 1;
-        else if (bends(c, a, ca)) edge = 2;
-        else if (bends(a, b, ab)) edge = 0;
-        else if (bends(b, c, bc)) edge = 1;
+      // The longest edge that wants a cut is cut; the others come round again.
+      const order = [[ab, 0], [bc, 1], [ca, 2]].sort((u, v) => v[0] - u[0]);
+      let edge = -1, at = -1;
+      for (const [len, which] of order) {
+        const t0 = which === 0 ? cutAt(a, b, len) : which === 1 ? cutAt(b, c, len) : cutAt(c, a, len);
+        if (t0 >= 0) { edge = which; at = t0; break; }
       }
       if (edge < 0) { out.push(a, b, c); continue; }
       split += 1;
-      if (edge === 0) { const m = midpoint(a, b); stack.push(a, m, c, m, b, c); }
-      else if (edge === 1) { const m = midpoint(b, c); stack.push(a, b, m, a, m, c); }
-      else { const m = midpoint(c, a); stack.push(a, b, m, m, b, c); }
+      if (edge === 0) { const m = cut(a, b, at); stack.push(a, m, c, m, b, c); }
+      else if (edge === 1) { const m = cut(b, c, at); stack.push(a, b, m, a, m, c); }
+      else { const m = cut(c, a, at); stack.push(a, b, m, m, b, c); }
     }
   }
   if (!split) return geometry;
@@ -722,6 +942,106 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   refined.userData = geometry.userData;
   geometry.dispose();
   return refined;
+}
+
+//: What stands on a surface stands on the surface as drawn. A tactile pad is a small quad laid
+//: at the pavement's height over the ground grid; the pavement under it is a large triangle
+//: lifted at its own vertices, and between them it runs on its chord, which on a hill is
+//: centimetres off the grid -- eight and a half at Montgomery and Clay. So the pad was under
+//: the pavement wherever the chord ran high. A crossing's paint was worse: lifted along the
+//: straight line between its two ends while the road under it followed the grid, on any grade
+//: change the road rose through it and the legs drew as triangles and fragments. No height
+//: read from the grid can know what the drawn surface does; only the drawn surface can. After
+//: the streets are lifted, every vertex of what stands on a surface is set from that surface's
+//: rendered top under it (the highest, where surfaces overlap) plus its own few millimetres.
+//: The surfaces' triangles are streamed past the vertices, bucketed by cell, so nothing the
+//: size of the road is held twice.
+const SETTLE_CELL_M = 2.0;
+//: What settles onto what: the surfaces stood on, and each standing surface's height above them.
+const SETTLE_RULES = [
+  { onto: new Set(["walk", "walk_narrow"]), above: { tactile_warning: 0.018, curb_ramp: 0.016 }, label: "Setting the pads on the pavement" },
+  // 3.5 cm, not 2: at a junction the carriageway is several ribbons -- two streets' and the
+  // box -- a centimetre or two apart in height, and paint two centimetres over the highest one
+  // under its vertices still had the next ribbon's step come up through it between them.
+  { onto: new Set(["road"]), above: { crossing: 0.035, crossing_edges: 0.035 }, grid: 1.0, label: "Painting the crossings on the road" },
+];
+const settleKey = (x, z) => Math.floor(x / SETTLE_CELL_M) * 1048576 + Math.floor(z / SETTLE_CELL_M);
+async function settleOnto(rule) {
+  // The vertices to settle, by the cell each stands in, and the best top found for each.
+  const buckets = new Map();
+  const tops = new Map();
+  const standing = [];
+  groups.streets.traverse((o) => { if (o.isMesh && o.geometry && rule.above[o.userData.surface] !== undefined) standing.push(o); });
+  if (!standing.length) return 0;
+  for (const o of standing) {
+    // Cut to a metre first, across as well as along: a crossing's paint had two vertices across
+    // its width, and the road under a junction is several ribbons folding at their own stations,
+    // so between those two vertices the road rose through the paint as a dark notch.
+    if (rule.grid) o.geometry = refineForTerrain(o.geometry, rule.grid, 0);
+    const position = o.geometry.getAttribute("position");
+    const best = new Float32Array(position.count).fill(NaN);
+    tops.set(position, best);
+    for (let i = 0; i < position.count; i += 1) {
+      const key = settleKey(position.getX(i), position.getZ(i));
+      let list = buckets.get(key);
+      if (!list) buckets.set(key, list = []);
+      list.push(position, i);
+    }
+  }
+  const bases = [];
+  groups.streets.traverse((o) => { if (o.isMesh && o.geometry && rule.onto.has(o.userData.surface)) bases.push(o); });
+  for (const o of bases) {
+    const position = o.geometry.getAttribute("position");
+    const index = o.geometry.getIndex();
+    const n = index ? index.count : position.count;
+    for (let i = 0; i + 2 < n; i += 3) {
+      const a = index ? index.getX(i) : i, b = index ? index.getX(i + 1) : i + 1, c = index ? index.getX(i + 2) : i + 2;
+      const ax = position.getX(a), az = position.getZ(a), bx = position.getX(b), bz = position.getZ(b), cx = position.getX(c), cz = position.getZ(c);
+      const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+      if (Math.abs(d) < 1e-9) continue;
+      const x0 = Math.floor(Math.min(ax, bx, cx) / SETTLE_CELL_M), x1 = Math.floor(Math.max(ax, bx, cx) / SETTLE_CELL_M);
+      const z0 = Math.floor(Math.min(az, bz, cz) / SETTLE_CELL_M), z1 = Math.floor(Math.max(az, bz, cz) / SETTLE_CELL_M);
+      const ay = position.getY(a), by = position.getY(b), cy = position.getY(c);
+      for (let gx = x0; gx <= x1; gx += 1) {
+        for (let gz = z0; gz <= z1; gz += 1) {
+          const list = buckets.get(gx * 1048576 + gz);
+          if (!list) continue;
+          for (let k = 0; k < list.length; k += 2) {
+            const pos = list[k], vi = list[k + 1];
+            const x = pos.getX(vi), z = pos.getZ(vi);
+            const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
+            const v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
+            const w = 1 - u - v;
+            if (u < -1e-3 || v < -1e-3 || w < -1e-3) continue;
+            const y = u * ay + v * by + w * cy;
+            const best = tops.get(pos);
+            if (Number.isNaN(best[vi]) || y > best[vi]) best[vi] = y;
+          }
+        }
+      }
+    }
+    await maybeYield(rule.label);
+  }
+  let settled = 0;
+  for (const o of standing) {
+    const above = rule.above[o.userData.surface];
+    const position = o.geometry.getAttribute("position");
+    const best = tops.get(position);
+    for (let i = 0; i < position.count; i += 1) {
+      if (Number.isNaN(best[i])) continue;
+      position.setY(i, best[i] + above);
+      settled += 1;
+    }
+    position.needsUpdate = true;
+    o.geometry.computeBoundingSphere();
+  }
+  return settled;
+}
+async function settleOntoPavement() {
+  if (!TERRAIN_FRAME) return 0;
+  let settled = 0;
+  for (const rule of SETTLE_RULES) settled += await settleOnto(rule);
+  return settled;
 }
 
 //: Everything at ground level under an object is lifted onto the ground: merged street
@@ -745,7 +1065,7 @@ async function liftOntoGroundAsync(object, label) {
   object.traverse((o) => { if (o.isMesh) meshes.push(o); });
   for (let i = 0; i < meshes.length; i += 1) {
     lifted += liftOneMesh(meshes[i]);
-    if (i % 8 === 7) await yieldFrame(`${label}: ${Math.round(100 * i / meshes.length)}%`);
+    await maybeYield(`${label}: ${Math.round(100 * i / meshes.length)}%`);
   }
   return lifted;
 }
@@ -765,11 +1085,12 @@ function liftOneMesh(o) {
         o.setMatrixAt(i, m);
       }
       o.instanceMatrix.needsUpdate = true;
+      if (o.computeBoundingSphere) o.computeBoundingSphere();
       return 1;
     }
     if (!o.geometry || !o.geometry.getAttribute("position")) return 0;
-    const limit = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || TERRAIN_REFINE_M;
-    o.geometry = refineForTerrain(o.geometry, limit, limit > TERRAIN_REFINE_M ? 0 : TERRAIN_CHORD_M);
+    const [limit, chord] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
+    o.geometry = refineForTerrain(o.geometry, limit, chord);
     const attribute = o.geometry.getAttribute("position");
     // Vertices are lifted in the world frame; a mesh that is placed rather than built where
     // it stands gets the lift on its own local axes.
@@ -784,7 +1105,9 @@ function liftOneMesh(o) {
       attribute.setXYZ(i, attribute.getX(i) + up.x, attribute.getY(i) + up.y, attribute.getZ(i) + up.z);
     }
     attribute.needsUpdate = true;
-    if (o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+    // The bounds are what the culling reads; a tile lifted eighty metres up Nob Hill with the
+    // sphere it had at sea level would vanish whenever the camera looked at it.
+    o.geometry.computeBoundingSphere();
     if (o.geometry.boundingBox) o.geometry.computeBoundingBox();
     return 1;
   }
@@ -1109,14 +1432,29 @@ function materialKey(material) {
     (material.alphaTest ?? 0).toFixed(2),
     material.side,
     material.polygonOffset ? `${material.polygonOffsetFactor}/${material.polygonOffsetUnits}` : "-",
+    // These change the pixels too, and now that buckets share material objects a bucket whose
+    // colour rides on its vertices must never borrow a material that ignores them.
+    material.vertexColors ? "vc" : "-",
+    (material.envMapIntensity ?? 1).toFixed(2),
+    material.emissive ? material.emissive.getHexString() : "-",
+    material.depthWrite === false ? "nodw" : "dw",
   ].join(":");
 }
 
+//: One material object per fingerprint. Two buckets that draw the same pixels -- a roof and a
+//: yard wall in the same texture, say -- used to hold two material objects, and the renderer
+//: re-bound every uniform between them; with one object it sorts them together and binds once.
+const CANONICAL_MATERIALS = new Map();
 function addMerged(key, mesh, surface) {
   if (!mesh || !mesh.geometry) return;
-  const full = `${key}|${materialKey(mesh.material)}`;
+  const fingerprint = materialKey(mesh.material);
+  const full = `${key}|${fingerprint}`;
   let bucket = MERGED.get(full);
-  if (!bucket) MERGED.set(full, bucket = { material: mesh.material, surface, parts: [] });
+  if (!bucket) {
+    let material = CANONICAL_MATERIALS.get(fingerprint);
+    if (!material) CANONICAL_MATERIALS.set(fingerprint, material = mesh.material);
+    MERGED.set(full, bucket = { material, surface, parts: [] });
+  }
   // The mesh's own placement has to be baked in: a merged geometry has no transform of its own,
   // and every one of these was positioned rather than built where it stands.
   mesh.updateMatrix();
@@ -1137,60 +1475,255 @@ function addMerged(key, mesh, surface) {
 
 const IDENTITY = new THREE.Matrix4();
 
+//: Merged meshes are cut into tiles this wide, each culled on its own. Merged by material alone,
+//: a bucket was one mesh spanning the corridor that could never be culled: standing on one block
+//: in first person drew every kerb in the corridor -- twenty-seven million triangles a frame,
+//: a few frames a second on an ordinary laptop. Tiled, a street corner draws its own tiles.
+//: At this size the whole corridor on screen is a little over a thousand draw calls.
+const MERGE_TILE_M = 400.0;
+//: A tile is worth its draw call when it carries about this many vertices. A bucket whose
+//: tiles would be thinner is cut at twice the size, and thinner still it stays one mesh: the
+//: buildings' hundred and seventy texture buckets carry two million triangles between them,
+//: and tiled at four hundred metres they were three thousand draw calls for nothing.
+const MERGE_TILE_MIN_VERTICES = 40000;
+//: What the merge did, for the console: parts in, meshes out, triangles.
+const mergeStats = { parts: 0, meshes: 0, triangles: 0 };
+
 function flushMerged(group, match = () => true) {
   let saved = 0;
   for (const [key, bucket] of [...MERGED]) {
     if (!match(key)) continue;
     MERGED.delete(key);
-    const positions = [];
-    const uvs = [];
-    const normals = [];
-    const colours = [];
-    const indices = [];
-    for (const geometry of bucket.parts) {
-      const position = geometry.getAttribute("position");
-      if (!position) continue;
-      const uv = geometry.getAttribute("uv");
-      const normal = geometry.getAttribute("normal");
-      // The colour a building carries on its vertices, because its tint can no longer live on
-      // its material -- there is one material now for a hundred and fifty buildings. Dropping
-      // this attribute in the merge, which is what happened first, leaves the shader reading a
-      // colour that is not there: every building in the city came out black.
-      const colour = geometry.getAttribute("color");
-      const base = positions.length / 3;
-      for (let i = 0; i < position.count; i += 1) {
-        positions.push(position.getX(i), position.getY(i), position.getZ(i));
-        // A merged geometry has one attribute set or none, so a part without UVs still has to
-        // contribute two numbers per vertex or every vertex after it reads the wrong pair.
-        uvs.push(uv ? uv.getX(i) : 0, uv ? uv.getY(i) : 0);
-        normals.push(normal ? normal.getX(i) : 0, normal ? normal.getY(i) : 1,
-                     normal ? normal.getZ(i) : 0);
-        colours.push(colour ? colour.getX(i) : 1, colour ? colour.getY(i) : 1,
-                     colour ? colour.getZ(i) : 1);
+    const parts = bucket.parts.filter((geometry) => geometry.getAttribute("position"));
+    let total = 0;
+    for (const geometry of parts) total += geometry.getAttribute("position").count;
+    // Each part goes in the tile under the middle of its box; a part is never split. The tile
+    // size is the smallest at which the tiles are worth their draw calls.
+    let tiles = new Map([["all", parts]]);
+    if (total >= 2 * MERGE_TILE_MIN_VERTICES) {
+      for (const geometry of parts) geometry.computeBoundingBox();
+      for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+        const attempt = new Map();
+        for (const geometry of parts) {
+          const box = geometry.boundingBox;
+          const tile = `${Math.floor((box.min.x + box.max.x) / (2 * size))}:${Math.floor((box.min.z + box.max.z) / (2 * size))}`;
+          let list = attempt.get(tile);
+          if (!list) attempt.set(tile, list = []);
+          list.push(geometry);
+        }
+        if (total / attempt.size >= MERGE_TILE_MIN_VERTICES) { tiles = attempt; break; }
       }
-      const index = geometry.getIndex();
-      if (index) {
-        for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
-      } else {
-        for (let i = 0; i < position.count; i += 1) indices.push(base + i);
-      }
-      geometry.dispose();
-      saved += 1;
     }
-    if (!indices.length) continue;
-    const merged = new THREE.BufferGeometry();
-    merged.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    merged.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    merged.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    merged.setAttribute("color", new THREE.Float32BufferAttribute(colours, 3));
-    merged.setIndex(indices);
-    const mesh = new THREE.Mesh(merged, bucket.material);
-    // The class survives the merge, so the probe and the audit can still say what is underfoot.
-    mesh.userData.surface = bucket.surface;
-    mesh.frustumCulled = false;      // one mesh spanning the corridor is always on screen
-    group.add(mesh);
+    for (const list of tiles.values()) {
+      const merged = mergeParts(list);
+      if (!merged) continue;
+      const mesh = new THREE.Mesh(merged, bucket.material);
+      // The class survives the merge, so the probe and the audit can still say what is underfoot.
+      mesh.userData.surface = bucket.surface;
+      // A tile is culled when it is off screen. A bucket small enough to stay one mesh spans the
+      // corridor and is always on screen; culling it would only cost the test.
+      mesh.frustumCulled = tiles.size > 1;
+      if (mesh.frustumCulled) merged.computeBoundingSphere();
+      group.add(mesh);
+      saved += list.length;
+      mergeStats.meshes += 1;
+      mergeStats.triangles += merged.index.count / 3;
+    }
+    mergeStats.parts += parts.length;
   }
   return saved;
+}
+
+//: One geometry from many, straight into typed arrays. The merge used to grow four JavaScript
+//: arrays a number at a time and convert them at the end -- for fifteen million triangles that
+//: is a few hundred million pushes and a heap the size of the payload several times over.
+function mergeParts(parts) {
+  let vertices = 0, indices = 0;
+  for (const geometry of parts) {
+    const count = geometry.getAttribute("position").count;
+    const index = geometry.getIndex();
+    vertices += count;
+    indices += index ? index.count : count;
+  }
+  if (!indices) return null;
+  const positions = new Float32Array(vertices * 3);
+  const uvs = new Float32Array(vertices * 2);
+  const normals = new Float32Array(vertices * 3);
+  const colours = new Float32Array(vertices * 3);
+  const merged = vertices > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  let v = 0, k = 0;
+  for (const geometry of parts) {
+    const position = geometry.getAttribute("position");
+    const uv = geometry.getAttribute("uv");
+    const normal = geometry.getAttribute("normal");
+    // The colour a building carries on its vertices, because its tint can no longer live on
+    // its material -- there is one material now for a hundred and fifty buildings. Dropping
+    // this attribute in the merge, which is what happened first, leaves the shader reading a
+    // colour that is not there: every building in the city came out black.
+    const colour = geometry.getAttribute("color");
+    const n = position.count;
+    for (let i = 0; i < n; i += 1) {
+      const p3 = (v + i) * 3, p2 = (v + i) * 2;
+      positions[p3] = position.getX(i); positions[p3 + 1] = position.getY(i); positions[p3 + 2] = position.getZ(i);
+      // A merged geometry has one attribute set or none, so a part without UVs still has to
+      // contribute two numbers per vertex or every vertex after it reads the wrong pair.
+      if (uv) { uvs[p2] = uv.getX(i); uvs[p2 + 1] = uv.getY(i); }
+      if (normal) { normals[p3] = normal.getX(i); normals[p3 + 1] = normal.getY(i); normals[p3 + 2] = normal.getZ(i); }
+      else normals[p3 + 1] = 1;
+      if (colour) { colours[p3] = colour.getX(i); colours[p3 + 1] = colour.getY(i); colours[p3 + 2] = colour.getZ(i); }
+      else { colours[p3] = 1; colours[p3 + 1] = 1; colours[p3 + 2] = 1; }
+    }
+    const index = geometry.getIndex();
+    if (index) for (let i = 0; i < index.count; i += 1) merged[k++] = v + index.getX(i);
+    else for (let i = 0; i < n; i += 1) merged[k++] = v + i;
+    v += n;
+    geometry.dispose();
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colours, 3));
+  geometry.setIndex(new THREE.BufferAttribute(merged, 1));
+  return geometry;
+}
+
+//: The same tiling for a group whose meshes were laid straight into it -- the ground cover, the
+//: street furniture -- rather than through the merge. Every mesh over MERGE_TILE_MIN_VERTICES
+//: is cut along tile lines, triangle by triangle, into pieces culled on their own; an instanced
+//: mesh is split by where its instances stand. Run before the group is lifted, so that the
+//: pieces get their bounds from the lift.
+function tileGroup(group) {
+  let cut = 0;
+  for (const mesh of group.children.slice()) {
+    if (!mesh.isMesh || !mesh.geometry) continue;
+    const pieces = mesh.isInstancedMesh ? tileInstanced(mesh) : tileMesh(mesh);
+    if (!pieces) continue;
+    group.remove(mesh);
+    for (const piece of pieces) group.add(piece);
+    cut += 1;
+  }
+  return cut;
+}
+const tileKeyOf = (x, z) => `${Math.floor(x / MERGE_TILE_M)}:${Math.floor(z / MERGE_TILE_M)}`;
+function inheritMesh(piece, mesh) {
+  piece.position.copy(mesh.position);
+  piece.quaternion.copy(mesh.quaternion);
+  piece.scale.copy(mesh.scale);
+  piece.userData = { ...mesh.userData };
+  piece.name = mesh.name;
+  piece.renderOrder = mesh.renderOrder;
+  piece.castShadow = mesh.castShadow;
+  piece.receiveShadow = mesh.receiveShadow;
+  piece.frustumCulled = true;
+  return piece;
+}
+function tileMesh(mesh) {
+  const geometry = mesh.geometry;
+  const position = geometry.getAttribute("position");
+  // A multi-material geometry's index ranges are its material groups; cutting would move them.
+  if (!position || position.count < 2 * MERGE_TILE_MIN_VERTICES || (geometry.groups && geometry.groups.length)) return null;
+  mesh.updateMatrixWorld(true);
+  const index = geometry.getIndex();
+  const triangles = Math.floor((index ? index.count : position.count) / 3);
+  const vertexAt = (t, j) => index ? index.getX(t * 3 + j) : t * 3 + j;
+  // Each triangle's centre, once; then the tile size at which the tiles are worth drawing.
+  const centres = new Float32Array(triangles * 2);
+  const v = new THREE.Vector3();
+  for (let t = 0; t < triangles; t += 1) {
+    let cx = 0, cz = 0;
+    for (let j = 0; j < 3; j += 1) {
+      const i = vertexAt(t, j);
+      v.set(position.getX(i), position.getY(i), position.getZ(i)).applyMatrix4(mesh.matrixWorld);
+      cx += v.x; cz += v.z;
+    }
+    centres[t * 2] = cx / 3; centres[t * 2 + 1] = cz / 3;
+  }
+  let byTile = null;
+  for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+    const attempt = new Map();
+    for (let t = 0; t < triangles; t += 1) {
+      const key = `${Math.floor(centres[t * 2] / size)}:${Math.floor(centres[t * 2 + 1] / size)}`;
+      let list = attempt.get(key);
+      if (!list) attempt.set(key, list = []);
+      list.push(t);
+    }
+    if (position.count / attempt.size >= MERGE_TILE_MIN_VERTICES) { byTile = attempt; break; }
+  }
+  if (!byTile || byTile.size < 2) return null;
+  const names = ["position", "normal", "uv", "color"].filter((n) => geometry.getAttribute(n));
+  const pieces = [];
+  for (const tris of byTile.values()) {
+    const remap = new Map();
+    const order = [];
+    const idx = new Uint32Array(tris.length * 3);
+    let k = 0;
+    for (const t of tris) {
+      for (let j = 0; j < 3; j += 1) {
+        const i = vertexAt(t, j);
+        let m = remap.get(i);
+        if (m === undefined) { m = order.length; order.push(i); remap.set(i, m); }
+        idx[k++] = m;
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    for (const n of names) {
+      const src = geometry.getAttribute(n);
+      const size = src.itemSize;
+      const arr = new Float32Array(order.length * size);
+      for (let a = 0; a < order.length; a += 1) {
+        for (let c = 0; c < size; c += 1) arr[a * size + c] = src.getComponent(order[a], c);
+      }
+      g.setAttribute(n, new THREE.BufferAttribute(arr, size));
+    }
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    g.computeBoundingSphere();
+    pieces.push(inheritMesh(new THREE.Mesh(g, mesh.material), mesh));
+  }
+  geometry.dispose();
+  return pieces;
+}
+//: An instanced mesh is split where a tile would still hold this many instances: a tile of
+//: three conifers is a draw call for three trees.
+const INSTANCED_TILE_MIN = 250;
+function tileInstanced(mesh) {
+  if (mesh.count < 2 * INSTANCED_TILE_MIN) return null;
+  mesh.updateMatrixWorld(true);
+  const m = new THREE.Matrix4();
+  const at = new Float32Array(mesh.count * 2);
+  for (let i = 0; i < mesh.count; i += 1) {
+    mesh.getMatrixAt(i, m);
+    m.premultiply(mesh.matrixWorld);
+    at[i * 2] = m.elements[12]; at[i * 2 + 1] = m.elements[14];
+  }
+  let byTile = null;
+  for (const size of [MERGE_TILE_M, 2 * MERGE_TILE_M, 4 * MERGE_TILE_M]) {
+    const attempt = new Map();
+    for (let i = 0; i < mesh.count; i += 1) {
+      const key = `${Math.floor(at[i * 2] / size)}:${Math.floor(at[i * 2 + 1] / size)}`;
+      let list = attempt.get(key);
+      if (!list) attempt.set(key, list = []);
+      list.push(i);
+    }
+    if (mesh.count / attempt.size >= INSTANCED_TILE_MIN) { byTile = attempt; break; }
+  }
+  if (!byTile || byTile.size < 2) return null;
+  const colour = new THREE.Color();
+  const pieces = [];
+  for (const ids of byTile.values()) {
+    const piece = new THREE.InstancedMesh(mesh.geometry, mesh.material, ids.length);
+    ids.forEach((i, j) => {
+      mesh.getMatrixAt(i, m);
+      piece.setMatrixAt(j, m);
+      if (mesh.instanceColor) { mesh.getColorAt(i, colour); piece.setColorAt(j, colour); }
+    });
+    piece.instanceMatrix.needsUpdate = true;
+    if (piece.instanceColor) piece.instanceColor.needsUpdate = true;
+    inheritMesh(piece, mesh);
+    piece.computeBoundingSphere();
+    pieces.push(piece);
+  }
+  return pieces;
 }
 
 function offsetWay(points, metres) {
@@ -2208,6 +2741,17 @@ function indexBikeLaneEnds(ways) {
   bikeJoinGrid.clear();
   bikeAreaGrid.clear();
   for (const way of ways) {
+    if (way.kind === "cycleway" && way.points && way.points.length >= 2) {
+      // A separate track's ends are joins too: the road's lane eases onto it and it onto the lane.
+      for (const end of [way.points[0], way.points[way.points.length - 1]]) {
+        const [x, y] = xy(end[0], end[1]);
+        const key = `${Math.floor(x / BIKE_JOIN_M)}:${Math.floor(-y / BIKE_JOIN_M)}`;
+        let bucket = bikeJoinGrid.get(key);
+        if (!bucket) bikeJoinGrid.set(key, bucket = []);
+        bucket.push([x, -y]);
+      }
+      continue;
+    }
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     const sides = cyclewaySides(way);
     if (!sides.length) continue;
@@ -3361,8 +3905,13 @@ function garageTextureFor(variant, tint) {
   // Keyed on the colour quantised to three levels a channel. A door painted the house's exact
   // shade and a door two per cent off it are the same door; twenty-seven buckets times six
   // designs is a few dozen canvases for fourteen thousand garages.
+  // Quantised in sRGB, where the eye lives. Quantising the linear components to three levels
+  // turned a grey-pink house (#8b8082: linear 0.26, 0.21, 0.23) into (0.5, 0, 0) -- a pure red
+  // door on a grey house, at random, across the corridor.
   const colour = new THREE.Color(tint);
-  const bucket = [colour.r, colour.g, colour.b].map((v) => Math.round(v * 2) / 2);
+  const srgb = { r: 0, g: 0, b: 0 };
+  colour.getRGB(srgb, THREE.SRGBColorSpace);
+  const bucket = [srgb.r, srgb.g, srgb.b].map((v) => Math.round(v * 3) / 3);
   const key = `${variant}-${bucket.join(",")}`;
   if (!GARAGE_CACHE.has(key)) {
     const hex = "#" + bucket.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
@@ -3439,7 +3988,7 @@ function laneCountForWay(way) {
 }
 
 //: Road widths that came from the city's kerb lines, one way or another.
-const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half", "tunnel_cut"]);
+const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half", "tunnel_cut", "curb_profile", "lidar_profile"]);
 
 function nominalRoadWidth(way) {
   // Keep official width metadata intact, but render one OSM way as one carriageway.
@@ -4476,7 +5025,10 @@ const PROPERTY_LINE_PAVEMENT_WIDTH_M = 8.6;
 const UNDERLAY_MIN_WIDTH_M = 0.8;
 //: How far a width is held before the underlay is allowed to change it.
 const UNDERLAY_RUN_M = 5.0;
-const PROPERTY_LINE_PAVEMENT_Y = 0.012;
+//: Five centimetres under the flat model's ground rather than one above it: the underlay's top
+//: is then 23 cm under the pavement's, room for a chord tolerance above the grid's noise
+//: without the underlay standing up through the pavement on a bend.
+const PROPERTY_LINE_PAVEMENT_Y = -0.05;
 const PROPERTY_LINE_PAVEMENT_THICKNESS_M = 0.004;
 
 // ---- where OpenStreetMap says there is no pavement ----
@@ -6526,14 +7078,18 @@ function addTactileWarningPad(endpoint, intoCrossing, crossingWidth, y) {
   return true;
 }
 
+//: ``y`` is a height, or a function of the end and the point after it that gives one.
 function addCrossingTactilePads(points, crossingWidth, y) {
   if (!points || points.length < 2) return 0;
+  const yAt = typeof y === "function" ? y : () => y;
   let added = 0;
-  if (addTactileWarningPad(points[0], points[1], crossingWidth, y)) added += 1;
-  if (addTactileWarningPad(points[points.length - 1], points[points.length - 2],
-                           crossingWidth, y)) added += 1;
+  const first = points[0], second = points[1];
+  const last = points[points.length - 1], penult = points[points.length - 2];
+  if (addTactileWarningPad(first, second, crossingWidth, yAt(first, second))) added += 1;
+  if (addTactileWarningPad(last, penult, crossingWidth, yAt(last, penult))) added += 1;
   return added;
 }
+const deferredTactilePads = [];
 
 function addSidewalkCrossingReplacements(points, y) {
   const crossingWidth = 3.7;
@@ -6743,6 +7299,8 @@ function sandTexture() {
 const BIKE_LANE = bikeLaneTexture();
 const SAND = sandTexture();
 const BIKE_LANE_M = 1.75;
+//: A two-way track mapped as its own way, where the map gives no width.
+const BIKE_TRACK_TWO_WAY_M = 2.4;
 const BIKE_EDGE_W_M = 0.18;
 
 // Which lane ends are joins and which are ends. Has to run after the widths are clamped, since
@@ -7050,9 +7608,72 @@ function rotatedBoxPart(group, x, y, z, w, h, d, color, roughness = 0.82, rotati
   return mesh;
 }
 
+//: The small canvases the planes carry -- a shopfront, a sign, a price board -- packed into
+//: shared atlases. A shopfront's canvas is keyed by its trade, its variant and the frame's
+//: colour, and the frame takes the building's tint: nine hundred and fifty shopfronts were
+//: nine hundred distinct textures, so nine hundred draw calls, for a few thousand triangles.
+//: Drawn into atlases of PLANE_ATLAS_PX a side, one family per canvas size, and the plane's
+//: UVs moved to its cell, they share a material per atlas: nine draw calls. A canvas that
+//: repeats across its plane cannot be atlased and is left as it is.
+const PLANE_ATLAS_PX = 2048;
+//: A gutter round each cell, filled with the cell's own edge, so that the mip levels do not
+//: blend one shopfront into its neighbour in the atlas.
+const PLANE_ATLAS_PAD = 4;
+const planeAtlases = new Map();
+const planeAtlasSlots = new Map();
+function atlasSlotFor(map) {
+  if (!map || !map.image) return null;
+  const image = map.image;
+  const w = Number(image.width) || 0, h = Number(image.height) || 0;
+  if (!w || !h || w > 512 || h > 512 || typeof image.getContext !== "function") return null;
+  if (map.wrapS === THREE.RepeatWrapping || map.wrapT === THREE.RepeatWrapping) return null;
+  if (map.repeat.x !== 1 || map.repeat.y !== 1 || map.offset.x !== 0 || map.offset.y !== 0) return null;
+  let slot = planeAtlasSlots.get(map.uuid);
+  if (slot) return slot;
+  const family = `${w}x${h}`;
+  let atlases = planeAtlases.get(family);
+  if (!atlases) planeAtlases.set(family, atlases = []);
+  const cellW = w + 2 * PLANE_ATLAS_PAD, cellH = h + 2 * PLANE_ATLAS_PAD;
+  const cols = Math.floor(PLANE_ATLAS_PX / cellW), rows = Math.floor(PLANE_ATLAS_PX / cellH);
+  if (!cols || !rows) return null;
+  let atlas = atlases[atlases.length - 1];
+  if (!atlas || atlas.used >= cols * rows) {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = PLANE_ATLAS_PX;
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = map.colorSpace;
+    texture.anisotropy = map.anisotropy;
+    atlas = { canvas, ctx: canvas.getContext("2d"), texture, used: 0 };
+    atlases.push(atlas);
+  }
+  const i = atlas.used++;
+  const x0 = (i % cols) * cellW, y0 = Math.floor(i / cols) * cellH;
+  const ctx = atlas.ctx;
+  // The gutter first, as the image's own edges stretched, then the image over the middle.
+  ctx.drawImage(image, 0, 0, w, 1, x0, y0, cellW, PLANE_ATLAS_PAD + 1);
+  ctx.drawImage(image, 0, h - 1, w, 1, x0, y0 + PLANE_ATLAS_PAD + h - 1, cellW, PLANE_ATLAS_PAD + 1);
+  ctx.drawImage(image, 0, 0, 1, h, x0, y0 + PLANE_ATLAS_PAD, PLANE_ATLAS_PAD + 1, h);
+  ctx.drawImage(image, w - 1, 0, 1, h, x0 + PLANE_ATLAS_PAD + w - 1, y0 + PLANE_ATLAS_PAD, PLANE_ATLAS_PAD + 1, h);
+  ctx.drawImage(image, x0 + PLANE_ATLAS_PAD, y0 + PLANE_ATLAS_PAD);
+  atlas.texture.needsUpdate = true;
+  // A canvas is drawn from the top down and a texture read from the bottom up.
+  slot = { texture: atlas.texture,
+           u0: (x0 + PLANE_ATLAS_PAD) / PLANE_ATLAS_PX, v0: 1 - (y0 + PLANE_ATLAS_PAD + h) / PLANE_ATLAS_PX,
+           su: w / PLANE_ATLAS_PX, sv: h / PLANE_ATLAS_PX };
+  planeAtlasSlots.set(map.uuid, slot);
+  return slot;
+}
+
 function planePart(group, x, y, z, w, h, map, rotationY = 0) {
+  const geometry = new THREE.PlaneGeometry(w, h);
+  const slot = atlasSlotFor(map);
+  if (slot) {
+    const uv = geometry.getAttribute("uv");
+    for (let i = 0; i < uv.count; i += 1) uv.setXY(i, slot.u0 + uv.getX(i) * slot.su, slot.v0 + uv.getY(i) * slot.sv);
+    map = slot.texture;
+  }
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, h),
+    geometry,
     new THREE.MeshStandardMaterial({
       map, color: 0xffffff, transparent: true, alphaTest: 0.22,
       roughness: 0.62, metalness: 0.04, side: THREE.DoubleSide,
@@ -8592,7 +9213,12 @@ function emitRoofParts() {
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.kind = "roof";
-    groups.mapped3d.add(mesh);
+    mesh.userData.surface = "roof_furniture";
+    // Twelve boxes a planter, thirteen thousand planters: a million and a quarter triangles
+    // that nobody sees from the street. Tiled, so that the distance cull can drop them.
+    const pieces = tileInstanced(mesh);
+    if (pieces) pieces.forEach((piece) => groups.mapped3d.add(piece));
+    else groups.mapped3d.add(mesh);
   }
   ROOF_PARTS.clear();
 }
@@ -10035,6 +10661,8 @@ let streetLabelCount = 0;
 // stamps it. Nothing else in this loop depends on the order: the meshes are merged by material
 // and separated by height, not by when they were added.
 const ROAD_TOP_M = 0.06;
+//: A crossing's paint has a vertex every this far along its legs, for settleOnto.
+const CROSSING_PAINT_STEP_M = 0.5;
 for (const way of DATA.ways) {
   if (way.kind !== "crossing" || !way.points || way.points.length < 2) continue;
   if (wayLength(way.points) > 40) continue;
@@ -10051,7 +10679,7 @@ const DRAW_ORDER = DATA.ways.slice().sort((a, b) => {
 });
 let builtWays = 0;
 for (const way of DRAW_ORDER) {
- if ((++builtWays % YIELD_EVERY_WAYS) === 0) await yieldFrame(`Building the streets: ${Math.round(100 * builtWays / DRAW_ORDER.length)}%`);
+ if ((++builtWays & 31) === 0) await maybeYield(`Building the streets: ${Math.round(100 * builtWays / DRAW_ORDER.length)}%`);
  WAY_LIFT = way.kind === "street" && wayFollowsCut(way) ? cutLiftAt
    : way.kind === "crossing" && way.points && way.points.length >= 2 ? lineLiftFor(way.points) : null;
  if (way.kind === "beach") {
@@ -10100,7 +10728,7 @@ for (const way of DRAW_ORDER) {
     if (divider) addMerged("divider:block", divider, "divider_block");
     continue;
   }
-  if (way.kind === "poi") continue;
+  if (way.kind === "poi" || way.kind === "coastline") continue;
   // A parking aisle on a mapped lot is the lot's surface (fold_parking_aisles_into_lots); it
   // fell through to the street branch here and was drawn as a six-metre road across the lot.
   if (way.kind === "parking_aisle") continue;
@@ -10140,6 +10768,26 @@ for (const way of DRAW_ORDER) {
         // The dropped kerb itself is made after the pavements are merged, in
         // dropKerbsAtDriveways: the pavement is let down, not a ramp laid on it.
       }
+    }
+    continue;
+  }
+  if (way.kind === "cycleway") {
+    // A cycle track mapped as its own way (a road's cycleway=separate): the green and its two
+    // edge lines, at road level, joined onto the lanes that run into it. No carriageway, no
+    // kerbs, no footways -- it is a lane, not a street.
+    if (!way.points || way.points.length < 2) continue;
+    const trackWidth = way.track_m || (way.oneway && way.oneway !== "no" ? BIKE_LANE_M : BIKE_TRACK_TWO_WAY_M);
+    let lane = densifyWay(way.points, 2.0);
+    const [sx, sy] = xy(lane[0][0], lane[0][1]);
+    const [ex, ey] = xy(lane[lane.length - 1][0], lane[lane.length - 1][1]);
+    const joinStart = bikeLaneJoinTarget(sx, -sy), joinEnd = bikeLaneJoinTarget(ex, -ey);
+    if (joinStart) lane = blendLaneEnd(lane, joinStart, true);
+    if (joinEnd) lane = blendLaneEnd(lane, joinEnd, false);
+    const fill = ribbon(lane, trackWidth, 0xffffff, 1.0, ROAD_TOP_M + 0.010, 0.012, "bike");
+    if (fill) addMerged("bike:fill", fill, "bike");
+    for (const side of [1, -1]) {
+      const edge = paintedLine(offsetWay(lane, side * (trackWidth / 2)), BIKE_EDGE_W_M, 0xf2f5ef, ROAD_TOP_M + 0.030);
+      if (edge) addMerged("bike:edge", edge, "marking");
     }
     continue;
   }
@@ -10204,8 +10852,11 @@ for (const way of DRAW_ORDER) {
     addPavementRibbon(surfacePoints, widthMeters, color, opacity,
                       surfaceY, surfaceThickness, surfaceKind, true);
   } else {
+    // A crossing's paint is dense along its length -- a vertex every half metre -- because it
+    // is settled onto the road as drawn afterwards (settleOnto), and it can only follow the
+    // road's folds where it has vertices.
     const paintRuns = (isCrossing ? crossingPaintLegs(surfacePoints) : [surfacePoints])
-      .map((run) => isCrossing ? trimWay(run, 0.48) : run)
+      .map((run) => isCrossing ? densifyWay(trimWay(run, 0.48), CROSSING_PAINT_STEP_M) : run)
       .filter((run) => run && run.length >= 2);
     if (!isCrossing || surfaceKind) {
       for (const paintRun of paintRuns) {
@@ -10218,7 +10869,8 @@ for (const way of DRAW_ORDER) {
       }
     }
     if (isCrossing) {
-    addCrossingTactilePads(surfacePoints, widthMeters, roadTop + KERB + 0.018);
+      // The pads wait for the pavements and the corner pieces; see deferredTactilePads.
+      deferredTactilePads.push({ points: surfacePoints, width: widthMeters, fallbackY: roadTop + KERB + 0.018 });
     }
   }
 if (!isSidewalk && !isCrossing && !isPath) {
@@ -10525,6 +11177,34 @@ function addDividedMedians() {
 
 // The corner pieces, once every pavement that meets at one is down.
 const cornersLaid = addPavementCorners();
+//: The tactile pads at the crossings' ends, laid now that every pavement and corner piece is
+//: down, each on top of the pavement it stands on. They used to be laid with the crossing at
+//: the crossing's own kerb height, and a kerb height is measured per way: where the street's
+//: kerb stood taller than the crossing's record, the corner piece stood over the pad and the
+//: yellow showed through it as a sliver, or not at all. The pad's height is read from what was
+//: laid under it (pavedGrid, the highest pavement top in the cells the pad covers); a pad at
+//: an end with no pavement laid keeps the old height. Laid after the loop, they take the ground
+//: grid's lift like the pavement, not the crossing's line.
+let tactilePadsLaid = 0;
+for (const pad of deferredTactilePads) {
+  tactilePadsLaid += addCrossingTactilePads(pad.points, pad.width, (endpoint, into) => {
+    const [ex, ey] = xy(endpoint[0], endpoint[1]);
+    const [ix, iy] = xy(into[0], into[1]);
+    const len = Math.hypot(ix - ex, iy - ey) || 1;
+    const ux = (ex - ix) / len, uz = (-ey + iy) / len;     // out of the crossing, onto the pavement
+    let top;
+    for (const back of [0, 0.5, 1.0, 1.5]) {
+      for (const side of [-1, 0, 1]) {
+        const x = ex + ux * back - uz * side * pad.width * 0.4;
+        const z = -ey + uz * back + ux * side * pad.width * 0.4;
+        const here = pavementTopAt(x, z);
+        if (here !== undefined && (top === undefined || here > top)) top = here;
+      }
+    }
+    return top === undefined ? pad.fallbackY : top + 0.018;
+  });
+}
+deferredTactilePads.length = 0;
 const junctionBoxes = addJunctionBoxes();
 const mediansLaid = addDividedMedians();
 
@@ -11040,6 +11720,8 @@ function grassVariantForRing(ring, count) {
   return Math.floor(seed * count) % count;
 }
 
+//: How small a ground-cover triangle that straddles a kerb line is cut before it is judged.
+const RING_CLIP_M = 3.0;
 function ringGeometry(rings, y, clipToRoad = true) {
   // One geometry for every ring handed in, triangulated by ear clipping through THREE.Shape.
   const positions = [];
@@ -11073,30 +11755,59 @@ function ringGeometry(rings, y, clipToRoad = true) {
       // these rings reach into the carriageway, and 753 of them are front paths that draw with
       // the pavement texture. Drawn unclipped they are the concrete slabs in the middle of the
       // road. A triangle whose centre is on the carriageway is not laid.
-      const drop = new Set();
+      // The centre alone is not enough, and neither are the corners. A park is a handful of
+      // very large triangles, and one of those can have its centre over a road that clips a
+      // corner of the park while the park itself is nowhere near it; a parcel's triangle can
+      // have every corner on dry land and still lie across the alley between them -- Grenard
+      // Terrace was a lawn. So a triangle whose corners and centre do not all agree is cut along
+      // its longest edge, and cut again, until its pieces are under RING_CLIP_M or agree; a
+      // piece with its centre and two corners on the carriageway is not laid. Only the
+      // triangles that straddle the kerb line are cut, so a park stays a handful of triangles.
+      const px = (i) => pos.getX(i), py = (i) => pos.getY(i);
+      const local = new Map();            // extra vertices made by the cuts, keyed by pair
+      let extra = 0;
+      const extraPos = [];
+      const gx = (i) => i < pos.count ? px(i) : extraPos[(i - pos.count) * 2];
+      const gy = (i) => i < pos.count ? py(i) : extraPos[(i - pos.count) * 2 + 1];
+      const road = (i) => insideCarriageway(gx(i), -gy(i), 0.15);
+      const cutAt = (a, b) => {
+        const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+        let m = local.get(key);
+        if (m !== undefined) return m;
+        m = pos.count + extra;
+        extra += 1;
+        extraPos.push((gx(a) + gx(b)) / 2, (gy(a) + gy(b)) / 2);
+        local.set(key, m);
+        return m;
+      };
+      const kept = [];
+      const stack = [];
       const count = index ? index.count : pos.count;
       for (let t = 0; t + 2 < count; t += 3) {
-        const [ia, ib, ic] = index
-          ? [index.getX(t), index.getX(t + 1), index.getX(t + 2)]
-          : [t, t + 1, t + 2];
-        const cx = (pos.getX(ia) + pos.getX(ib) + pos.getX(ic)) / 3;
-        const cy = (pos.getY(ia) + pos.getY(ib) + pos.getY(ic)) / 3;
-        if (!insideCarriageway(cx, -cy, 0.15)) continue;
-        // The centre alone is not enough. A park is a handful of very large triangles, and one
-        // of those can have its centre over a road that clips a corner of the park while the
-        // park itself is nowhere near it -- dropping that triangle takes out the park. Two
-        // corners on the carriageway as well means the triangle really is lying in the street.
-        const corners = (insideCarriageway(pos.getX(ia), -pos.getY(ia), 0.15) ? 1 : 0)
-          + (insideCarriageway(pos.getX(ib), -pos.getY(ib), 0.15) ? 1 : 0)
-          + (insideCarriageway(pos.getX(ic), -pos.getY(ic), 0.15) ? 1 : 0);
-        if (corners >= 2) drop.add(t);
+        stack.push(index ? index.getX(t) : t, index ? index.getX(t + 1) : t + 1, index ? index.getX(t + 2) : t + 2);
+        while (stack.length) {
+          const c = stack.pop(), b = stack.pop(), a = stack.pop();
+          const ra = road(a), rb = road(b), rc = road(c);
+          const centre = insideCarriageway((gx(a) + gx(b) + gx(c)) / 3, -(gy(a) + gy(b) + gy(c)) / 3, 0.15);
+          const agree = ra === rb && rb === rc && rc === centre;
+          const ab = Math.hypot(gx(a) - gx(b), gy(a) - gy(b));
+          const bc = Math.hypot(gx(b) - gx(c), gy(b) - gy(c));
+          const ca = Math.hypot(gx(c) - gx(a), gy(c) - gy(a));
+          const longest = Math.max(ab, bc, ca);
+          if (agree || longest < RING_CLIP_M) {
+            if (!(centre && (ra + rb + rc) >= 2)) kept.push(a, b, c);
+            continue;
+          }
+          if (longest === ab) { const m = cutAt(a, b); stack.push(a, m, c, m, b, c); }
+          else if (longest === bc) { const m = cutAt(b, c); stack.push(a, b, m, a, m, c); }
+          else { const m = cutAt(c, a); stack.push(a, b, m, m, b, c); }
+        }
       }
-      for (let t = 0; t + 2 < count; t += 3) {
-        if (drop.has(t)) continue;
-        if (index) indices.push(base + index.getX(t), base + index.getX(t + 1),
-                                base + index.getX(t + 2));
-        else indices.push(base + t, base + t + 1, base + t + 2);
+      for (let k = 0; k < extra; k += 1) {
+        positions.push(extraPos[k * 2], y, -extraPos[k * 2 + 1]);
+        uvs.push(extraPos[k * 2] / 8, extraPos[k * 2 + 1] / 8);
       }
+      for (let k = 0; k < kept.length; k += 1) indices.push(base + kept[k]);
     } else if (index) {
       for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
     } else {
@@ -11815,6 +12526,7 @@ function buildCourts(ground) {
   try {
     ground = await fetch(asset("sf-corridor-ground.json"), { cache: "no-cache" }).then((r) => r.json());
   } catch (err) {
+    window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { ground: true });
     return;
   }
 
@@ -11969,7 +12681,9 @@ function buildCourts(ground) {
   }
 
   buildCourts(ground);
+  tileGroup(groups.ground);
   await liftOntoGroundAsync(groups.ground, "Standing the ground cover on the hill");
+  window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { ground: true });
   // The ground is down; now the things that stand on it.
   if (groups.furniture.visible) ensureLazyLayer("furniture");
 })();
@@ -12083,6 +12797,10 @@ function dropKerbsAtDriveways(ways) {
 const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
 // Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
 await liftOntoGroundAsync(groups.streets, "Standing the streets on the ground");
+await settleOntoPavement();
+//: For anything driving the page -- the audit's photographs, a test -- the moment the streets
+//: are finished; the ground cover sets its own flag when it is down (see the ground fetch).
+window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { streets: true });
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
@@ -13042,6 +13760,7 @@ function renderStreetFurniture(furniture) {
       + `${Number(placed.bus_zone_paint || 0).toLocaleString()} transit zones painted.`;
     note.userData = placed;
   }
+  tileGroup(groups.furniture);
 }
 
 registerLazyLayer("furniture", async () => {
@@ -13672,7 +14391,7 @@ function groundAt(clientX, clientY) {
   // The ground is the terrain where there is one -- a click on Russian Hill lands on the
   // hill, not on the sea-level plane under it -- and the flat plane elsewhere.
   if (terrainMesh) {
-    const hits = ray.intersectObject(terrainMesh, false);
+    const hits = ray.intersectObjects(terrainTiles, false);
     if (hits.length) {
       const hit = hits[0].point.clone();
       hit.y += TERRAIN_MESH_UNDER_M;
@@ -13804,13 +14523,104 @@ function stepAvatar(now) {
   placeCamera();
 }
 
+//: The resolution is set by the frame time, measured, not by what the GPU is called. The first
+//: FRAME_SAMPLE frames after loading are timed; if their median is over the budget and the
+//: canvas is drawn at more than one device pixel per CSS pixel, the ratio is halved and the
+//: sample taken again. A Retina display at 2x is four times the pixels of 1x; a laptop that
+//: cannot fill them in forty milliseconds gets a sharp-enough picture that moves instead.
+const FRAME_BUDGET_MS = 40;
+const FRAME_SAMPLE = 90;
+let frameSamples = [];
+let lastFrameAt = 0;
+function adaptResolution(now) {
+  if (!frameSamples) return;
+  const dt = lastFrameAt ? now - lastFrameAt : 0;
+  lastFrameAt = now;
+  // The first frame, and a frame after the tab was hidden, measure nothing.
+  if (dt <= 0 || dt > 1000) return;
+  frameSamples.push(dt);
+  if (frameSamples.length < FRAME_SAMPLE) return;
+  const sorted = frameSamples.slice().sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  const ratio = renderer.getPixelRatio();
+  if (median > FRAME_BUDGET_MS && ratio > 1) {
+    const next = Math.max(1, ratio / 2);
+    renderer.setPixelRatio(next);
+    resize();
+    console.info(`kerbside: median frame ${median.toFixed(0)} ms at ${ratio}x over ${FRAME_SAMPLE} frames; drawing at ${next}x`);
+    frameSamples = [];
+    return;
+  }
+  console.info(`kerbside: median frame ${median.toFixed(0)} ms at ${ratio}x over ${FRAME_SAMPLE} frames`);
+  frameSamples = null;
+}
+window.kerbsideFrameStats = () => ({ samples: frameSamples ? frameSamples.length : null, pixelRatio: renderer.getPixelRatio() });
+
+//: How far a fine surface is drawn from the camera, by its class. A kerb is twelve centimetres
+//: tall and a lane line ten wide: past a few hundred metres neither covers a pixel, and at eye
+//: level the blocks in between hide them anyway -- but the frustum test cannot know that, and
+//: a first-person view down the Embarcadero drew every kerb to the far end of the corridor.
+//: Culled by distance a tile at a time, on top of the frustum, scaled by the zoom. Surfaces
+//: not listed -- the roadway, the pavement, the buildings, the ground -- are drawn to the fog.
+const DETAIL_RANGE_M = {
+  kerb: 500, marking: 400, crossing_edges: 400, crossing: 700, walk_underlay: 600, footprint: 600,
+  wall: 800, front_walk: 700, tree_pit: 400, "tree:street": 1200, "tree:broad": 1500, "tree:columnar": 1200,
+  "furniture:post": 500, "furniture:sign_plate": 400, "furniture:sign_back": 400, "furniture:bike_rack": 300,
+  "furniture:shelter": 900, "furniture:curb_zone": 500, "furniture:bus_zone": 700, sign: 400, detail: 700,
+  roof_furniture: 600,
+};
+let detailTiles = [];
+let detailTilesFrame = 0;
+const DETAIL_REINDEX_FRAMES = 60;
+const detailCentre = new THREE.Vector3();
+function cullDetailByDistance(frame, eye = camera) {
+  // The ground and the furniture arrive after the first frame: the list is rebuilt now and then.
+  if (frame % DETAIL_REINDEX_FRAMES === 0) {
+    detailTiles = [];
+    root.traverse((o) => {
+      if (!o.isMesh || !o.frustumCulled || !o.geometry || DETAIL_RANGE_M[o.userData.surface] === undefined) return;
+      // An instanced mesh's bounds are its own, over its instances; its geometry's are the one
+      // unit box at the origin, and read as the tile's they culled every sign post, planter
+      // and tree more than a few hundred metres from the corridor's centre wherever the camera
+      // stood -- which is what "the signs have no poles" was.
+      if (o.isInstancedMesh && !o.boundingSphere) o.computeBoundingSphere();
+      if (o.isInstancedMesh ? o.boundingSphere : o.geometry.boundingSphere) detailTiles.push(o);
+    });
+  }
+  const zoom = FIRST_PERSON_FOV / eye.fov;
+  for (const tile of detailTiles) {
+    const sphere = tile.isInstancedMesh ? tile.boundingSphere : tile.geometry.boundingSphere;
+    detailCentre.copy(sphere.center).applyMatrix4(tile.matrixWorld);
+    const gap = eye.position.distanceTo(detailCentre) - sphere.radius;
+    tile.visible = gap < DETAIL_RANGE_M[tile.userData.surface] * zoom;
+  }
+}
+let frameCount = 0;
+
 function animate(now) {
   requestAnimationFrame(animate);
   // The first frame drawn is the end of loading.
   const progress = document.getElementById("progress");
   if (progress && !progress.hidden) progress.hidden = true;
   stepAvatar(now || performance.now());
+  cullDetailByDistance(frameCount++);
   renderer.render(scene, camera);
+  adaptResolution(now || performance.now());
+}
+{
+  // What was built, for anyone reading the console: the merge's parts and meshes, the triangles
+  // by group, the time. Measured on this machine; the same page on another will differ.
+  const byGroup = {};
+  for (const [name, group] of Object.entries(groups)) {
+    let triangles = 0;
+    group.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const count = o.geometry.index ? o.geometry.index.count : (o.geometry.getAttribute("position") || { count: 0 }).count;
+      triangles += Math.floor(count / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    if (triangles) byGroup[name] = `${(triangles / 1e6).toFixed(2)}M`;
+  }
+  console.info(`kerbside: built in ${(performance.now() / 1000).toFixed(1)} s; merged ${mergeStats.parts.toLocaleString()} parts into ${mergeStats.meshes.toLocaleString()} tiled meshes; triangles by group`, byGroup);
 }
 animate();
 
@@ -13828,7 +14638,7 @@ window.kerbside = {
   scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
   tunnelFloorAt, walkerGroundAt, tunnelBores, terrainHeightAt, groundLiftAt, TERRAIN,
   cutLiftAt, approachRoadAt, wayFollowsCut, APPROACH_CUTS, junctionBoxHulls,
-  goTo, setFirstPerson, placeCamera, state, avatar,
+  goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats, THREE,
   xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
@@ -13898,10 +14708,14 @@ window.kerbside = {
     if (!this._shotEnvironment) this._shotEnvironment = skyEnvironment(this._shot, SKY);
     const environment = scene.environment;
     scene.environment = this._shotEnvironment;
+    // The fine surfaces are culled by distance from the map's camera; the photograph is taken
+    // from its own, so they are culled for it, and put back for the map's next frame.
+    cullDetailByDistance(0, cam);
     try {
       this._shot.render(scene, cam);
     } finally {
       scene.environment = environment;
+      cullDetailByDistance(0);
     }
     return this._shot.domElement.toDataURL("image/jpeg", quality);
   },

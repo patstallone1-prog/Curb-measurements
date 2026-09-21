@@ -84,5 +84,13 @@
     "p99_abs_m": 4.85
    }
   }
+ },
+ "waterline": {
+  "polygons": 3,
+  "coastlines": 0,
+  "surface_m": null,
+  "cells_set_to_water": 0,
+  "cells_open_water": 0,
+  "note": "no water surface in the grid"
  }
 }

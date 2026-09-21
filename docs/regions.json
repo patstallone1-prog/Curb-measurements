@@ -20,13 +20,22 @@
     "terrain": "done",
     "imagery": "done",
     "official": "done",
+    "lidar": "running",
     "build": "done",
-    "audit": "done",
-    "lidar": "running"
+    "audit": "done"
    },
-   "built_at": "2026-09-20T05:34:13Z",
-   "active": {},
-   "note": "built from the map alone"
+   "built_at": "2026-09-21T16:25:00Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "none",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "official",
+    "lanes": "osm+priors"
+   },
+   "note": "terrain from lidar"
   },
   {
    "name": "sf-soma",
@@ -57,13 +66,22 @@
     "terrain": "done",
     "imagery": "done",
     "official": "done",
+    "lidar": "done",
     "build": "done",
-    "audit": "done",
-    "lidar": "done"
+    "audit": "done"
    },
-   "built_at": "2026-09-20T17:38:50Z",
-   "active": {},
-   "note": "built from the map alone"
+   "built_at": "2026-09-21T16:25:16Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "none",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "official",
+    "lanes": "osm+priors"
+   },
+   "note": "terrain from lidar"
   },
   {
    "name": "sf-richmond",
@@ -95,9 +113,18 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-20T19:34:43Z",
-   "active": {},
-   "note": "built from the map alone"
+   "built_at": "2026-09-21T16:25:54Z",
+   "active": {
+    "kerbs": "none",
+    "kerb_height": "none",
+    "building_height": "none",
+    "building_colour": "none",
+    "terrain": "lidar",
+    "parking": "none",
+    "curb_ramps": "official",
+    "lanes": "osm+priors"
+   },
+   "note": "terrain from lidar"
   },
   {
    "name": "oakland-downtown",
@@ -116,7 +143,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T14:57:45Z",
+   "built_at": "2026-09-21T16:26:18Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
@@ -146,7 +173,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T03:52:30Z",
+   "built_at": "2026-09-21T16:26:32Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -176,7 +203,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T04:37:48Z",
+   "built_at": "2026-09-21T16:26:41Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -202,22 +229,22 @@
     "terrain": "done",
     "imagery": "done",
     "official": "done",
+    "lidar": "done",
     "build": "done",
-    "audit": "done",
-    "lidar": "done"
+    "audit": "done"
    },
-   "built_at": "2026-09-20T21:49:22Z",
+   "built_at": "2026-09-21T16:26:59Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
-    "building_height": "none",
+    "building_height": "lidar",
     "building_colour": "none",
     "terrain": "lidar",
     "parking": "none",
     "curb_ramps": "none",
     "lanes": "osm+priors"
    },
-   "note": "terrain from lidar"
+   "note": "building_height from lidar; terrain from lidar"
   }
  ]
 }

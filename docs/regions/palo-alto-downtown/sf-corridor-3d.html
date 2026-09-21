@@ -4,7 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta name="kerbside-assets" content="" />
-<title>Kerbside University Avenue and the streets either side: low, leafy, angled parking 3D</title>
+<meta name="kerbside-regions" content="../../regions.json" />
+<title>Kerbside University Avenue and the streets either side 3D</title>
 <style>
 :root { color-scheme: dark; --bg:#071013; --panel:#10191e; --line:#274048; --ink:#edf5f5; --muted:#8fa4a6; --pink:#ff4d8f; --green:#4fbe86; --amber:#e0a84e; --cyan:#54c8e8; }
 * { box-sizing: border-box; }
@@ -16,6 +17,7 @@ body { margin:0; background:var(--bg); color:var(--ink); font-family:Inter, ui-s
 .hud .panel { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:2px; }
 .hud[data-open="false"] .panel { flex:0 0 auto; padding:12px 16px; }
 #find { width:100%; padding:9px 10px; border-radius:7px; border:1px solid var(--line);
+#region { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.06); color:#e8eef2; font-size:13px; }
         background:rgba(7,16,19,.75); color:var(--ink); font:inherit; }
 #find::placeholder { color:var(--muted); }
 #hits { list-style:none; margin:6px 0 0; padding:0; max-height:190px; overflow:auto; }
@@ -65,13 +67,18 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
 <div class="hud" id="hud" data-open="true">
   <div class="panel">
     <div class="bar">
-      <h1>Kerbside University Avenue and the streets either side: low, leafy, angled parking 3D</h1>
+      <h1>Kerbside University Avenue and the streets either side 3D</h1>
       <button id="fold" aria-expanded="true" aria-controls="hud" title="Collapse">&minus;</button>
     </div>
     <div class="collapsible">
+    <div class="group" id="regiongroup" style="margin-top:4px" hidden>
+      <h2>Region</h2>
+      <select id="region" aria-label="Region"></select>
+      <div class="sub" id="regionnote"></div>
+    </div>
     <div class="group" style="margin-top:4px">
       <h2>Go to a corner or address</h2>
-      <input id="find" type="search" autocomplete="off" placeholder="Columbus &amp; Broadway, or 600 Montgomery" />
+      <input id="find" type="search" autocomplete="off" placeholder="Addison Avenue &amp; Alma Street, or an address" />
       <ul id="hits"></ul>
     </div>
     <div class="meta">
@@ -180,6 +187,42 @@ const detailBytes = (DETAIL_MANIFEST.shards || []).reduce((sum, shard) => sum + 
 document.getElementById("detailnote").textContent = DETAIL_MANIFEST.shards.length
   ? `Full source detail — ${(detailBytes / 1e6).toFixed(1)} MB in two lossless archive shards; the nearby half loads automatically when you inspect a feature.`
   : "Full source detail is unavailable in this build; render geometry remains complete.";
+
+// The other regions this site has built, from an index build_pages.py writes beside the
+// site's root (tools/build_pages.py: regions.json). The page in a region's own folder is told
+// where that index is by the meta tag; without one, or where it is missing, the switcher stays
+// hidden and the page is the one region it was built for.
+(async () => {
+  const meta = document.querySelector('meta[name="kerbside-regions"]');
+  const index = meta && meta.content;
+  if (!index) return;
+  let regions;
+  try {
+    const response = await fetch(index, { cache: "no-cache" });
+    if (!response.ok) return;
+    regions = await response.json();
+  } catch (err) {
+    return;
+  }
+  const list = (regions && regions.regions) || [];
+  if (list.length < 2) return;
+  const select = document.getElementById("region");
+  const group = document.getElementById("regiongroup");
+  const here = location.pathname.replace(/\/[^/]*$/, "/");
+  const root = index.replace(/regions\.json$/, "");
+  for (const region of list) {
+    const option = document.createElement("option");
+    option.value = new URL(root + region.path, location.href).pathname;
+    option.textContent = `${region.title}${region.built ? "" : " (not built)"}`;
+    option.disabled = !region.built;
+    if (option.value.replace(/[^/]*$/, "") === here) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => { location.href = select.value; });
+  const current = list.find((r) => new URL(root + r.path, location.href).pathname.replace(/[^/]*$/, "") === here);
+  document.getElementById("regionnote").textContent = current && current.note ? current.note : "";
+  group.hidden = false;
+})();
 
 const canvas = document.getElementById("scene");
 // A logarithmic depth buffer, because this scene spans five orders of magnitude: a 126 mm kerb
@@ -291,7 +334,23 @@ function xy(lon, lat) { return [(lon - midLon) * metersPerLon, (lat - midLat) * 
 // there: the merged street surfaces vertex by vertex, a building at the lowest corner of its
 // footprint, a tree or a post at its foot, the walker at each step, the camera where it lands.
 const TERRAIN_FRAME = TERRAIN ? TERRAIN.meta.frame : null;
-//: Where the terrain has no data (outside the lidar, under the bay) the ground is flat at 0.
+// ---- the sea ------------------------------------------------------------------------------
+//
+//: The height of the water's surface, measured: the median of the grid's returns off the water
+//: (smc.terrain.waterline writes it into the grid's metadata, and set every cell inside the
+//: map's water polygons to it). Ground at or under the surface, plus a margin for the returns'
+//: own spread, is water: the backdrop is drawn as sea there, at SEA_Y, and nothing stands on it.
+const SEA_SURFACE_M = (TERRAIN && TERRAIN.meta.waterline && TERRAIN.meta.waterline.surface_m !== null
+  && TERRAIN.meta.waterline.surface_m !== undefined) ? TERRAIN.meta.waterline.surface_m : -0.14;
+//: The returns off the water spread a quarter of a metre either side of the surface.
+const WATERLINE_M = SEA_SURFACE_M + 0.45;
+//: Where the sea is drawn: a hand above the returns, so that no water-surface return shows
+//: through the sea as a grey fleck.
+const SEA_Y = SEA_SURFACE_M + 0.12;
+//: Over open water with no returns at all -- outside the lidar, the middle of the bay -- the
+//: ground is a low quay's height above the sea, so that a pier drawn there stands out of it.
+const OPEN_WATER_GROUND_M = SEA_SURFACE_M + 0.6;
+//: Where the terrain has no data (outside the lidar, under the bay) the ground is the sea's.
 function terrainHeightAt(x, z) {
   if (!TERRAIN_FRAME) return 0;
   const f = TERRAIN_FRAME;
@@ -308,7 +367,7 @@ function terrainHeightAt(x, z) {
   // outside the surveyed ground.
   const vals = [v00, v10, v01, v11];
   const good = vals.filter((v) => v !== f.nodata);
-  if (!good.length) return 0;
+  if (!good.length) return OPEN_WATER_GROUND_M;
   const fill = good[0];
   const g = vals.map((v) => (v === f.nodata ? fill : v));
   const cm = g[0] * (1 - tx) * (1 - ty) + g[1] * tx * (1 - ty) + g[2] * (1 - tx) * ty + g[3] * tx * ty;
@@ -430,15 +489,24 @@ function yieldFrame(progress) {
   const box = document.getElementById("progress");
   if (box && progress !== undefined) { box.textContent = progress; box.hidden = false; }
   lastYieldAt = performance.now();
-  // A frame when the browser gives one; a timer when it does not, so that a page building in a
-  // background tab -- where requestAnimationFrame never fires -- still finishes building.
+  // A frame when the browser gives one; a timer when it does not. In a hidden tab neither is
+  // any good -- requestAnimationFrame never fires and a timer is held to once a second, which
+  // made a build of five hundred yields a build of eight minutes for anyone who opened the
+  // page and looked at another tab -- so there the yield is a message to itself, which the
+  // browser delivers at once and which still lets the event loop turn.
   return new Promise((resolve) => {
     let settled = false;
     const go = () => { if (!settled) { settled = true; resolve(); } };
+    if (typeof document !== "undefined" && document.hidden) { yieldWaiters.push(go); yieldChannel.port2.postMessage(0); return; }
     requestAnimationFrame(() => setTimeout(go, 0));
     setTimeout(go, 50);
   });
 }
+const yieldChannel = new MessageChannel();
+const yieldWaiters = [];
+yieldChannel.port1.onmessage = () => { const go = yieldWaiters.shift(); if (go) go(); };
+// An open port keeps Node's event loop alive, and the page smoke test runs this page in Node.
+if (typeof yieldChannel.port1.unref === "function") yieldChannel.port1.unref();
 //: Yield only when the budget is spent: the caller can ask on every iteration.
 function maybeYield(progress) {
   if (performance.now() - lastYieldAt < YIELD_BUDGET_MS) return null;
@@ -594,11 +662,15 @@ const depth = northY - southY;
 // a disc fifty kilometres wide has a very coarse depth gradient across a screen, and the water
 // came up through the streets in patches. Depth precision is the constraint here, not headroom:
 // there is a clear twenty-five centimetres before the roadway at 0.06.
-const BAY_Y = -0.16;
-const PENINSULA_Y = -0.14;
+//: The plate and the base plane stay under the sea; the bay and the map's water polygons
+//: are drawn at the sea's own surface (SEA_Y), so that they meet the backdrop's water.
+//: The land plate stands above the water, as land does: the apron eases the grid's edge down
+//: to it, and at -0.14 m -- under the measured surface -- the whole apron was drawn as sea.
+const PENINSULA_Y = WATERLINE_M + 0.3;
 const LAND_Y = -0.12;
-const WATER_Y = -0.05;
-const BEACH_Y = -0.02;
+const BAY_Y = SEA_Y - 0.05;
+const WATER_Y = SEA_Y + 0.01;
+const BEACH_Y = SEA_Y + 0.03;
 
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(width, depth, 1, 1),
@@ -623,56 +695,104 @@ root.add(ground);
 // camera has something to land on. It is coarser than the height grid the surfaces are
 // lifted by -- one vertex every TERRAIN_MESH_STRIDE cells -- because it is the backdrop, not
 // the measurement; the measurement is in every lifted vertex.
-//: Every fourth cell: an eight-metre grid. The surfaces standing on it are refined to twelve
-//: metres, so a finer backdrop under them was a million triangles a frame for nothing.
-const TERRAIN_MESH_STRIDE = 4;
+//: Every other cell: a four-metre grid. At eight metres the backdrop's own chords rose through
+//: the pavement at every sharp grade break -- at the foot of Grenard Terrace by half a metre.
+const TERRAIN_MESH_STRIDE = 2;
 const TERRAIN_MESH_UNDER_M = 0.35;
 //: The backdrop is cut into tiles of this many mesh vertices a side, each culled on its own.
 //: As one mesh it was 1.8 million triangles that could never be culled, drawn under every
 //: view including a first-person one looking at a single block.
 const TERRAIN_TILE_VERTICES = 128;
+//: Beyond the grid the backdrop carries on: an apron this wide, at APRON_STEP_M, whose height
+//: eases from the grid's edge to the land plate's. Without it the box ended in a cliff, with
+//: the edge streets and buildings standing over a plate three to twenty metres below them.
+const TERRAIN_APRON_M = 2400.0;
+const TERRAIN_APRON_STEP_M = 32.0;
+const TERRAIN_APRON_DECAY_M = 700.0;
+const TERRAIN_LAND = new THREE.Color(0x4a4a45);
+const TERRAIN_SEA = new THREE.Color(0x2c6187);
+const TERRAIN_PLATE = new THREE.Color(0x3d5142);
 const terrainTiles = [];
+//: The backdrop's height and colour at a point: land under the ground, or the sea where the
+//: ground is at or under the waterline. ``apron`` is how far outside the grid the point lies.
+function backdropAt(x, z, apron = 0) {
+  // Outside the grid the lookup clamps to the grid's edge cell, so the apron carries that
+  // cell's land or water outward: water past a wet edge, land past a dry one.
+  const edge = cutLiftAt(x, z);
+  if (edge < WATERLINE_M) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
+  let h = edge;
+  if (apron > 0) {
+    // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
+    // grey ring round the city.
+    const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
+    h = PENINSULA_Y + (h - PENINSULA_Y) * s;
+    return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, s) };
+  }
+  return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_LAND };
+}
+function addBackdropTile(xs, zs, apronOf) {
+  const w = xs.length, h = zs.length;
+  const position = new Float32Array(w * h * 3);
+  const colour = new Float32Array(w * h * 3);
+  for (let r = 0; r < h; r += 1) {
+    for (let c = 0; c < w; c += 1) {
+      const i = (r * w + c) * 3;
+      const at = backdropAt(xs[c], zs[r], apronOf ? apronOf(xs[c], zs[r]) : 0);
+      position[i] = xs[c]; position[i + 1] = at.y; position[i + 2] = zs[r];
+      colour[i] = at.colour.r; colour[i + 1] = at.colour.g; colour[i + 2] = at.colour.b;
+    }
+  }
+  const index = new Uint32Array((w - 1) * (h - 1) * 6);
+  let k = 0;
+  for (let r = 0; r + 1 < h; r += 1) {
+    for (let c = 0; c + 1 < w; c += 1) {
+      const a = r * w + c, b = a + 1, d = a + w, e = d + 1;
+      index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
+  geometry.setIndex(new THREE.BufferAttribute(index, 1));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  const tile = new THREE.Mesh(geometry, TERRAIN_MATERIAL);
+  tile.userData.surface = "terrain";
+  terrainTiles.push(tile);
+  root.add(tile);
+}
+const TERRAIN_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.99, metalness: 0.0 });
 if (TERRAIN_FRAME) {
   const f = TERRAIN_FRAME;
   const cols = Math.floor((f.cols - 1) / TERRAIN_MESH_STRIDE) + 1;
   const rows = Math.floor((f.rows - 1) / TERRAIN_MESH_STRIDE) + 1;
-  const heightAt = (c, r) => cutLiftAt(f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m,
-                                       -(f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m)) - TERRAIN_MESH_UNDER_M;
-  const material = new THREE.MeshStandardMaterial({ color: 0x4a4a45, roughness: 0.99, metalness: 0.0 });
+  const xOf = (c) => f.x0 + (c * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
+  const zOf = (r) => -(f.y0 + (r * TERRAIN_MESH_STRIDE + 0.5) * f.step_m);
   // Tiles share their edge row and column, so there is no seam between them.
   for (let r0 = 0; r0 + 1 < rows; r0 += TERRAIN_TILE_VERTICES - 1) {
     for (let c0 = 0; c0 + 1 < cols; c0 += TERRAIN_TILE_VERTICES - 1) {
       const r1 = Math.min(rows - 1, r0 + TERRAIN_TILE_VERTICES - 1);
       const c1 = Math.min(cols - 1, c0 + TERRAIN_TILE_VERTICES - 1);
-      const w = c1 - c0 + 1, h = r1 - r0 + 1;
-      const position = new Float32Array(w * h * 3);
-      for (let r = 0; r < h; r += 1) {
-        for (let c = 0; c < w; c += 1) {
-          const i = (r * w + c) * 3;
-          position[i] = f.x0 + ((c0 + c) * TERRAIN_MESH_STRIDE + 0.5) * f.step_m;
-          position[i + 1] = heightAt(c0 + c, r0 + r);
-          position[i + 2] = -(f.y0 + ((r0 + r) * TERRAIN_MESH_STRIDE + 0.5) * f.step_m);
-        }
-      }
-      const index = new Uint32Array((w - 1) * (h - 1) * 6);
-      let k = 0;
-      for (let r = 0; r + 1 < h; r += 1) {
-        for (let c = 0; c + 1 < w; c += 1) {
-          const a = r * w + c, b = a + 1, d = a + w, e = d + 1;
-          index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e;
-        }
-      }
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
-      geometry.setIndex(new THREE.BufferAttribute(index, 1));
-      geometry.computeVertexNormals();
-      geometry.computeBoundingSphere();
-      const tile = new THREE.Mesh(geometry, material);
-      tile.userData.surface = "terrain";
-      terrainTiles.push(tile);
-      root.add(tile);
+      const xs = [], zs = [];
+      for (let c = c0; c <= c1; c += 1) xs.push(xOf(c));
+      for (let r = r0; r <= r1; r += 1) zs.push(zOf(r));
+      addBackdropTile(xs, zs, null);
     }
   }
+  // The apron: a ring of coarse tiles round the grid. Its inner row and column are the grid's
+  // own edge vertices, so it meets the grid without a seam.
+  const west = xOf(0), east = xOf(cols - 1), north = zOf(rows - 1), south = zOf(0);
+  const steps = Math.ceil(TERRAIN_APRON_M / TERRAIN_APRON_STEP_M);
+  const outward = (from, sign) => { const out = [from]; for (let i = 1; i <= steps; i += 1) out.push(from + sign * i * TERRAIN_APRON_STEP_M); return out; };
+  const along = (from, to) => { const out = []; const n = Math.max(1, Math.ceil((to - from) / TERRAIN_APRON_STEP_M)); for (let i = 0; i <= n; i += 1) out.push(from + (to - from) * i / n); return out; };
+  const apronOf = (x, z) => Math.max(0, west - x, x - east, north - z, z - south);
+  const xsIn = along(west, east), zsIn = along(north, south);
+  const xsW = outward(west, -1).reverse(), xsE = outward(east, 1);
+  const zsN = outward(north, -1).reverse(), zsS = outward(south, 1);
+  addBackdropTile(xsIn, zsN, apronOf); addBackdropTile(xsIn, zsS, apronOf);
+  addBackdropTile(xsW, zsIn, apronOf); addBackdropTile(xsE, zsIn, apronOf);
+  addBackdropTile(xsW, zsN, apronOf); addBackdropTile(xsE, zsN, apronOf);
+  addBackdropTile(xsW, zsS, apronOf); addBackdropTile(xsE, zsS, apronOf);
 }
 //: The backdrop as one object for the ray that finds the ground under a click.
 const terrainMesh = terrainTiles.length ? new THREE.Group() : null;
@@ -692,8 +812,13 @@ const TERRAIN_REFINE_M = 12.0;
 //: And shorter than that wherever the ground curves: an edge whose midpoint the ground stands
 //: this far above or below its chord is split too, down to TERRAIN_REFINE_MIN_M. A flat block
 //: stays coarse; the brow of a hill and the foot of a retaining wall get the vertices.
+//: A quarter of a metre, down to edges of four. The tolerance has to sit above the grid's own
+//: noise -- the lidar ground is good to about a decimetre -- or the bend rule fires on noise
+//: everywhere and refines the whole city to its smallest edge: at 0.12 m and 2.5 m the scene
+//: was 238 million triangles. What put yards a metre off the hill was not this tolerance but
+//: the refinement budget running out (see refineForTerrain).
 const TERRAIN_CHORD_M = 0.25;
-const TERRAIN_REFINE_MIN_M = 5.0;
+const TERRAIN_REFINE_MIN_M = 4.0;
 //: By surface, [longest edge, chord]. What lies under something else -- the underlay behind a
 //: pavement, the footprint under a building -- is refined coarsely for length, but still for
 //: curvature: a chord that sags below the ground is unseen, a chord that stands above it pokes
@@ -701,9 +826,9 @@ const TERRAIN_REFINE_MIN_M = 5.0;
 //: middle of the sidewalk" was. A parking lot or a front path is refined for length only: the
 //: grid under a multi-storey garage or a flight of steps is a staircase, and chasing every step
 //: of it ran a hundred and fifty lots to over a million triangles. A yard or a park, both.
-//: The underlay's top is 17 cm under the pavement's; its chords may leave the ground by less
+//: The underlay's top is 23 cm under the pavement's; its chords may leave the ground by less
 //: than that, or they stand up through it.
-const TERRAIN_UNDER_CHORD_M = 0.08;
+const TERRAIN_UNDER_CHORD_M = 0.2;
 const TERRAIN_REFINE_BY_SURFACE = {
   walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
   parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0],
@@ -723,7 +848,20 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: position.count }, (_, i) => i);
   let count = position.count;
   const px = (i) => arrays[0][i * 3], pz = (i) => arrays[0][i * 3 + 2];
-  const budget = position.count * TERRAIN_REFINE_GROWTH + 50000;
+  // The bend rule may not run away, but it must be allowed to finish: a budget of a few times
+  // the vertices the mesh started with ran out a third of the way through the corridor's
+  // yards -- one mesh, a hundred and thirty thousand vertices -- and left the rest on chords a
+  // metre off the hill. The budget is what the area the mesh covers could need at the finest
+  // cut, which is bounded whatever the ground does under it.
+  // The mesh's own area -- its triangles', not its box's: the corridor's yards are one mesh
+  // whose box is the corridor -- at the finest cut, two triangles per MIN_M square.
+  let area = 0;
+  for (let t = 0; t + 2 < index.length; t += 3) {
+    const a = index[t], b = index[t + 1], c = index[t + 2];
+    area += Math.abs((px(b) - px(a)) * (pz(c) - pz(a)) - (px(c) - px(a)) * (pz(b) - pz(a))) / 2;
+  }
+  const areaBudget = area / (TERRAIN_REFINE_MIN_M * TERRAIN_REFINE_MIN_M) * 2;
+  const budget = Math.max(position.count * TERRAIN_REFINE_GROWTH + 50000, areaBudget);
   // Where an edge is cut, and whether. Every part is refined on its own -- a pavement ribbon, the
   // corner piece beside it, the kerb tile in front -- and two parts that meet along a line used
   // to bisect it differently, so that on a hill one side stood on the ground where the other
@@ -745,9 +883,15 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
       }
       if (best >= 0) return best;
     }
-    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M || count > budget) return -1;
+    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M / 4 || count > budget) return -1;
     const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
-    return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord ? 0.5 : -1;
+    const bend = Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2);
+    // Down to the minimum edge for a bend over the tolerance; to half that for a bend over twice
+    // it and a quarter for four times -- a retaining wall or a flight of steps in the grid, which
+    // a four-metre edge can only drape over, and which the grid's own decimetre of noise never
+    // reaches.
+    if (bend > chord * 4 || (bend > chord * 2 && len > TERRAIN_REFINE_MIN_M / 2) || (bend > chord && len > TERRAIN_REFINE_MIN_M)) return 0.5;
+    return -1;
   };
   // Keyed by the pair as one number: a string key here was a third of the lift's time. The same
   // pair is always cut at the same parameter, so the key needs no more.
@@ -800,83 +944,103 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   return refined;
 }
 
-//: What stands on the pavement stands on the pavement as drawn. A tactile pad is a small quad
-//: laid at the pavement's height over the ground grid; the pavement under it is a large
-//: triangle lifted at its own vertices, and between them it runs on its chord, which on a hill
-//: is centimetres off the grid -- eight and a half at Montgomery and Clay. So the pad was under
-//: the pavement wherever the chord ran high. No height read from the grid can know that; only
-//: the drawn surface can. After the streets are lifted, the pavement's triangles are indexed by
-//: cell, and every vertex of a pad and its ramp is set from the pavement's rendered top under
-//: it (the highest, where pavements overlap) plus its own few millimetres.
-const PAVEMENT_INDEX_CELL_M = 2.0;
-const PAVEMENT_SURFACES = new Set(["walk", "walk_narrow"]);
-const SETTLE_ABOVE_M = { tactile_warning: 0.018, curb_ramp: 0.016 };
-function indexPavementTriangles() {
-  const cells = new Map();
-  const tris = [];      // flat: x0,y0,z0, x1,y1,z1, x2,y2,z2
-  groups.streets.traverse((o) => {
-    if (!o.isMesh || !PAVEMENT_SURFACES.has(o.userData.surface) || !o.geometry) return;
+//: What stands on a surface stands on the surface as drawn. A tactile pad is a small quad laid
+//: at the pavement's height over the ground grid; the pavement under it is a large triangle
+//: lifted at its own vertices, and between them it runs on its chord, which on a hill is
+//: centimetres off the grid -- eight and a half at Montgomery and Clay. So the pad was under
+//: the pavement wherever the chord ran high. A crossing's paint was worse: lifted along the
+//: straight line between its two ends while the road under it followed the grid, on any grade
+//: change the road rose through it and the legs drew as triangles and fragments. No height
+//: read from the grid can know what the drawn surface does; only the drawn surface can. After
+//: the streets are lifted, every vertex of what stands on a surface is set from that surface's
+//: rendered top under it (the highest, where surfaces overlap) plus its own few millimetres.
+//: The surfaces' triangles are streamed past the vertices, bucketed by cell, so nothing the
+//: size of the road is held twice.
+const SETTLE_CELL_M = 2.0;
+//: What settles onto what: the surfaces stood on, and each standing surface's height above them.
+const SETTLE_RULES = [
+  { onto: new Set(["walk", "walk_narrow"]), above: { tactile_warning: 0.018, curb_ramp: 0.016 }, label: "Setting the pads on the pavement" },
+  // 3.5 cm, not 2: at a junction the carriageway is several ribbons -- two streets' and the
+  // box -- a centimetre or two apart in height, and paint two centimetres over the highest one
+  // under its vertices still had the next ribbon's step come up through it between them.
+  { onto: new Set(["road"]), above: { crossing: 0.035, crossing_edges: 0.035 }, grid: 1.0, label: "Painting the crossings on the road" },
+];
+const settleKey = (x, z) => Math.floor(x / SETTLE_CELL_M) * 1048576 + Math.floor(z / SETTLE_CELL_M);
+async function settleOnto(rule) {
+  // The vertices to settle, by the cell each stands in, and the best top found for each.
+  const buckets = new Map();
+  const tops = new Map();
+  const standing = [];
+  groups.streets.traverse((o) => { if (o.isMesh && o.geometry && rule.above[o.userData.surface] !== undefined) standing.push(o); });
+  if (!standing.length) return 0;
+  for (const o of standing) {
+    // Cut to a metre first, across as well as along: a crossing's paint had two vertices across
+    // its width, and the road under a junction is several ribbons folding at their own stations,
+    // so between those two vertices the road rose through the paint as a dark notch.
+    if (rule.grid) o.geometry = refineForTerrain(o.geometry, rule.grid, 0);
+    const position = o.geometry.getAttribute("position");
+    const best = new Float32Array(position.count).fill(NaN);
+    tops.set(position, best);
+    for (let i = 0; i < position.count; i += 1) {
+      const key = settleKey(position.getX(i), position.getZ(i));
+      let list = buckets.get(key);
+      if (!list) buckets.set(key, list = []);
+      list.push(position, i);
+    }
+  }
+  const bases = [];
+  groups.streets.traverse((o) => { if (o.isMesh && o.geometry && rule.onto.has(o.userData.surface)) bases.push(o); });
+  for (const o of bases) {
     const position = o.geometry.getAttribute("position");
     const index = o.geometry.getIndex();
     const n = index ? index.count : position.count;
     for (let i = 0; i + 2 < n; i += 3) {
       const a = index ? index.getX(i) : i, b = index ? index.getX(i + 1) : i + 1, c = index ? index.getX(i + 2) : i + 2;
-      const id = tris.length / 9;
-      tris.push(position.getX(a), position.getY(a), position.getZ(a),
-                position.getX(b), position.getY(b), position.getZ(b),
-                position.getX(c), position.getY(c), position.getZ(c));
-      const x0 = Math.floor(Math.min(tris[id * 9], tris[id * 9 + 3], tris[id * 9 + 6]) / PAVEMENT_INDEX_CELL_M);
-      const x1 = Math.floor(Math.max(tris[id * 9], tris[id * 9 + 3], tris[id * 9 + 6]) / PAVEMENT_INDEX_CELL_M);
-      const z0 = Math.floor(Math.min(tris[id * 9 + 2], tris[id * 9 + 5], tris[id * 9 + 8]) / PAVEMENT_INDEX_CELL_M);
-      const z1 = Math.floor(Math.max(tris[id * 9 + 2], tris[id * 9 + 5], tris[id * 9 + 8]) / PAVEMENT_INDEX_CELL_M);
-      for (let cx = x0; cx <= x1; cx += 1) for (let cz = z0; cz <= z1; cz += 1) {
-        const key = cx * 1048576 + cz;
-        let list = cells.get(key);
-        if (!list) cells.set(key, list = []);
-        list.push(id);
-      }
-    }
-  });
-  const topAt = (x, z) => {
-    const list = cells.get(Math.floor(x / PAVEMENT_INDEX_CELL_M) * 1048576 + Math.floor(z / PAVEMENT_INDEX_CELL_M));
-    if (!list) return undefined;
-    let top;
-    for (const id of list) {
-      const o = id * 9;
-      const ax = tris[o], az = tris[o + 2], bx = tris[o + 3], bz = tris[o + 5], cx = tris[o + 6], cz = tris[o + 8];
+      const ax = position.getX(a), az = position.getZ(a), bx = position.getX(b), bz = position.getZ(b), cx = position.getX(c), cz = position.getZ(c);
       const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
       if (Math.abs(d) < 1e-9) continue;
-      const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
-      const v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
-      const w = 1 - u - v;
-      if (u < -1e-3 || v < -1e-3 || w < -1e-3) continue;
-      const y = u * tris[o + 1] + v * tris[o + 4] + w * tris[o + 7];
-      if (top === undefined || y > top) top = y;
+      const x0 = Math.floor(Math.min(ax, bx, cx) / SETTLE_CELL_M), x1 = Math.floor(Math.max(ax, bx, cx) / SETTLE_CELL_M);
+      const z0 = Math.floor(Math.min(az, bz, cz) / SETTLE_CELL_M), z1 = Math.floor(Math.max(az, bz, cz) / SETTLE_CELL_M);
+      const ay = position.getY(a), by = position.getY(b), cy = position.getY(c);
+      for (let gx = x0; gx <= x1; gx += 1) {
+        for (let gz = z0; gz <= z1; gz += 1) {
+          const list = buckets.get(gx * 1048576 + gz);
+          if (!list) continue;
+          for (let k = 0; k < list.length; k += 2) {
+            const pos = list[k], vi = list[k + 1];
+            const x = pos.getX(vi), z = pos.getZ(vi);
+            const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
+            const v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
+            const w = 1 - u - v;
+            if (u < -1e-3 || v < -1e-3 || w < -1e-3) continue;
+            const y = u * ay + v * by + w * cy;
+            const best = tops.get(pos);
+            if (Number.isNaN(best[vi]) || y > best[vi]) best[vi] = y;
+          }
+        }
+      }
     }
-    return top;
-  };
-  return { topAt, triangles: tris.length / 9 };
-}
-async function settleOntoPavement() {
-  if (!TERRAIN_FRAME) return 0;
-  const { topAt } = indexPavementTriangles();
-  await maybeYield("Setting the pads on the pavement");
+    await maybeYield(rule.label);
+  }
   let settled = 0;
-  const meshes = [];
-  groups.streets.traverse((o) => { if (o.isMesh && SETTLE_ABOVE_M[o.userData.surface] !== undefined) meshes.push(o); });
-  for (const o of meshes) {
-    const above = SETTLE_ABOVE_M[o.userData.surface];
+  for (const o of standing) {
+    const above = rule.above[o.userData.surface];
     const position = o.geometry.getAttribute("position");
+    const best = tops.get(position);
     for (let i = 0; i < position.count; i += 1) {
-      const top = topAt(position.getX(i), position.getZ(i));
-      if (top === undefined) continue;
-      position.setY(i, top + above);
+      if (Number.isNaN(best[i])) continue;
+      position.setY(i, best[i] + above);
       settled += 1;
     }
     position.needsUpdate = true;
     o.geometry.computeBoundingSphere();
-    await maybeYield("Setting the pads on the pavement");
   }
+  return settled;
+}
+async function settleOntoPavement() {
+  if (!TERRAIN_FRAME) return 0;
+  let settled = 0;
+  for (const rule of SETTLE_RULES) settled += await settleOnto(rule);
   return settled;
 }
 
@@ -2577,6 +2741,17 @@ function indexBikeLaneEnds(ways) {
   bikeJoinGrid.clear();
   bikeAreaGrid.clear();
   for (const way of ways) {
+    if (way.kind === "cycleway" && way.points && way.points.length >= 2) {
+      // A separate track's ends are joins too: the road's lane eases onto it and it onto the lane.
+      for (const end of [way.points[0], way.points[way.points.length - 1]]) {
+        const [x, y] = xy(end[0], end[1]);
+        const key = `${Math.floor(x / BIKE_JOIN_M)}:${Math.floor(-y / BIKE_JOIN_M)}`;
+        let bucket = bikeJoinGrid.get(key);
+        if (!bucket) bikeJoinGrid.set(key, bucket = []);
+        bucket.push([x, -y]);
+      }
+      continue;
+    }
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
     const sides = cyclewaySides(way);
     if (!sides.length) continue;
@@ -3730,8 +3905,13 @@ function garageTextureFor(variant, tint) {
   // Keyed on the colour quantised to three levels a channel. A door painted the house's exact
   // shade and a door two per cent off it are the same door; twenty-seven buckets times six
   // designs is a few dozen canvases for fourteen thousand garages.
+  // Quantised in sRGB, where the eye lives. Quantising the linear components to three levels
+  // turned a grey-pink house (#8b8082: linear 0.26, 0.21, 0.23) into (0.5, 0, 0) -- a pure red
+  // door on a grey house, at random, across the corridor.
   const colour = new THREE.Color(tint);
-  const bucket = [colour.r, colour.g, colour.b].map((v) => Math.round(v * 2) / 2);
+  const srgb = { r: 0, g: 0, b: 0 };
+  colour.getRGB(srgb, THREE.SRGBColorSpace);
+  const bucket = [srgb.r, srgb.g, srgb.b].map((v) => Math.round(v * 3) / 3);
   const key = `${variant}-${bucket.join(",")}`;
   if (!GARAGE_CACHE.has(key)) {
     const hex = "#" + bucket.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
@@ -3808,7 +3988,7 @@ function laneCountForWay(way) {
 }
 
 //: Road widths that came from the city's kerb lines, one way or another.
-const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half", "tunnel_cut"]);
+const MEASURED_ROAD_SOURCES = new Set(["curb_geometry", "official_curbs", "divided_half", "tunnel_cut", "curb_profile", "lidar_profile"]);
 
 function nominalRoadWidth(way) {
   // Keep official width metadata intact, but render one OSM way as one carriageway.
@@ -4845,7 +5025,10 @@ const PROPERTY_LINE_PAVEMENT_WIDTH_M = 8.6;
 const UNDERLAY_MIN_WIDTH_M = 0.8;
 //: How far a width is held before the underlay is allowed to change it.
 const UNDERLAY_RUN_M = 5.0;
-const PROPERTY_LINE_PAVEMENT_Y = 0.012;
+//: Five centimetres under the flat model's ground rather than one above it: the underlay's top
+//: is then 23 cm under the pavement's, room for a chord tolerance above the grid's noise
+//: without the underlay standing up through the pavement on a bend.
+const PROPERTY_LINE_PAVEMENT_Y = -0.05;
 const PROPERTY_LINE_PAVEMENT_THICKNESS_M = 0.004;
 
 // ---- where OpenStreetMap says there is no pavement ----
@@ -7116,6 +7299,8 @@ function sandTexture() {
 const BIKE_LANE = bikeLaneTexture();
 const SAND = sandTexture();
 const BIKE_LANE_M = 1.75;
+//: A two-way track mapped as its own way, where the map gives no width.
+const BIKE_TRACK_TWO_WAY_M = 2.4;
 const BIKE_EDGE_W_M = 0.18;
 
 // Which lane ends are joins and which are ends. Has to run after the widths are clamped, since
@@ -10476,6 +10661,8 @@ let streetLabelCount = 0;
 // stamps it. Nothing else in this loop depends on the order: the meshes are merged by material
 // and separated by height, not by when they were added.
 const ROAD_TOP_M = 0.06;
+//: A crossing's paint has a vertex every this far along its legs, for settleOnto.
+const CROSSING_PAINT_STEP_M = 0.5;
 for (const way of DATA.ways) {
   if (way.kind !== "crossing" || !way.points || way.points.length < 2) continue;
   if (wayLength(way.points) > 40) continue;
@@ -10541,7 +10728,7 @@ for (const way of DRAW_ORDER) {
     if (divider) addMerged("divider:block", divider, "divider_block");
     continue;
   }
-  if (way.kind === "poi") continue;
+  if (way.kind === "poi" || way.kind === "coastline") continue;
   // A parking aisle on a mapped lot is the lot's surface (fold_parking_aisles_into_lots); it
   // fell through to the street branch here and was drawn as a six-metre road across the lot.
   if (way.kind === "parking_aisle") continue;
@@ -10581,6 +10768,26 @@ for (const way of DRAW_ORDER) {
         // The dropped kerb itself is made after the pavements are merged, in
         // dropKerbsAtDriveways: the pavement is let down, not a ramp laid on it.
       }
+    }
+    continue;
+  }
+  if (way.kind === "cycleway") {
+    // A cycle track mapped as its own way (a road's cycleway=separate): the green and its two
+    // edge lines, at road level, joined onto the lanes that run into it. No carriageway, no
+    // kerbs, no footways -- it is a lane, not a street.
+    if (!way.points || way.points.length < 2) continue;
+    const trackWidth = way.track_m || (way.oneway && way.oneway !== "no" ? BIKE_LANE_M : BIKE_TRACK_TWO_WAY_M);
+    let lane = densifyWay(way.points, 2.0);
+    const [sx, sy] = xy(lane[0][0], lane[0][1]);
+    const [ex, ey] = xy(lane[lane.length - 1][0], lane[lane.length - 1][1]);
+    const joinStart = bikeLaneJoinTarget(sx, -sy), joinEnd = bikeLaneJoinTarget(ex, -ey);
+    if (joinStart) lane = blendLaneEnd(lane, joinStart, true);
+    if (joinEnd) lane = blendLaneEnd(lane, joinEnd, false);
+    const fill = ribbon(lane, trackWidth, 0xffffff, 1.0, ROAD_TOP_M + 0.010, 0.012, "bike");
+    if (fill) addMerged("bike:fill", fill, "bike");
+    for (const side of [1, -1]) {
+      const edge = paintedLine(offsetWay(lane, side * (trackWidth / 2)), BIKE_EDGE_W_M, 0xf2f5ef, ROAD_TOP_M + 0.030);
+      if (edge) addMerged("bike:edge", edge, "marking");
     }
     continue;
   }
@@ -10645,8 +10852,11 @@ for (const way of DRAW_ORDER) {
     addPavementRibbon(surfacePoints, widthMeters, color, opacity,
                       surfaceY, surfaceThickness, surfaceKind, true);
   } else {
+    // A crossing's paint is dense along its length -- a vertex every half metre -- because it
+    // is settled onto the road as drawn afterwards (settleOnto), and it can only follow the
+    // road's folds where it has vertices.
     const paintRuns = (isCrossing ? crossingPaintLegs(surfacePoints) : [surfacePoints])
-      .map((run) => isCrossing ? trimWay(run, 0.48) : run)
+      .map((run) => isCrossing ? densifyWay(trimWay(run, 0.48), CROSSING_PAINT_STEP_M) : run)
       .filter((run) => run && run.length >= 2);
     if (!isCrossing || surfaceKind) {
       for (const paintRun of paintRuns) {
@@ -11510,6 +11720,8 @@ function grassVariantForRing(ring, count) {
   return Math.floor(seed * count) % count;
 }
 
+//: How small a ground-cover triangle that straddles a kerb line is cut before it is judged.
+const RING_CLIP_M = 3.0;
 function ringGeometry(rings, y, clipToRoad = true) {
   // One geometry for every ring handed in, triangulated by ear clipping through THREE.Shape.
   const positions = [];
@@ -11543,30 +11755,59 @@ function ringGeometry(rings, y, clipToRoad = true) {
       // these rings reach into the carriageway, and 753 of them are front paths that draw with
       // the pavement texture. Drawn unclipped they are the concrete slabs in the middle of the
       // road. A triangle whose centre is on the carriageway is not laid.
-      const drop = new Set();
+      // The centre alone is not enough, and neither are the corners. A park is a handful of
+      // very large triangles, and one of those can have its centre over a road that clips a
+      // corner of the park while the park itself is nowhere near it; a parcel's triangle can
+      // have every corner on dry land and still lie across the alley between them -- Grenard
+      // Terrace was a lawn. So a triangle whose corners and centre do not all agree is cut along
+      // its longest edge, and cut again, until its pieces are under RING_CLIP_M or agree; a
+      // piece with its centre and two corners on the carriageway is not laid. Only the
+      // triangles that straddle the kerb line are cut, so a park stays a handful of triangles.
+      const px = (i) => pos.getX(i), py = (i) => pos.getY(i);
+      const local = new Map();            // extra vertices made by the cuts, keyed by pair
+      let extra = 0;
+      const extraPos = [];
+      const gx = (i) => i < pos.count ? px(i) : extraPos[(i - pos.count) * 2];
+      const gy = (i) => i < pos.count ? py(i) : extraPos[(i - pos.count) * 2 + 1];
+      const road = (i) => insideCarriageway(gx(i), -gy(i), 0.15);
+      const cutAt = (a, b) => {
+        const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+        let m = local.get(key);
+        if (m !== undefined) return m;
+        m = pos.count + extra;
+        extra += 1;
+        extraPos.push((gx(a) + gx(b)) / 2, (gy(a) + gy(b)) / 2);
+        local.set(key, m);
+        return m;
+      };
+      const kept = [];
+      const stack = [];
       const count = index ? index.count : pos.count;
       for (let t = 0; t + 2 < count; t += 3) {
-        const [ia, ib, ic] = index
-          ? [index.getX(t), index.getX(t + 1), index.getX(t + 2)]
-          : [t, t + 1, t + 2];
-        const cx = (pos.getX(ia) + pos.getX(ib) + pos.getX(ic)) / 3;
-        const cy = (pos.getY(ia) + pos.getY(ib) + pos.getY(ic)) / 3;
-        if (!insideCarriageway(cx, -cy, 0.15)) continue;
-        // The centre alone is not enough. A park is a handful of very large triangles, and one
-        // of those can have its centre over a road that clips a corner of the park while the
-        // park itself is nowhere near it -- dropping that triangle takes out the park. Two
-        // corners on the carriageway as well means the triangle really is lying in the street.
-        const corners = (insideCarriageway(pos.getX(ia), -pos.getY(ia), 0.15) ? 1 : 0)
-          + (insideCarriageway(pos.getX(ib), -pos.getY(ib), 0.15) ? 1 : 0)
-          + (insideCarriageway(pos.getX(ic), -pos.getY(ic), 0.15) ? 1 : 0);
-        if (corners >= 2) drop.add(t);
+        stack.push(index ? index.getX(t) : t, index ? index.getX(t + 1) : t + 1, index ? index.getX(t + 2) : t + 2);
+        while (stack.length) {
+          const c = stack.pop(), b = stack.pop(), a = stack.pop();
+          const ra = road(a), rb = road(b), rc = road(c);
+          const centre = insideCarriageway((gx(a) + gx(b) + gx(c)) / 3, -(gy(a) + gy(b) + gy(c)) / 3, 0.15);
+          const agree = ra === rb && rb === rc && rc === centre;
+          const ab = Math.hypot(gx(a) - gx(b), gy(a) - gy(b));
+          const bc = Math.hypot(gx(b) - gx(c), gy(b) - gy(c));
+          const ca = Math.hypot(gx(c) - gx(a), gy(c) - gy(a));
+          const longest = Math.max(ab, bc, ca);
+          if (agree || longest < RING_CLIP_M) {
+            if (!(centre && (ra + rb + rc) >= 2)) kept.push(a, b, c);
+            continue;
+          }
+          if (longest === ab) { const m = cutAt(a, b); stack.push(a, m, c, m, b, c); }
+          else if (longest === bc) { const m = cutAt(b, c); stack.push(a, b, m, a, m, c); }
+          else { const m = cutAt(c, a); stack.push(a, b, m, m, b, c); }
+        }
       }
-      for (let t = 0; t + 2 < count; t += 3) {
-        if (drop.has(t)) continue;
-        if (index) indices.push(base + index.getX(t), base + index.getX(t + 1),
-                                base + index.getX(t + 2));
-        else indices.push(base + t, base + t + 1, base + t + 2);
+      for (let k = 0; k < extra; k += 1) {
+        positions.push(extraPos[k * 2], y, -extraPos[k * 2 + 1]);
+        uvs.push(extraPos[k * 2] / 8, extraPos[k * 2 + 1] / 8);
       }
+      for (let k = 0; k < kept.length; k += 1) indices.push(base + kept[k]);
     } else if (index) {
       for (let i = 0; i < index.count; i += 1) indices.push(base + index.getX(i));
     } else {
@@ -12285,6 +12526,7 @@ function buildCourts(ground) {
   try {
     ground = await fetch(asset("sf-corridor-ground.json"), { cache: "no-cache" }).then((r) => r.json());
   } catch (err) {
+    window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { ground: true });
     return;
   }
 
@@ -12441,6 +12683,7 @@ function buildCourts(ground) {
   buildCourts(ground);
   tileGroup(groups.ground);
   await liftOntoGroundAsync(groups.ground, "Standing the ground cover on the hill");
+  window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { ground: true });
   // The ground is down; now the things that stand on it.
   if (groups.furniture.visible) ensureLazyLayer("furniture");
 })();
@@ -12555,6 +12798,9 @@ const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
 // Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
 await liftOntoGroundAsync(groups.streets, "Standing the streets on the ground");
 await settleOntoPavement();
+//: For anything driving the page -- the audit's photographs, a test -- the moment the streets
+//: are finished; the ground cover sets its own flag when it is down (see the ground fetch).
+window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { streets: true });
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {

@@ -84,5 +84,15 @@
     "p99_abs_m": 6.629
    }
   }
+ },
+ "waterline": {
+  "polygons": 13,
+  "coastlines": 0,
+  "surface_m": 0.852,
+  "cells_set_to_water": 62624,
+  "cells_open_water": 97384,
+  "cells_water": 66159,
+  "land_m": 1.2,
+  "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines out to ground more than LAND_M over the water, were set to the water surface the lidar measured; the renderer draws the sea at and under that surface"
  }
 }
