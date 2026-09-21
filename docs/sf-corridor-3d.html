@@ -694,13 +694,18 @@ const TERRAIN_REFINE_M = 12.0;
 //: stays coarse; the brow of a hill and the foot of a retaining wall get the vertices.
 const TERRAIN_CHORD_M = 0.25;
 const TERRAIN_REFINE_MIN_M = 5.0;
-//: By surface, [longest edge, chord]: what lies under something else -- the underlay behind a
-//: pavement, the footprint under a building -- is refined coarsely and never for curvature,
-//: because nobody sees its chords. A parking lot or a front path is refined for length only:
-//: the grid under a multi-storey garage or a flight of steps is a staircase, and chasing every
-//: step of it ran a hundred and fifty lots to over a million triangles. A yard or a park, both.
+//: By surface, [longest edge, chord]. What lies under something else -- the underlay behind a
+//: pavement, the footprint under a building -- is refined coarsely for length, but still for
+//: curvature: a chord that sags below the ground is unseen, a chord that stands above it pokes
+//: up through the pavement laid over it as a bare patch, which is what "missing tiles in the
+//: middle of the sidewalk" was. A parking lot or a front path is refined for length only: the
+//: grid under a multi-storey garage or a flight of steps is a staircase, and chasing every step
+//: of it ran a hundred and fifty lots to over a million triangles. A yard or a park, both.
+//: The underlay's top is 17 cm under the pavement's; its chords may leave the ground by less
+//: than that, or they stand up through it.
+const TERRAIN_UNDER_CHORD_M = 0.08;
 const TERRAIN_REFINE_BY_SURFACE = {
-  walk_underlay: [24.0, 0], footprint: [24.0, 0], garage: [24.0, 0],
+  walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
   parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0],
   yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
 };
@@ -718,26 +723,48 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   const index = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: position.count }, (_, i) => i);
   let count = position.count;
   const px = (i) => arrays[0][i * 3], pz = (i) => arrays[0][i * 3 + 2];
-  // Does the ground leave this edge's chord by more than the tolerance at its midpoint?
   const budget = position.count * TERRAIN_REFINE_GROWTH + 50000;
-  const bends = (a, b, len) => {
-    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M || count > budget) return false;
+  // Where an edge is cut, and whether. Every part is refined on its own -- a pavement ribbon, the
+  // corner piece beside it, the kerb tile in front -- and two parts that meet along a line used
+  // to bisect it differently, so that on a hill one side stood on the ground where the other
+  // was still on its chord: a crack the width of the chord's error, at every seam, "sloppy
+  // edges". The cuts are now decided by the edge's endpoints alone: a long edge is cut where
+  // it crosses a line of a fixed world lattice maxEdge apart (the crossing nearest its middle),
+  // and a short one whose midpoint the ground leaves by more than the tolerance is cut in the
+  // middle. Two parts sharing an edge make the same cuts, so the seam stays closed.
+  const lattice = maxEdge;
+  const cutAt = (a, b, len) => {
+    if (len >= TERRAIN_REFINE_MIN_M) {
+      let best = -1, bestOff = Infinity;
+      for (const [pa, pb] of [[px(a), px(b)], [pz(a), pz(b)]]) {
+        const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
+        for (let k = Math.floor(lo / lattice) + 1; k * lattice < hi; k += 1) {
+          const t0 = (k * lattice - pa) / (pb - pa);
+          if (t0 > 1e-4 && t0 < 1 - 1e-4 && Math.abs(t0 - 0.5) < bestOff) { best = t0; bestOff = Math.abs(t0 - 0.5); }
+        }
+      }
+      if (best >= 0) return best;
+    }
+    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M || count > budget) return -1;
     const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
-    return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord;
+    return Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2) > chord ? 0.5 : -1;
   };
-  // Keyed by the pair as one number: a string key here was a third of the lift's time.
-  const midpoints = new Map();
-  const midpoint = (a, b) => {
+  // Keyed by the pair as one number: a string key here was a third of the lift's time. The same
+  // pair is always cut at the same parameter, so the key needs no more.
+  const cuts = new Map();
+  const cut = (a, b, t0) => {
     const key = a < b ? a * 16777216 + b : b * 16777216 + a;
-    let m = midpoints.get(key);
+    let m = cuts.get(key);
     if (m !== undefined) return m;
+    const s = a < b ? t0 : 1 - t0;          // the parameter from the lower index, so both orders agree
+    const lo = Math.min(a, b), hi = Math.max(a, b);
     m = count;
     count += 1;
     for (let k = 0; k < arrays.length; k += 1) {
       const n = sizes[k];
-      for (let c = 0; c < n; c += 1) arrays[k].push((arrays[k][a * n + c] + arrays[k][b * n + c]) / 2);
+      for (let c = 0; c < n; c += 1) arrays[k].push(arrays[k][lo * n + c] * (1 - s) + arrays[k][hi * n + c] * s);
     }
-    midpoints.set(key, m);
+    cuts.set(key, m);
     return m;
   };
   const out = [];
@@ -750,21 +777,18 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
       const ab = Math.hypot(px(a) - px(b), pz(a) - pz(b));
       const bc = Math.hypot(px(b) - px(c), pz(b) - pz(c));
       const ca = Math.hypot(px(c) - px(a), pz(c) - pz(a));
-      const longest = Math.max(ab, bc, ca);
-      let edge = longest > maxEdge ? (longest === ab ? 0 : longest === bc ? 1 : 2) : -1;
-      if (edge < 0) {
-        // Not long, but does the ground bend under it? The longest bending edge is split.
-        if (ab >= bc && ab >= ca && bends(a, b, ab)) edge = 0;
-        else if (bc >= ca && bends(b, c, bc)) edge = 1;
-        else if (bends(c, a, ca)) edge = 2;
-        else if (bends(a, b, ab)) edge = 0;
-        else if (bends(b, c, bc)) edge = 1;
+      // The longest edge that wants a cut is cut; the others come round again.
+      const order = [[ab, 0], [bc, 1], [ca, 2]].sort((u, v) => v[0] - u[0]);
+      let edge = -1, at = -1;
+      for (const [len, which] of order) {
+        const t0 = which === 0 ? cutAt(a, b, len) : which === 1 ? cutAt(b, c, len) : cutAt(c, a, len);
+        if (t0 >= 0) { edge = which; at = t0; break; }
       }
       if (edge < 0) { out.push(a, b, c); continue; }
       split += 1;
-      if (edge === 0) { const m = midpoint(a, b); stack.push(a, m, c, m, b, c); }
-      else if (edge === 1) { const m = midpoint(b, c); stack.push(a, b, m, a, m, c); }
-      else { const m = midpoint(c, a); stack.push(a, b, m, m, b, c); }
+      if (edge === 0) { const m = cut(a, b, at); stack.push(a, m, c, m, b, c); }
+      else if (edge === 1) { const m = cut(b, c, at); stack.push(a, b, m, a, m, c); }
+      else { const m = cut(c, a, at); stack.push(a, b, m, m, b, c); }
     }
   }
   if (!split) return geometry;
@@ -774,6 +798,86 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   refined.userData = geometry.userData;
   geometry.dispose();
   return refined;
+}
+
+//: What stands on the pavement stands on the pavement as drawn. A tactile pad is a small quad
+//: laid at the pavement's height over the ground grid; the pavement under it is a large
+//: triangle lifted at its own vertices, and between them it runs on its chord, which on a hill
+//: is centimetres off the grid -- eight and a half at Montgomery and Clay. So the pad was under
+//: the pavement wherever the chord ran high. No height read from the grid can know that; only
+//: the drawn surface can. After the streets are lifted, the pavement's triangles are indexed by
+//: cell, and every vertex of a pad and its ramp is set from the pavement's rendered top under
+//: it (the highest, where pavements overlap) plus its own few millimetres.
+const PAVEMENT_INDEX_CELL_M = 2.0;
+const PAVEMENT_SURFACES = new Set(["walk", "walk_narrow"]);
+const SETTLE_ABOVE_M = { tactile_warning: 0.018, curb_ramp: 0.016 };
+function indexPavementTriangles() {
+  const cells = new Map();
+  const tris = [];      // flat: x0,y0,z0, x1,y1,z1, x2,y2,z2
+  groups.streets.traverse((o) => {
+    if (!o.isMesh || !PAVEMENT_SURFACES.has(o.userData.surface) || !o.geometry) return;
+    const position = o.geometry.getAttribute("position");
+    const index = o.geometry.getIndex();
+    const n = index ? index.count : position.count;
+    for (let i = 0; i + 2 < n; i += 3) {
+      const a = index ? index.getX(i) : i, b = index ? index.getX(i + 1) : i + 1, c = index ? index.getX(i + 2) : i + 2;
+      const id = tris.length / 9;
+      tris.push(position.getX(a), position.getY(a), position.getZ(a),
+                position.getX(b), position.getY(b), position.getZ(b),
+                position.getX(c), position.getY(c), position.getZ(c));
+      const x0 = Math.floor(Math.min(tris[id * 9], tris[id * 9 + 3], tris[id * 9 + 6]) / PAVEMENT_INDEX_CELL_M);
+      const x1 = Math.floor(Math.max(tris[id * 9], tris[id * 9 + 3], tris[id * 9 + 6]) / PAVEMENT_INDEX_CELL_M);
+      const z0 = Math.floor(Math.min(tris[id * 9 + 2], tris[id * 9 + 5], tris[id * 9 + 8]) / PAVEMENT_INDEX_CELL_M);
+      const z1 = Math.floor(Math.max(tris[id * 9 + 2], tris[id * 9 + 5], tris[id * 9 + 8]) / PAVEMENT_INDEX_CELL_M);
+      for (let cx = x0; cx <= x1; cx += 1) for (let cz = z0; cz <= z1; cz += 1) {
+        const key = cx * 1048576 + cz;
+        let list = cells.get(key);
+        if (!list) cells.set(key, list = []);
+        list.push(id);
+      }
+    }
+  });
+  const topAt = (x, z) => {
+    const list = cells.get(Math.floor(x / PAVEMENT_INDEX_CELL_M) * 1048576 + Math.floor(z / PAVEMENT_INDEX_CELL_M));
+    if (!list) return undefined;
+    let top;
+    for (const id of list) {
+      const o = id * 9;
+      const ax = tris[o], az = tris[o + 2], bx = tris[o + 3], bz = tris[o + 5], cx = tris[o + 6], cz = tris[o + 8];
+      const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+      if (Math.abs(d) < 1e-9) continue;
+      const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
+      const v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
+      const w = 1 - u - v;
+      if (u < -1e-3 || v < -1e-3 || w < -1e-3) continue;
+      const y = u * tris[o + 1] + v * tris[o + 4] + w * tris[o + 7];
+      if (top === undefined || y > top) top = y;
+    }
+    return top;
+  };
+  return { topAt, triangles: tris.length / 9 };
+}
+async function settleOntoPavement() {
+  if (!TERRAIN_FRAME) return 0;
+  const { topAt } = indexPavementTriangles();
+  await maybeYield("Setting the pads on the pavement");
+  let settled = 0;
+  const meshes = [];
+  groups.streets.traverse((o) => { if (o.isMesh && SETTLE_ABOVE_M[o.userData.surface] !== undefined) meshes.push(o); });
+  for (const o of meshes) {
+    const above = SETTLE_ABOVE_M[o.userData.surface];
+    const position = o.geometry.getAttribute("position");
+    for (let i = 0; i < position.count; i += 1) {
+      const top = topAt(position.getX(i), position.getZ(i));
+      if (top === undefined) continue;
+      position.setY(i, top + above);
+      settled += 1;
+    }
+    position.needsUpdate = true;
+    o.geometry.computeBoundingSphere();
+    await maybeYield("Setting the pads on the pavement");
+  }
+  return settled;
 }
 
 //: Everything at ground level under an object is lifted onto the ground: merged street
@@ -6791,14 +6895,18 @@ function addTactileWarningPad(endpoint, intoCrossing, crossingWidth, y) {
   return true;
 }
 
+//: ``y`` is a height, or a function of the end and the point after it that gives one.
 function addCrossingTactilePads(points, crossingWidth, y) {
   if (!points || points.length < 2) return 0;
+  const yAt = typeof y === "function" ? y : () => y;
   let added = 0;
-  if (addTactileWarningPad(points[0], points[1], crossingWidth, y)) added += 1;
-  if (addTactileWarningPad(points[points.length - 1], points[points.length - 2],
-                           crossingWidth, y)) added += 1;
+  const first = points[0], second = points[1];
+  const last = points[points.length - 1], penult = points[points.length - 2];
+  if (addTactileWarningPad(first, second, crossingWidth, yAt(first, second))) added += 1;
+  if (addTactileWarningPad(last, penult, crossingWidth, yAt(last, penult))) added += 1;
   return added;
 }
+const deferredTactilePads = [];
 
 function addSidewalkCrossingReplacements(points, y) {
   const crossingWidth = 3.7;
@@ -10551,7 +10659,8 @@ for (const way of DRAW_ORDER) {
       }
     }
     if (isCrossing) {
-    addCrossingTactilePads(surfacePoints, widthMeters, roadTop + KERB + 0.018);
+      // The pads wait for the pavements and the corner pieces; see deferredTactilePads.
+      deferredTactilePads.push({ points: surfacePoints, width: widthMeters, fallbackY: roadTop + KERB + 0.018 });
     }
   }
 if (!isSidewalk && !isCrossing && !isPath) {
@@ -10858,6 +10967,34 @@ function addDividedMedians() {
 
 // The corner pieces, once every pavement that meets at one is down.
 const cornersLaid = addPavementCorners();
+//: The tactile pads at the crossings' ends, laid now that every pavement and corner piece is
+//: down, each on top of the pavement it stands on. They used to be laid with the crossing at
+//: the crossing's own kerb height, and a kerb height is measured per way: where the street's
+//: kerb stood taller than the crossing's record, the corner piece stood over the pad and the
+//: yellow showed through it as a sliver, or not at all. The pad's height is read from what was
+//: laid under it (pavedGrid, the highest pavement top in the cells the pad covers); a pad at
+//: an end with no pavement laid keeps the old height. Laid after the loop, they take the ground
+//: grid's lift like the pavement, not the crossing's line.
+let tactilePadsLaid = 0;
+for (const pad of deferredTactilePads) {
+  tactilePadsLaid += addCrossingTactilePads(pad.points, pad.width, (endpoint, into) => {
+    const [ex, ey] = xy(endpoint[0], endpoint[1]);
+    const [ix, iy] = xy(into[0], into[1]);
+    const len = Math.hypot(ix - ex, iy - ey) || 1;
+    const ux = (ex - ix) / len, uz = (-ey + iy) / len;     // out of the crossing, onto the pavement
+    let top;
+    for (const back of [0, 0.5, 1.0, 1.5]) {
+      for (const side of [-1, 0, 1]) {
+        const x = ex + ux * back - uz * side * pad.width * 0.4;
+        const z = -ey + uz * back + ux * side * pad.width * 0.4;
+        const here = pavementTopAt(x, z);
+        if (here !== undefined && (top === undefined || here > top)) top = here;
+      }
+    }
+    return top === undefined ? pad.fallbackY : top + 0.018;
+  });
+}
+deferredTactilePads.length = 0;
 const junctionBoxes = addJunctionBoxes();
 const mediansLaid = addDividedMedians();
 
@@ -12417,6 +12554,7 @@ function dropKerbsAtDriveways(ways) {
 const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
 // Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
 await liftOntoGroundAsync(groups.streets, "Standing the streets on the ground");
+await settleOntoPavement();
 
 const districtColors = [0x1d4d58, 0x355038, 0x4a3e61, 0x5a4930, 0x533749, 0x29475f];
 DATA.districts.forEach((d, i) => {
@@ -14194,13 +14332,18 @@ function cullDetailByDistance(frame, eye = camera) {
   if (frame % DETAIL_REINDEX_FRAMES === 0) {
     detailTiles = [];
     root.traverse((o) => {
-      if (o.isMesh && o.frustumCulled && o.geometry && o.geometry.boundingSphere
-          && DETAIL_RANGE_M[o.userData.surface] !== undefined) detailTiles.push(o);
+      if (!o.isMesh || !o.frustumCulled || !o.geometry || DETAIL_RANGE_M[o.userData.surface] === undefined) return;
+      // An instanced mesh's bounds are its own, over its instances; its geometry's are the one
+      // unit box at the origin, and read as the tile's they culled every sign post, planter
+      // and tree more than a few hundred metres from the corridor's centre wherever the camera
+      // stood -- which is what "the signs have no poles" was.
+      if (o.isInstancedMesh && !o.boundingSphere) o.computeBoundingSphere();
+      if (o.isInstancedMesh ? o.boundingSphere : o.geometry.boundingSphere) detailTiles.push(o);
     });
   }
   const zoom = FIRST_PERSON_FOV / eye.fov;
   for (const tile of detailTiles) {
-    const sphere = tile.geometry.boundingSphere;
+    const sphere = tile.isInstancedMesh ? tile.boundingSphere : tile.geometry.boundingSphere;
     detailCentre.copy(sphere.center).applyMatrix4(tile.matrixWorld);
     const gap = eye.position.distanceTo(detailCentre) - sphere.radius;
     tile.visible = gap < DETAIL_RANGE_M[tile.userData.surface] * zoom;
@@ -14249,7 +14392,7 @@ window.kerbside = {
   scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
   tunnelFloorAt, walkerGroundAt, tunnelBores, terrainHeightAt, groundLiftAt, TERRAIN,
   cutLiftAt, approachRoadAt, wayFollowsCut, APPROACH_CUTS, junctionBoxHulls,
-  goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats,
+  goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats, THREE,
   xy, insideCarriageway, buildingAt,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
