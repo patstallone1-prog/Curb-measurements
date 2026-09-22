@@ -188,10 +188,11 @@ const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN, PERIMETER] = await Pro
       const f = p.frame;
       const cells = new Uint8Array(f.rows * f.cols);
       for (let r = 0; r < f.rows; r += 1) {
-        let c = 0, wet = 0;
-        for (const run of p.runs[r]) {
-          if (wet) cells.fill(1, r * f.cols + c, r * f.cols + c + run);
-          c += run; wet ^= 1;
+        let c = 0;
+        const runs = p.runs[r];
+        for (let i = 0; i + 1 < runs.length; i += 2) {
+          if (runs[i + 1]) cells.fill(runs[i + 1], r * f.cols + c, r * f.cols + c + runs[i]);
+          c += runs[i];
         }
       }
       return { frame: f, cells, bridges: p.bridges || [], counts: p.counts, source: p.source, regions: p.regions || [] };
@@ -241,7 +242,7 @@ const scene = new THREE.Scene();
 const HORIZON = new THREE.Color(0xbcd0dc);
 //: The fog closes where the far plane cuts, so the cut is never seen: past it is sky. The far
 //: plane reaches the five-mile perimeter from the far side of a region.
-const FAR_M = 14000;
+const FAR_M = 30000;
 scene.fog = new THREE.Fog(HORIZON, 2400, FAR_M * 0.96);
 
 // The near plane is the other half of the depth problem: precision scales with it, and 0.1 m
@@ -461,23 +462,36 @@ const APPROACH_CUTS = (DATA.ways || []).flatMap((way) => {
   const farZ = terrainHeightAt(mx + ux * reach, mz + uz * reach);
   return [{ mx, mz, ux, uz, reach, mouthZ, farZ, half: (way.road_m || 12) / 2 + APPROACH_CUT_MARGIN_M }];
 });
-//: The cut's road level at a point inside a cut, else null.
-function approachRoadAt(x, z) {
+//: The mouth is the first lidar station with cover over the road, so the deck's edge may lie
+//: up to a station's spacing outside it: within this of the mouth a point may be on the deck.
+const APPROACH_CUT_DECK_M = 4.0;
+//: The cut's road level at a point inside a cut, else null. ``outsideOnly`` leaves out the
+//: metres under and beside the deck's edge, where a point has two heights.
+function approachRoadAt(x, z, outsideOnly = false) {
   for (const cut of APPROACH_CUTS) {
     const dx = x - cut.mx, dz = z - cut.mz;
     const along = dx * cut.ux + dz * cut.uz;
     // A few metres into the bore as well: the approach's own geometry runs a little past
     // the mouth, and under the deck there is nothing else at ground level.
-    if (along < -APPROACH_CUT_INSIDE_M || along > cut.reach + 0.5) continue;
+    if (along < (outsideOnly ? APPROACH_CUT_DECK_M : -APPROACH_CUT_INSIDE_M) || along > cut.reach + 0.5) continue;
     if (Math.abs(dx * cut.uz - dz * cut.ux) > cut.half) continue;
     const t = Math.max(0, Math.min(1, along / cut.reach));
     return cut.mouthZ + (cut.farZ - cut.mouthZ) * t;
   }
   return null;
 }
-//: The ground everything is lifted by: the grid. A street decked over a portal stands on it
-//: at the deck's height, which is what the grid has there.
-function groundLiftAt(x, z) { return terrainHeightAt(x, z); }
+//: The ground everything is lifted by: the grid, and outside a tunnel mouth never above the
+//: cut's road line -- the grid there is filled from the hill either side, and a cross street
+//: lifted onto that fill met the approach road, lifted onto the cut, a metre or two up at the
+//: junction: the crossing paint, settled onto the highest road under each vertex, crumpled
+//: between the two (Sutter at the Stockton tunnel). Under the deck inside the mouth a point
+//: has two heights, the deck's and the road's, and only what runs through the cut (WAY_LIFT,
+//: cutLiftAt) takes the road's; everything else there stands on the deck.
+function groundLiftAt(x, z) {
+  const ground = terrainHeightAt(x, z);
+  const road = approachRoadAt(x, z, true);
+  return road === null ? ground : Math.min(ground, road);
+}
 //: The ground for what runs *through* the cut -- the approach road, its kerbs and pavements,
 //: the street that carries on out of it, a post beside it: the grid, but never above the
 //: cut's road line. One point under a deck has two heights, the deck's and the road's; which
@@ -774,6 +788,8 @@ const TERRAIN_APRON_STEP_M = 32.0;
 const TERRAIN_APRON_DECAY_M = 700.0;
 const TERRAIN_LAND = new THREE.Color(0x4a4a45);
 const TERRAIN_SEA = new THREE.Color(0x2c6187);
+//: Sand: the map's beaches in the atlas, and the low ground beside a beach in the grid.
+const TERRAIN_SAND = new THREE.Color(0xc9b98a);
 //: The country beyond the survey: grass, plainly, so the edge of what was measured is legible.
 const TERRAIN_PLATE = new THREE.Color(0x4a6f3c);
 //: The backdrop's grey gives way to the grass over this distance past the grid's edge; the
@@ -792,12 +808,33 @@ function perimeterCell(x, z) {
   return [Math.floor(((lat - f.mid_lat) * f.metres_per_lat - f.y0) / f.step_m),
           Math.floor(((lon - f.mid_lon) * f.metres_per_lon - f.x0) / f.step_m)];
 }
-function perimeterWaterAt(x, z) {
+function perimeterClassAt(x, z) {
   if (!PERIMETER) return null;
   const f = PERIMETER.frame;
   const [r, c] = perimeterCell(x, z);
   if (r < 0 || c < 0 || r >= f.rows || c >= f.cols) return null;
-  return PERIMETER.cells[r * f.cols + c] === 1;
+  return PERIMETER.cells[r * f.cols + c];
+}
+function perimeterWaterAt(x, z) {
+  const cls = perimeterClassAt(x, z);
+  return cls === null ? null : cls === 1;
+}
+//: The sea's edge in the grid: the ground beside a mapped beach that stands low over the
+//: water is sand -- the wet sand between the beach polygon's edge and the waterline, which
+//: was drawn as the grid's grey. Boxes round the map's beach polygons, grown a little.
+const BEACH_NEAR_M = 80.0;
+const BEACH_RISE_M = 3.0;
+const BEACH_BOXES = (DATA.ways || []).filter((w) => w.kind === "beach" && w.points && w.points.length >= 3).map((w) => {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const [lon, lat] of w.points) {
+    const [x, y] = xy(lon, lat);
+    x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, -y); z1 = Math.max(z1, -y);
+  }
+  return [x0 - BEACH_NEAR_M, x1 + BEACH_NEAR_M, z0 - BEACH_NEAR_M, z1 + BEACH_NEAR_M];
+});
+function nearBeach(x, z) {
+  for (const [x0, x1, z0, z1] of BEACH_BOXES) if (x >= x0 && x <= x1 && z >= z0 && z <= z1) return true;
+  return false;
 }
 function backdropAt(x, z, apron = 0) {
   // Outside the grid the lookup clamps to the grid's edge cell, so the apron carries that
@@ -807,14 +844,17 @@ function backdropAt(x, z, apron = 0) {
   const wet = apron > 0 ? perimeterWaterAt(x, z) : null;
   if (wet === true || (wet === null && edge < WATERLINE_M)) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
   let h = edge;
+  // Sand: the atlas's beaches, and the low ground beside a mapped beach.
+  const sandy = (apron > 0 && perimeterClassAt(x, z) === 2) || (edge < SEA_SURFACE_M + BEACH_RISE_M && nearBeach(x, z));
   if (apron > 0) {
     // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
     // grey ring round the city.
     const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
     h = PENINSULA_Y + (h - PENINSULA_Y) * s;
-    return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M)) };
+    const colour = sandy ? TERRAIN_SAND : TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M));
+    return { y: h - TERRAIN_MESH_UNDER_M, colour };
   }
-  return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_LAND };
+  return { y: h - TERRAIN_MESH_UNDER_M, colour: sandy ? TERRAIN_SAND : TERRAIN_LAND };
 }
 function addBackdropTile(xs, zs, apronOf) {
   const w = xs.length, h = zs.length;
@@ -922,7 +962,7 @@ const TERRAIN_REFINE_MIN_M = 4.0;
 const TERRAIN_UNDER_CHORD_M = 0.2;
 const TERRAIN_REFINE_BY_SURFACE = {
   walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
-  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0], plaza: [12.0, 0],
   yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
 };
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
@@ -1274,7 +1314,7 @@ if (PERIMETER) {
   const apronWest = g ? g.x0 - TERRAIN_APRON_M : Infinity, apronEast = g ? g.x0 + g.cols * g.step_m + TERRAIN_APRON_M : -Infinity;
   const apronSouth = g ? g.y0 - TERRAIN_APRON_M : Infinity, apronNorth = g ? g.y0 + g.rows * g.step_m + TERRAIN_APRON_M : -Infinity;
   const underApron = (x, y) => x > apronWest && x < apronEast && y > apronSouth && y < apronNorth;
-  const grass = TERRAIN_PLATE, sea = TERRAIN_SEA;
+  const grass = TERRAIN_PLATE, sea = TERRAIN_SEA, sand = TERRAIN_SAND;
   // A cell corner in the atlas's frame, here: through lon/lat, since the frames differ.
   const here = (c, r) => {
     const lon = f.mid_lon + (f.x0 + c * f.step_m) / f.metres_per_lon;
@@ -1304,8 +1344,8 @@ if (PERIMETER) {
           }
           if (!under) {
             const [xb, yb] = here(end, r + 1);
-            const h = (wet ? SEA_Y - 0.02 : PENINSULA_Y) - PERIMETER_UNDER_M;
-            const col = wet ? sea : grass;
+            const h = (wet === 1 ? SEA_Y - 0.02 : PENINSULA_Y) - PERIMETER_UNDER_M;
+            const col = wet === 1 ? sea : wet === 2 ? sand : grass;
             const base = position.length / 3;
             for (const [x, y] of [[xa, ya], [xb, ya], [xb, yb], [xa, yb]]) {
               position.push(x, h, -y);
@@ -2240,6 +2280,8 @@ function crossingPaintLegs(points) {
 
 indexOfficialCurbGeometry(OFFICIAL_GEOMETRY.curb_lines || []);
 
+//: How much of a crossing way has to lie on the carriageway before it is a crossing of it.
+const CROSSING_MIN_ON_ROAD_M = 2.5;
 function crossingRoadSpanPoints(points) {
   // OSM supplies the pedestrian desire line; SFMTA supplies the physical curb boundaries.  The
   // segment actually traversing asphalt is used as a ray through the paired curb faces, retaining
@@ -2329,6 +2371,12 @@ function crossingRoadSpanPoints(points) {
     }
   }
   if (!best || best.half * 2 < 2.4 || best.half * 2 > 42) return null;
+  // The way has to cross the road it is matched to, not touch it. A footway tagged as a
+  // crossing that starts at the kerb corner and runs off across the corner at forty-five
+  // degrees -- the kerb-ramp link OpenStreetMap draws at many a junction -- has a metre of
+  // it on the asphalt, and drawn as a span of that road it was a second ladder crossing at a
+  // skew over the first (Stockton at Sutter).
+  if (bestRoadMetres < Math.min(CROSSING_MIN_ON_ROAD_M, best.half * 0.6)) return null;
   if (best.nx * ux + best.nz * uz < 0) {
     best.nx *= -1;
     best.nz *= -1;
@@ -2971,19 +3019,45 @@ function bikeLaneOffset(roadWidth, way = null, side = 1) {
   return Math.max(0.8, roadWidth / 2 - parked - BIKE_LANE_M / 2 - 0.18);
 }
 
+//: A lane's two ends into the join grid, each with the way it points out of the lane: a join
+//: is two ends that face each other, and the direction is what tells one from a T.
+function indexLaneEnds(centre) {
+  if (!centre || centre.length < 2) return;
+  for (const [end, prev] of [[centre[0], centre[1]], [centre[centre.length - 1], centre[centre.length - 2]]]) {
+    const [x, y] = xy(end[0], end[1]);
+    const [px, py] = xy(prev[0], prev[1]);
+    const len = Math.hypot(x - px, y - py) || 1;
+    const key = `${Math.floor(x / BIKE_JOIN_M)}:${Math.floor(-y / BIKE_JOIN_M)}`;
+    let bucket = bikeJoinGrid.get(key);
+    if (!bucket) bikeJoinGrid.set(key, bucket = []);
+    bucket.push([x, -y, (x - px) / len, -(y - py) / len]);
+  }
+}
+//: The outward direction of a lane at one of its ends, for the join tests.
+function laneEndDirection(centre, atStart) {
+  const end = atStart ? centre[0] : centre[centre.length - 1];
+  const prev = atStart ? centre[1] : centre[centre.length - 2];
+  const [x, y] = xy(end[0], end[1]);
+  const [px, py] = xy(prev[0], prev[1]);
+  const len = Math.hypot(x - px, y - py) || 1;
+  return [(x - px) / len, -(y - py) / len];
+}
+//: Two lane ends are a join when each points into the other: the lane carries on. Ends that
+//: meet at a right angle are a T -- Battery's lane at Market -- where one lane stops and
+//: eased onto the other it bent across the junction.
+const BIKE_JOIN_FACING = -0.5;
+function laneEndsFace(ux, uz, vx, vz) {
+  if (ux === undefined || vx === undefined) return true;
+  return ux * vx + uz * vz <= BIKE_JOIN_FACING;
+}
+
 function indexBikeLaneEnds(ways) {
   bikeJoinGrid.clear();
   bikeAreaGrid.clear();
   for (const way of ways) {
     if (way.kind === "cycleway" && way.points && way.points.length >= 2) {
       // A separate track's ends are joins too: the road's lane eases onto it and it onto the lane.
-      for (const end of [way.points[0], way.points[way.points.length - 1]]) {
-        const [x, y] = xy(end[0], end[1]);
-        const key = `${Math.floor(x / BIKE_JOIN_M)}:${Math.floor(-y / BIKE_JOIN_M)}`;
-        let bucket = bikeJoinGrid.get(key);
-        if (!bucket) bikeJoinGrid.set(key, bucket = []);
-        bucket.push([x, -y]);
-      }
+      indexLaneEnds(way.points);
       continue;
     }
     if (way.kind !== "street" || !way.points || way.points.length < 2) continue;
@@ -2994,13 +3068,7 @@ function indexBikeLaneEnds(ways) {
     for (const side of sides) {
       const centre = offsetWay(way.points, side * bikeLaneOffset(roadWidth, way, side));
       stampBikeLane(centre, side, bikeLaneOffset(roadWidth, way, side));
-      for (const end of [centre[0], centre[centre.length - 1]]) {
-        const [x, y] = xy(end[0], end[1]);
-        const key = `${Math.floor(x / BIKE_JOIN_M)}:${Math.floor(-y / BIKE_JOIN_M)}`;
-        let bucket = bikeJoinGrid.get(key);
-        if (!bucket) bikeJoinGrid.set(key, bucket = []);
-        bucket.push([x, -y]);
-      }
+      indexLaneEnds(centre);
     }
   }
 }
@@ -3012,9 +3080,10 @@ function indexBikeLaneEnds(ways) {
 //: other's started. A lane bends over a few metres to line up with the next block.
 const BIKE_BLEND_M = 12.0;
 
-function bikeLaneJoinTarget(x, z) {
-  // Where this lane end meets the lane it joins: halfway to the mean of the other ends here,
-  // so both lanes ease by half the gap and meet at one point. Null where the lane simply ends.
+function bikeLaneJoinTarget(x, z, ux, uz) {
+  // Where this lane end meets the lane it joins: halfway to the mean of the other ends here
+  // that face it, so both lanes ease by half the gap and meet at one point. Null where the
+  // lane simply ends, or where the only other end here is a lane it meets at an angle.
   let sx = 0, sz = 0, n = 0;
   const cx = Math.floor(x / BIKE_JOIN_M);
   const cz = Math.floor(z / BIKE_JOIN_M);
@@ -3022,9 +3091,11 @@ function bikeLaneJoinTarget(x, z) {
     for (let dz = -1; dz <= 1; dz += 1) {
       const bucket = bikeJoinGrid.get(`${cx + dx}:${cz + dz}`);
       if (!bucket) continue;
-      for (const [px, pz] of bucket) {
+      for (const [px, pz, vx, vz] of bucket) {
         const gap = Math.hypot(px - x, pz - z);
-        if (gap < 0.05 || gap > BIKE_JOIN_M) continue;
+        if (gap > BIKE_JOIN_M) continue;
+        if (gap < 0.05 && (ux === undefined || ux * vx + uz * vz > 0.99)) continue;   // this lane's own end
+        if (!laneEndsFace(ux, uz, vx, vz)) continue;
         sx += px; sz += pz; n += 1;
       }
     }
@@ -3057,8 +3128,9 @@ function blendLaneEnd(points, target, atStart) {
   return atStart ? out.reverse() : out;
 }
 
-function bikeLaneEndsAt(x, z) {
-  // How many lane ends stand here, this way's own included. More than one is a join.
+function bikeLaneEndsAt(x, z, ux, uz) {
+  // How many lane ends stand here, this way's own included. More than one is a join -- when
+  // the others face this one; given no direction, any end here counts.
   let found = 0;
   const cx = Math.floor(x / BIKE_JOIN_M);
   const cz = Math.floor(z / BIKE_JOIN_M);
@@ -3066,8 +3138,14 @@ function bikeLaneEndsAt(x, z) {
     for (let dz = -1; dz <= 1; dz += 1) {
       const bucket = bikeJoinGrid.get(`${cx + dx}:${cz + dz}`);
       if (!bucket) continue;
-      for (const [px, pz] of bucket) {
-        if (Math.hypot(px - x, pz - z) <= BIKE_JOIN_M) found += 1;
+      for (const [px, pz, vx, vz] of bucket) {
+        const gap = Math.hypot(px - x, pz - z);
+        if (gap > BIKE_JOIN_M) continue;
+        // This lane's own end is the one here that points the same way; any other counts
+        // only if it faces this one.
+        const own = gap < 0.05 && (ux === undefined || ux * vx + uz * vz > 0.99);
+        if (!own && !laneEndsFace(ux, uz, vx, vz)) continue;
+        found += 1;
       }
     }
   }
@@ -3271,8 +3349,8 @@ function addBikeLaneMarkings(way, renderPoints, roadWidth, roadTop) {
     if (!centre || centre.length < 2) continue;
     const [sx, sy] = xy(centre[0][0], centre[0][1]);
     const [ex, ey] = xy(centre[centre.length - 1][0], centre[centre.length - 1][1]);
-    const joinStart = bikeLaneJoinTarget(sx, -sy);
-    const joinEnd = bikeLaneJoinTarget(ex, -ey);
+    const joinStart = bikeLaneJoinTarget(sx, -sy, ...laneEndDirection(centre, true));
+    const joinEnd = bikeLaneJoinTarget(ex, -ey, ...laneEndDirection(centre, false));
     const cutStart = joinStart ? 0 : BIKE_END_TRIM_M;
     const cutEnd = joinEnd ? 0 : BIKE_END_TRIM_M;
     let lane = densifyWay(trimWayEnds(centre, cutStart, cutEnd), 2.0);
@@ -11073,7 +11151,8 @@ for (const way of DRAW_ORDER) {
     let lane = densifyWay(way.points, 2.0);
     const [sx, sy] = xy(lane[0][0], lane[0][1]);
     const [ex, ey] = xy(lane[lane.length - 1][0], lane[lane.length - 1][1]);
-    const joinStart = bikeLaneJoinTarget(sx, -sy), joinEnd = bikeLaneJoinTarget(ex, -ey);
+    const joinStart = bikeLaneJoinTarget(sx, -sy, ...laneEndDirection(lane, true));
+    const joinEnd = bikeLaneJoinTarget(ex, -ey, ...laneEndDirection(lane, false));
     if (joinStart) lane = blendLaneEnd(lane, joinStart, true);
     if (joinEnd) lane = blendLaneEnd(lane, joinEnd, false);
     const fill = ribbon(lane, trackWidth, 0xffffff, 1.0, ROAD_TOP_M + 0.010, 0.012, "bike");
@@ -11766,6 +11845,7 @@ const roadwayFilled = fillRoadwayToKerbs();
 // that came out as green tearing through grey in stripes, which is what a coincidence of two
 // constants looks like from the street. GROUND_STACK below is checked at load, so a future
 // collision stops the build rather than reappearing as a glitch nobody can place.
+const PLAZA_Y = 0.014;         // the paved remainder of a commercial or public lot
 const YARD_Y = 0.016;          // a parcel's grass remainder
 const SERVICE_YARD_Y = 0.019;  // the neutral slivers between buildings
 const PARK_Y = 0.022;          // mapped public green
@@ -11777,7 +11857,7 @@ const COURT_LINE_Y = 0.042;    // the paint on the courts
 
 //: No two of these may be equal, and none may reach the carriageway's own top at 0.06.
 const GROUND_STACK = {
-  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y, PARKING_Y, PARKING_LINE_Y, PIER_DECK_Y,
+  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y, PARKING_Y, PARKING_LINE_Y, PIER_DECK_Y, PLAZA_Y,
 };
 {
   const seen = new Map();
@@ -12897,6 +12977,17 @@ function buildCourts(ground) {
       map: SIDEWALK, color: 0xffffff, roughness: 0.96, metalness: 0.0,
       side: THREE.DoubleSide,
     })), "front_walk");
+  }
+
+  // The ground left on a commercial, office, downtown or public lot: a forecourt, a service
+  // yard, a plaza -- paved, in the same concrete as the footways, so that downtown is not a
+  // meadow between the towers (scripts/build_ground_cover.py decides which lots).
+  const plazaGeom = ringGeometry((ground.plazas || []).map((y) => y.p), PLAZA_Y);
+  if (plazaGeom) {
+    addGround(new THREE.Mesh(plazaGeom, new THREE.MeshStandardMaterial({
+      map: SIDEWALK, color: 0xc4c1b8, roughness: 0.96, metalness: 0.0,
+      side: THREE.DoubleSide,
+    })), "plaza");
   }
 
   const serviceGeom = ringGeometry((ground.service_yards || []).map((y) => y.p), SERVICE_YARD_Y);
@@ -14132,8 +14223,13 @@ for (const s of DATA.sequence_paths) {
 }
 });
 
-const state = { yaw: -0.45, pitch: 0.95, dist: 1180, target: new THREE.Vector3(0, 0, 0),
-                firstPerson: false, look: 0.0 };
+//: The opening view: the whole rendered region in its country, five miles of it every way,
+//: with the other regions' markers standing in it -- from high enough that all of it fits,
+//: which for a region a few kilometres across is a dozen kilometres up. A click brings the
+//: walker down to a street; the wheel zooms in from here.
+const OVERVIEW = { yaw: -0.45, pitch: 1.1, dist: 12500, look: 0.0 };
+const MAX_ORBIT_DIST_M = 20000;
+const state = { ...OVERVIEW, target: new THREE.Vector3(0, 0, 0), firstPerson: false };
 function placeCamera() {
   if (state.firstPerson && typeof avatar !== "undefined") {
     // Out of the walker's eyes: the camera stands at eye height where the walker stands and
@@ -14194,14 +14290,14 @@ canvas.addEventListener("wheel", (e) => {
     camera.updateProjectionMatrix();
     return;
   }
-  state.dist = Math.max(8, Math.min(2600, state.dist * Math.exp(e.deltaY * 0.001)));
+  state.dist = Math.max(8, Math.min(MAX_ORBIT_DIST_M, state.dist * Math.exp(e.deltaY * 0.001)));
   placeCamera();
 }, { passive: false });
 document.getElementById("firstperson").addEventListener("click", () => {
   setFirstPerson(!state.firstPerson);
 });
 document.getElementById("reset").addEventListener("click", () => {
-  Object.assign(state, { yaw: -0.45, pitch: 0.95, dist: 1180, look: 0.0 });
+  Object.assign(state, OVERVIEW);
   if (typeof avatar !== "undefined") {
     avatar.position.set(0, AVATAR_STAND_Y, 0);
     state.target.copy(avatar.position);
