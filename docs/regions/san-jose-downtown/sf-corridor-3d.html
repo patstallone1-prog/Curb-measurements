@@ -332,6 +332,9 @@ Object.values(groups).forEach((g) => root.add(g));
     // is simply not drawn from here, and the switcher above still lists it.
     const sprite = labelSprite(`${region.title}  \u2192`, "#e8f4ff", 900);
     sprite.position.set(x, 160, -y);
+    // A marker is a signpost across the bay, not a billboard over the street it names: it
+    // goes out once the region under it is being drawn as a place rather than pointed at.
+    sprite.userData.hideWithin = REGION_MARKER_HIDE_M;
     sprite.userData.href = new URL(root + region.path, location.href).href;
     sprite.userData.surface = "region_marker";
     regionMarkers.add(sprite);
@@ -339,6 +342,7 @@ Object.values(groups).forEach((g) => root.add(g));
     const post = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 150, 8),
                                 new THREE.MeshStandardMaterial({ color: 0xe8f4ff, roughness: 0.6 }));
     post.position.set(x, 75 + PENINSULA_Y, -y);
+    post.userData.hideWithin = REGION_MARKER_HIDE_M;
     regionMarkers.add(post);
     // The region's box, outlined on the ground: where the rendered area stands in the country.
     const outline = new THREE.LineLoop(
@@ -347,6 +351,9 @@ Object.values(groups).forEach((g) => root.add(g));
     regionMarkers.add(outline);
   }
 })();
+//: Closer than this to a region's marker you are at the region, and the tile tree is drawing
+//: its streets: the label comes off.
+const REGION_MARKER_HIDE_M = 2500.0;
 const regionMarkers = new THREE.Group();
 regionMarkers.name = "regionMarkers";
 scene.add(regionMarkers);
@@ -790,6 +797,9 @@ const TERRAIN_LAND = new THREE.Color(0x4a4a45);
 const TERRAIN_SEA = new THREE.Color(0x2c6187);
 //: Sand: the map's beaches in the atlas, and the low ground beside a beach in the grid.
 const TERRAIN_SAND = new THREE.Color(0xc9b98a);
+//: The town: the atlas's cells with mapped buildings in them. A city drawn on the same green
+//: as the hills behind it stood in a meadow from any height worth the name.
+const TERRAIN_BUILT = new THREE.Color(0x6e7263);
 //: The country beyond the survey: grass, plainly, so the edge of what was measured is legible.
 const TERRAIN_PLATE = new THREE.Color(0x4a6f3c);
 //: The backdrop's grey gives way to the grass over this distance past the grid's edge; the
@@ -845,13 +855,15 @@ function backdropAt(x, z, apron = 0) {
   if (wet === true || (wet === null && edge < WATERLINE_M)) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
   let h = edge;
   // Sand: the atlas's beaches, and the low ground beside a mapped beach.
-  const sandy = (apron > 0 && perimeterClassAt(x, z) === 2) || (edge < SEA_SURFACE_M + BEACH_RISE_M && nearBeach(x, z));
+  const cls = apron > 0 ? perimeterClassAt(x, z) : null;
+  const sandy = cls === 2 || (edge < SEA_SURFACE_M + BEACH_RISE_M && nearBeach(x, z));
   if (apron > 0) {
     // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
     // grey ring round the city.
     const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
     h = PENINSULA_Y + (h - PENINSULA_Y) * s;
-    const colour = sandy ? TERRAIN_SAND : TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M));
+    const ground = cls === 3 ? TERRAIN_BUILT : TERRAIN_PLATE;
+    const colour = sandy ? TERRAIN_SAND : ground.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M));
     return { y: h - TERRAIN_MESH_UNDER_M, colour };
   }
   return { y: h - TERRAIN_MESH_UNDER_M, colour: sandy ? TERRAIN_SAND : TERRAIN_LAND };
@@ -1314,7 +1326,7 @@ if (PERIMETER) {
   const apronWest = g ? g.x0 - TERRAIN_APRON_M : Infinity, apronEast = g ? g.x0 + g.cols * g.step_m + TERRAIN_APRON_M : -Infinity;
   const apronSouth = g ? g.y0 - TERRAIN_APRON_M : Infinity, apronNorth = g ? g.y0 + g.rows * g.step_m + TERRAIN_APRON_M : -Infinity;
   const underApron = (x, y) => x > apronWest && x < apronEast && y > apronSouth && y < apronNorth;
-  const grass = TERRAIN_PLATE, sea = TERRAIN_SEA, sand = TERRAIN_SAND;
+  const grass = TERRAIN_PLATE, sea = TERRAIN_SEA, sand = TERRAIN_SAND, town = TERRAIN_BUILT;
   // A cell corner in the atlas's frame, here: through lon/lat, since the frames differ.
   const here = (c, r) => {
     const lon = f.mid_lon + (f.x0 + c * f.step_m) / f.metres_per_lon;
@@ -1345,7 +1357,7 @@ if (PERIMETER) {
           if (!under) {
             const [xb, yb] = here(end, r + 1);
             const h = (wet === 1 ? SEA_Y - 0.02 : PENINSULA_Y) - PERIMETER_UNDER_M;
-            const col = wet === 1 ? sea : wet === 2 ? sand : grass;
+            const col = wet === 1 ? sea : wet === 2 ? sand : wet === 3 ? town : grass;
             const base = position.length / 3;
             for (const [x, y] of [[xa, ya], [xb, ya], [xb, yb], [xa, yb]]) {
               position.push(x, h, -y);
@@ -1432,6 +1444,461 @@ if (PERIMETER) {
     root.add(mesh);
   }
   console.info(`kerbside: perimeter ${PERIMETER.frame.cols}x${PERIMETER.frame.rows} cells, ${decks} bridge decks on ${piers} piers (${PERIMETER.source})`);
+}
+
+// ---- the tile tree ---------------------------------------------------------------------------
+//
+// Past the region's own box the map used to be the atlas and nothing else: grass, sea, and a
+// marker where Oakland was. So the Bay Area existed but the cities in it did not, and the only
+// way to another one was to load another page -- which is unloaded territory by another name.
+//
+// This is one quadtree over the whole area (scripts/build_tiles.py), rooted on the atlas's box.
+// Every built region's own geometry is in it, generalised per depth: the skyline at 25 m of
+// error, every road at 5 m, the real footprints at 1.2 m. A tile is a complete picture of its
+// square at its own error, so showing a tile's children hides the tile.
+//
+// Nothing here is chosen by zoom. Each tile is asked what its error would look like from where
+// the camera is -- error * focal / distance, in pixels -- and refines only when that is more
+// than a few pixels. So the far side of the bay stays four boxes and a line while the street
+// under the walker is drawn to the kerb, and the two are the same tree.
+//: Where the tile tree lives, relative to this page. One tree serves a whole site: the
+//: corridor's page sits beside it, and a region's page two folders down reaches up to it
+//: rather than carrying fifteen megabytes of its own copy (tools/build_pages.py rewrites
+//: this line for a region's page).
+const TILE_BASE = "../../tiles/";
+const TILE_MAX_SCREEN_ERROR_PX = 3.0;
+//: How many tiles may be in flight. More than this and the one you are about to need queues
+//: behind six you are about to leave.
+const TILE_MAX_CONCURRENT = 6;
+//: Tiles are dropped when more than this is resident, furthest first, and never one that is
+//: being drawn. Source bytes, which is what the index knows before it asks for anything.
+const TILE_RESIDENT_BUDGET = 48 * 1024 * 1024;
+//: The swap is faded rather than cut: at a boundary the new tile's first frame is otherwise a
+//: visible step even when the geometry lines up.
+const TILE_FADE_MS = 150;
+//: The tree is walked every few frames. Walking it every frame costs more than it saves: the
+//: camera cannot move far enough in four frames to change what is good enough.
+const TILE_TRAVERSE_EVERY = 4;
+//: How far ahead of the camera, in seconds of its own motion, the prefetch looks.
+const TILE_PREFETCH_SECONDS = 4.0;
+
+const tileGroupRoot = new THREE.Group();
+tileGroupRoot.name = "tileTree";
+root.add(tileGroupRoot);
+
+const TILES = new Map();
+//: "3/4/5" -> "2/2/2"; the root has none.
+function tileParentId(id) {
+  const [d, x, y] = id.split("/").map(Number);
+  return d === 0 ? null : `${d - 1}/${Math.floor(x / 2)}/${Math.floor(y / 2)}`;
+}
+let TILE_INDEX = null;
+const tileQueue = [];
+let tileInFlight = 0;
+let tileResidentBytes = 0;
+const tileStats = { built: 0, drawn: 0, requested: 0, failed: 0, evicted: 0, bytes: 0 };
+
+//: The region this page draws in full. Inside it the street renderer has every kerb, so the
+//: tree draws nothing there -- feature by feature, since a coarse tile is far bigger than the
+//: region and its other half is wanted.
+const TILE_OWN_BOX = DATA.bbox ? [DATA.bbox.west, DATA.bbox.south, DATA.bbox.east, DATA.bbox.north] : null;
+function tileOwnGround(lon, lat) {
+  return TILE_OWN_BOX !== null && lon >= TILE_OWN_BOX[0] && lon <= TILE_OWN_BOX[2]
+      && lat >= TILE_OWN_BOX[1] && lat <= TILE_OWN_BOX[3];
+}
+
+function tileFocalPx(eye = camera) {
+  const h = renderer.domElement.clientHeight || innerHeight || 900;
+  return h / (2 * Math.tan(eye.fov * Math.PI / 360));
+}
+//: The error this tile would show from where the camera is, in pixels. Distance to the tile's
+//: bounding sphere, not to its centre: a tile you are standing in the middle of is at zero.
+function tileScreenErrorPx(tile, eye = camera) {
+  const dx = eye.position.x - tile.cx;
+  const dy = eye.position.y - tile.cy;
+  const dz = eye.position.z - tile.cz;
+  const distance = Math.max(1.0, Math.hypot(dx, dy, dz) - tile.radius);
+  return tile.error * tileFocalPx(eye) / distance;
+}
+const TILE_FRUSTUM = new THREE.Frustum();
+const TILE_MATRIX = new THREE.Matrix4();
+const TILE_SPHERE = new THREE.Sphere();
+function tileInView(tile) {
+  TILE_SPHERE.center.set(tile.cx, tile.cy, tile.cz);
+  TILE_SPHERE.radius = tile.radius;
+  return TILE_FRUSTUM.intersectsSphere(TILE_SPHERE);
+}
+
+//: What a tile is worth fetching now. The shape the plan asked for: what is on screen and
+//: about to be visibly wrong comes before what is merely near, and what is behind you comes
+//: last. Higher is sooner.
+function tilePriority(tile, screenError, onScreen, aheadness, eye = camera) {
+  const km = Math.hypot(eye.position.x - tile.cx, eye.position.z - tile.cz) / 1000;
+  return (onScreen ? 10 : 0) + Math.min(screenError, 60) * 5 + aheadness * 3 - km + (tile.depth >= 6 ? 4 : 0);
+}
+
+function tileHasContent(tile) {
+  return tile.state === "cpu" || tile.state === "visible";
+}
+function tilePending(tile) {
+  return tile.state === "requested" || tile.state === "downloading";
+}
+
+function requestTile(tile, screenError, onScreen = true, aheadness = 0, eye = camera) {
+  if (tile.state !== "unavailable") {
+    if (tilePending(tile)) tile.priority = Math.max(tile.priority, tilePriority(tile, screenError, onScreen, aheadness, eye));
+    return;
+  }
+  if (!Object.keys(tile.assets).length) { tile.state = "cpu"; return; }   // an empty tile is ready
+  tile.state = "requested";
+  tile.priority = tilePriority(tile, screenError, onScreen, aheadness, eye);
+  tileQueue.push(tile);
+  tileStats.requested += 1;
+  pumpTileQueue();
+}
+
+function pumpTileQueue() {
+  while (tileInFlight < TILE_MAX_CONCURRENT && tileQueue.length) {
+    let best = 0;
+    for (let i = 1; i < tileQueue.length; i += 1) if (tileQueue[i].priority > tileQueue[best].priority) best = i;
+    const tile = tileQueue.splice(best, 1)[0];
+    if (tile.state !== "requested") continue;
+    tile.state = "downloading";
+    tileInFlight += 1;
+    loadTile(tile).catch(() => { tile.state = "unavailable"; tileStats.failed += 1; })
+      .finally(() => { tileInFlight -= 1; pumpTileQueue(); });
+  }
+}
+
+async function loadTile(tile) {
+  const layers = {};
+  await Promise.all(Object.entries(tile.assets).map(async ([name, meta]) => {
+    const response = await fetch(asset(TILE_BASE + meta.url), { cache: "force-cache" });
+    if (!response.ok) throw new Error(`tile ${tile.id} ${name} ${response.status}`);
+    layers[name] = await response.json();
+  }));
+  buildTile(tile, layers);
+  tile.state = "cpu";
+  tileResidentBytes += tile.bytes;
+  tileStats.bytes += tile.bytes;
+  evictTiles();
+}
+
+//: A tile's own metre frame, as the build wrote it: centimetres east and north of its
+//: south-west corner. Two multiplies put a vertex in the page's frame.
+function tileFrame(tile) {
+  const [west, south, east, north] = tile.bbox;
+  const ky = 111320.0;
+  const kx = ky * Math.cos((south + north) / 2 * Math.PI / 180);
+  const [x0, y0] = xy(west, south);
+  return { x0, y0, sx: metersPerLon / kx / 100.0, sy: metersPerLat / ky / 100.0, kx, ky, west, south };
+}
+
+function buildTile(tile, layers) {
+  const group = new THREE.Group();
+  group.name = `tile:${tile.id}`;
+  const f = tileFrame(tile);
+  const lonOf = (cm) => f.west + cm / 100.0 / f.kx;
+  const latOf = (cm) => f.south + cm / 100.0 / f.ky;
+  // A material a tile, not one shared by all of them: the fade writes opacity, and on a
+  // shared material one tile fading in took every other tile on the map with it -- which
+  // read as the whole Bay Area blinking out whenever a boundary was crossed.
+  const materials = {
+    massing: TILE_MASSING_MATERIAL.clone(),
+    buildings: TILE_BUILDING_MATERIAL.clone(),
+    roads: TILE_ROAD_MATERIAL.clone(),
+  };
+  tile.materials = Object.values(materials);
+  if (layers.massing) group.add(...tileMassing(layers.massing, f, lonOf, latOf, materials.massing));
+  if (layers.buildings) group.add(...tileBuildings(layers.buildings, f, lonOf, latOf, materials.buildings));
+  for (const name of ["roads", "roads_major"]) {
+    if (layers[name]) group.add(...tileRoads(layers[name], f, lonOf, latOf, materials.roads));
+  }
+  group.visible = false;
+  // Deeper tiles draw after shallower ones, so a parent fading out lies over its children
+  // rather than fighting them for the depth buffer while it goes.
+  group.renderOrder = tile.depth;
+  group.traverse((o) => { if (o.isMesh) { o.userData.surface = "tile"; o.userData.liftedOntoGround = true; o.renderOrder = tile.depth; } });
+  tile.group = group;
+  tileGroupRoot.add(group);
+  tileStats.built += 1;
+}
+
+//: The colours the distance is drawn in. Not the near city's: a facade's own colour at four
+//: kilometres is noise, and the city reads as one mass in the haze.
+const TILE_WALL = new THREE.Color(0x8d99a6);
+const TILE_ROOF = new THREE.Color(0x6f7a85);
+const TILE_ROAD = new THREE.Color(0x4a4f55);
+const TILE_MASSING_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_WALL, roughness: 0.92, metalness: 0.0, transparent: true });
+const TILE_BUILDING_MATERIAL = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.0, transparent: true });
+const TILE_ROAD_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_ROAD, roughness: 0.96, metalness: 0.0, transparent: true, side: THREE.DoubleSide });
+const TILE_BOX = new THREE.BoxGeometry(1, 1, 1);
+
+function tileMassing(rows, f, lonOf, latOf, material) {
+  const kept = [];
+  for (const [cx, cy, halfA, halfB, bearing, height] of rows) {
+    if (tileOwnGround(lonOf(cx), latOf(cy))) continue;
+    kept.push([cx, cy, halfA, halfB, bearing, height]);
+  }
+  if (!kept.length) return [];
+  const mesh = new THREE.InstancedMesh(TILE_BOX, material, kept.length);
+  const dummy = new THREE.Object3D();
+  kept.forEach(([cx, cy, halfA, halfB, bearing, height], i) => {
+    const h = height / 100.0;
+    dummy.position.set(f.x0 + cx * f.sx, PENINSULA_Y + h / 2, -(f.y0 + cy * f.sy));
+    dummy.rotation.set(0, -bearing / 100.0 * Math.PI / 180, 0);
+    dummy.scale.set(Math.max(2.0, halfA * f.sx * 2), h, Math.max(2.0, halfB * f.sy * 2));
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingSphere();
+  return [mesh];
+}
+
+function tileBuildings(rows, f, lonOf, latOf, material) {
+  const position = [], colour = [], index = [];
+  const roof = new THREE.Color();
+  for (const row of rows) {
+    const height = row[0] / 100.0;
+    const packed = row[1];
+    if (tileOwnGround(lonOf(row[2]), latOf(row[3]))) continue;
+    const ring = [];
+    for (let i = 2; i + 1 < row.length; i += 2) ring.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
+    if (ring.length >= 3 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
+    if (ring.length < 3) continue;
+    const wall = packed >= 0 ? roof.setHex(packed) : TILE_WALL;
+    const top = PENINSULA_Y + height;
+    // The walls: a quad an edge, wound outward whichever way the ring runs.
+    let area = 0;
+    for (let i = 0; i < ring.length; i += 1) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      area += a[0] * b[1] - b[0] * a[1];
+    }
+    const flip = area > 0;
+    for (let i = 0; i < ring.length; i += 1) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const base = position.length / 3;
+      const p = flip ? [b, a] : [a, b];
+      position.push(p[0][0], PENINSULA_Y, p[0][1], p[1][0], PENINSULA_Y, p[1][1],
+                    p[1][0], top, p[1][1], p[0][0], top, p[0][1]);
+      for (let k = 0; k < 4; k += 1) colour.push(wall.r, wall.g, wall.b);
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    // The roof: the ring triangulated flat, a shade darker than the walls.
+    const contour = ring.map(([x, z]) => new THREE.Vector2(x, z));
+    let faces = [];
+    try { faces = THREE.ShapeUtils.triangulateShape(contour, []); } catch (e) { faces = []; }
+    if (faces.length) {
+      const base = position.length / 3;
+      const shade = wall.clone().multiplyScalar(0.82);
+      for (const [x, z] of ring) { position.push(x, top, z); colour.push(shade.r, shade.g, shade.b); }
+      const up = THREE.ShapeUtils.isClockWise(contour);
+      for (const [a, b, c] of faces) index.push(base + a, base + (up ? b : c), base + (up ? c : b));
+    }
+  }
+  if (!index.length) return [];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colour, 3));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return [new THREE.Mesh(geometry, material)];
+}
+
+function tileRoads(rows, f, lonOf, latOf, material) {
+  const position = [], index = [];
+  for (const row of rows) {
+    const width = Math.max(4.0, row[0] / 100.0);
+    const pts = [];
+    for (let i = 1; i + 1 < row.length; i += 2) {
+      if (i === 1 && tileOwnGround(lonOf(row[i]), latOf(row[i + 1]))) { pts.length = 0; break; }
+      pts.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
+    }
+    if (pts.length < 2) continue;
+    for (let i = 0; i < pts.length; i += 1) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+      const dx = b[0] - a[0], dz = b[1] - a[1];
+      const len = Math.hypot(dx, dz) || 1;
+      const nx = -dz / len * width / 2, nz = dx / len * width / 2;
+      position.push(pts[i][0] + nx, PENINSULA_Y + 0.15, pts[i][1] + nz,
+                    pts[i][0] - nx, PENINSULA_Y + 0.15, pts[i][1] - nz);
+      if (i) { const k = i * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
+    }
+  }
+  if (!index.length) return [];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return [new THREE.Mesh(geometry, material)];
+}
+
+//: The tiles to draw: from the root down, refining only where the tile being drawn would be
+//: visibly wrong, and only where the children are already here. A parent stays up until every
+//: child that is on screen has its geometry -- which is what makes the swap silent rather
+//: than a hole that fills in.
+function selectTiles(tile, out, eye = camera) {
+  if (!tileInView(tile)) return;
+  const error = tileScreenErrorPx(tile, eye);
+  if (error <= TILE_MAX_SCREEN_ERROR_PX || !tile.children.length) { out.push(tile); return; }
+  const kids = tile.children.map((id) => TILES.get(id)).filter(Boolean);
+  let ready = true;
+  for (const kid of kids) {
+    if (!tileInView(kid)) continue;
+    if (!tileHasContent(kid)) { requestTile(kid, error, true, tileAheadness(kid, eye), eye); ready = false; }
+  }
+  if (!ready) { out.push(tile); return; }
+  for (const kid of kids) selectTiles(kid, out, eye);
+}
+
+//: How far a tile lies in the direction the camera is moving, from -1 (behind) to 1 (ahead).
+const tileMotion = new THREE.Vector3();
+let tileLastCamera = new THREE.Vector3();
+let tileLastAt = 0;
+function tileAheadness(tile, eye = camera) {
+  if (tileMotion.lengthSq() < 1e-6) return 0;
+  const dx = tile.cx - eye.position.x, dz = tile.cz - eye.position.z;
+  const len = Math.hypot(dx, dz) || 1;
+  return (dx / len) * tileMotion.x + (dz / len) * tileMotion.z;
+}
+
+//: The ring outside what is drawn: the neighbours of the deepest tiles on screen, and the
+//: ones the camera is moving towards, asked for before they are needed. Crossing a boundary
+//: should not be the moment the next square starts loading.
+function prefetchTiles(drawn, eye = camera) {
+  if (tileInFlight >= TILE_MAX_CONCURRENT) return;
+  const speed = tileMotion.length();
+  for (const tile of drawn) {
+    if (tile.depth < 3) continue;
+    const parent = TILES.get(tile.parent);
+    if (!parent) continue;
+    for (const id of parent.children) {
+      const sibling = TILES.get(id);
+      if (!sibling || tileHasContent(sibling) || tilePending(sibling)) continue;
+      const ahead = tileAheadness(sibling, eye);
+      // Behind you, and not moving: it can wait until it is looked at.
+      if (speed > 0.5 && ahead < -0.2) continue;
+      requestTile(sibling, TILE_MAX_SCREEN_ERROR_PX, tileInView(sibling), ahead, eye);
+    }
+    for (const id of tile.children) {
+      const kid = TILES.get(id);
+      if (kid && !tileHasContent(kid) && !tilePending(kid) && tileAheadness(kid, eye) > 0.2) {
+        requestTile(kid, TILE_MAX_SCREEN_ERROR_PX, false, tileAheadness(kid, eye), eye);
+      }
+    }
+  }
+}
+
+//: Resident geometry, dropped from the far end. Never a tile being drawn, and never one whose
+//: parent is gone -- dropping an ancestor is how a hole opens.
+function evictTiles(eye = camera) {
+  if (tileResidentBytes <= TILE_RESIDENT_BUDGET) return;
+  const candidates = [];
+  for (const tile of TILES.values()) {
+    if (!tileHasContent(tile) || !tile.group || tile.drawn) continue;
+    candidates.push(tile);
+  }
+  candidates.sort((a, b) => (b.lastDrawn === a.lastDrawn
+    ? Math.hypot(b.cx - eye.position.x, b.cz - eye.position.z) - Math.hypot(a.cx - eye.position.x, a.cz - eye.position.z)
+    : a.lastDrawn - b.lastDrawn));
+  for (const tile of candidates) {
+    if (tileResidentBytes <= TILE_RESIDENT_BUDGET * 0.8) break;
+    tileGroupRoot.remove(tile.group);
+    tile.group.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+    for (const material of tile.materials || []) material.dispose();
+    tile.materials = null;
+    tile.group = null;
+    tile.state = "unavailable";
+    tileResidentBytes -= tile.bytes;
+    tileStats.evicted += 1;
+  }
+}
+
+let tileFrame_ = 0;
+function updateTileTree(now, eye = camera) {
+  if (!TILE_INDEX) return;
+  if (eye === camera && (tileFrame_++ % TILE_TRAVERSE_EVERY) !== 0) return;
+  // Where the camera is going, in metres a second, smoothed.
+  const at = now || performance.now();
+  if (tileLastAt) {
+    const dt = Math.max(0.001, (at - tileLastAt) / 1000);
+    tileMotion.set((eye.position.x - tileLastCamera.x) / dt, 0, (eye.position.z - tileLastCamera.z) / dt);
+    const speed = tileMotion.length();
+    if (speed > 0.001) tileMotion.multiplyScalar(1 / speed);
+    else tileMotion.set(0, 0, 0);
+  }
+  tileLastCamera.copy(eye.position);
+  tileLastAt = at;
+
+  eye.updateMatrixWorld();
+  TILE_MATRIX.multiplyMatrices(eye.projectionMatrix, eye.matrixWorldInverse);
+  TILE_FRUSTUM.setFromProjectionMatrix(TILE_MATRIX);
+
+  const drawn = [];
+  const rootTile = TILES.get("0/0/0");
+  if (rootTile) selectTiles(rootTile, drawn, eye);
+  const wanted = new Set(drawn.map((t) => t.id));
+  for (const tile of TILES.values()) {
+    if (!tile.group) { tile.drawn = false; continue; }
+    const show = wanted.has(tile.id);
+    if (show) {
+      // A tile that is wanted is solid at once. Fading it *in* meant that in the frame it was
+      // first chosen it was drawn at nothing, and a tile chosen in the same frame its parent
+      // was dropped left a hole -- the very seam the fade was there to hide.
+      tile.group.visible = true;
+      tile.fadeOutFrom = 0;
+      for (const material of tile.materials || []) material.opacity = 1;
+      tile.lastDrawn = at;
+    } else if (tile.drawn) {
+      // Not wanted any more: the children that replace it are already solid underneath, so
+      // the parent is faded out over it rather than cut.
+      tile.fadeOutFrom = at;
+    }
+    if (!show && tile.fadeOutFrom) {
+      const k = Math.min(1, Math.max(0, (at - tile.fadeOutFrom) / TILE_FADE_MS));
+      for (const material of tile.materials || []) material.opacity = 1 - k;
+      if (k >= 1) { tile.group.visible = false; tile.fadeOutFrom = 0; }
+    }
+    tile.drawn = show;
+  }
+  for (const marker of regionMarkers.children) {
+    const within = marker.userData.hideWithin;
+    if (!within) continue;
+    marker.visible = Math.hypot(eye.position.x - marker.position.x, eye.position.z - marker.position.z) > within;
+  }
+  tileStats.drawn = drawn.length;
+  tileStats.deepest = drawn.reduce((d, t) => Math.max(d, t.depth), 0);
+  prefetchTiles(drawn, eye);
+}
+
+async function loadTileTree() {
+  let index = null;
+  try {
+    const response = await fetch(asset(TILE_BASE + "index.json"), { cache: "no-cache" });
+    if (response.ok) index = await response.json();
+  } catch (e) { index = null; }
+  if (!index || !index.tiles) return;
+  for (const row of index.tiles) {
+    const [west, south, east, north] = row.bbox;
+    const [x0, y0] = xy(west, south);
+    const [x1, y1] = xy(east, north);
+    const bytes = Object.values(row.assets || {}).reduce((sum, a) => sum + (a.bytes || 0), 0);
+    TILES.set(row.id, {
+      id: row.id, depth: Number(row.id.split("/")[0]), bbox: row.bbox,
+      children: row.children || [], parent: tileParentId(row.id),
+      assets: row.assets || {}, bytes,
+      error: row.geometric_error_m,
+      cx: (x0 + x1) / 2, cy: PENINSULA_Y + 40, cz: -(y0 + y1) / 2,
+      radius: Math.hypot(x1 - x0, y1 - y0) / 2 + 60,
+      state: "unavailable", group: null, materials: null, drawn: false, lastDrawn: 0, fadeOutFrom: 0, priority: 0,
+    });
+  }
+  TILE_INDEX = index;
+  console.info(`kerbside: tile tree ${TILES.size} tiles, depths 0..${index.max_depth}, `
+    + `errors ${JSON.stringify(index.error_at_depth)} (${index.source})`);
 }
 
 function line(points, color, opacity = 1, y = 2, widthHint = 1) {
@@ -15028,6 +15495,7 @@ function animate(now) {
   if (progress && !progress.hidden) progress.hidden = true;
   stepAvatar(now || performance.now());
   cullDetailByDistance(frameCount++);
+  updateTileTree(now || performance.now());
   renderer.render(scene, camera);
   adaptResolution(now || performance.now());
 }
@@ -15058,8 +15526,13 @@ animate();
 // Rendering does not need a visible window -- only compositing does -- so this takes its own
 // picture into its own buffer, and answers what is actually standing at a given point on the
 // ground. Between them a caller with no screen can both see the model and measure it.
+// The Bay Area, from the root down. Loaded after the region's own world so the street the
+// page opens on is never waiting behind the country round it.
+await loadTileTree();
+
 window.kerbside = {
   scene, camera, renderer, groups, DATA, DETAIL_MANIFEST, fullDetailFeature, detailKey,
+  TILES, tileStats, updateTileTree, selectTiles, tileScreenErrorPx, tilePriority, tileGroupRoot,
   tunnelFloorAt, walkerGroundAt, tunnelBores, terrainHeightAt, groundLiftAt, TERRAIN,
   cutLiftAt, approachRoadAt, wayFollowsCut, APPROACH_CUTS, junctionBoxHulls,
   goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats, THREE,
@@ -15098,8 +15571,10 @@ window.kerbside = {
   },
 
   /** A photograph of one place, from a camera this call positions. */
-  shoot({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
-          quality = 0.72, targetY = null } = {}) {
+  /** The camera one shot would be taken with, without taking it: what the tile tree is
+      settled against before a contact sheet is made. */
+  shootCamera({ lon, lat, from = 180, tilt = 52, heading = 30, w = 720, h = 405, fov = 45,
+                targetY = null } = {}) {
     const [x, y] = xy(lon, lat);
     const target = new THREE.Vector3(x, targetY === null ? groundLiftAt(x, -y) : targetY, -y);
     const yaw = (heading * Math.PI) / 180;
@@ -15109,6 +15584,15 @@ window.kerbside = {
                      target.y + Math.sin(pitch) * from,   // above the ground the target is on
                      target.z + Math.cos(yaw) * Math.cos(pitch) * from);
     cam.lookAt(target);
+    cam.updateMatrixWorld();
+    return cam;
+  },
+
+  shoot(spec = {}) {
+    const { w = 720, h = 405, quality = 0.72 } = spec;
+    const cam = window.kerbside.shootCamera(spec);
+    // The tile tree is measured from the eye it is seen with.
+    updateTileTree(performance.now(), cam);
     // One renderer, kept. A browser gives a page about sixteen WebGL contexts and does not
     // hand them back on dispose() as promptly as the next call needs them: building a fresh
     // renderer per photograph exhausted them after a dozen shots, and the page that came up
