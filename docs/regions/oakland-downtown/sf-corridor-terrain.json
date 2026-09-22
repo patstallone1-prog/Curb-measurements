@@ -1,7 +1,7 @@
 {
  "source": "USGS 3DEP CA_AlamedaCo_2_2021 ground returns (class 2), via Entwine",
  "region": "oakland-downtown",
- "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position; holes the map's land (the atlas) covers are closed however wide",
  "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
  "frame": {
   "mid_lon": -122.27250000000001,
@@ -18,9 +18,9 @@
   "dtype": "int16-le-cm"
  },
  "cells_with_ground": 884661,
- "cells_filled": 523435,
- "cells_no_data": 97384,
- "cells_filled_far": 167392,
+ "cells_filled": 618757,
+ "cells_no_data": 2062,
+ "cells_filled_far": 95322,
  "tiles": 168,
  "height_range_m": [
   -1.56,
@@ -89,10 +89,10 @@
   "polygons": 13,
   "coastlines": 0,
   "surface_m": 0.852,
-  "cells_set_to_water": 62624,
-  "cells_open_water": 97384,
+  "cells_set_to_water": 0,
+  "cells_open_water": 2062,
   "cells_water": 66159,
-  "land_m": 1.2,
-  "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines out to ground more than LAND_M over the water, were set to the water surface the lidar measured; the renderer draws the sea at and under that surface"
- }
+  "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines, were set to the water surface the lidar measured whatever the grid's fill had them at; the renderer draws the sea at and under that surface"
+ },
+ "cells_filled_land": 30281
 }

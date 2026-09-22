@@ -20,7 +20,7 @@
  "cells_with_ground": 629221,
  "cells_filled": 197396,
  "cells_no_data": 0,
- "cells_filled_far": 1781,
+ "cells_filled_far": 0,
  "tiles": 91,
  "height_range_m": [
   16.64,
@@ -92,5 +92,6 @@
   "cells_set_to_water": 0,
   "cells_open_water": 0,
   "note": "no water surface in the grid"
- }
+ },
+ "cells_filled_land": 0
 }

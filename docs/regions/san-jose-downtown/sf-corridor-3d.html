@@ -153,7 +153,7 @@ import { GLTFLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/GL
 // overlay.  Load the compact official sidecar before laying out crossings; a network failure
 // still leaves the renderer's local-road-width fallback available.
 const EMPTY_DETAIL_MANIFEST = { shards: [], offline_assets: [] };
-const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN] = await Promise.all([
+const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN, PERIMETER] = await Promise.all([
   fetch(asset("sf-corridor-3d.json"), { cache: "no-cache" }).then((r) => {
     if (!r.ok) throw new Error(`payload ${r.status}`);
     return r.json();
@@ -176,6 +176,27 @@ const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN] = await Promise.all([
       return { meta, data: new Int16Array(bytes) };
     })
     .catch(() => null),
+  // The country round the map, five miles out from every region and all the country between
+  // them: land or water on a 40 m grid from the map's coastline, and the bridges that leave
+  // the regions (scripts/build_perimeter.py). One file for every page, in a frame of its own;
+  // each row is run lengths, land first, alternating. Without it the page ends at its box in
+  // a plate and a disc.
+  fetch(asset("sf-corridor-perimeter.json"), { cache: "no-cache" })
+    .then((r) => r.ok ? r.json() : null)
+    .then((p) => {
+      if (!p || !p.runs) return null;
+      const f = p.frame;
+      const cells = new Uint8Array(f.rows * f.cols);
+      for (let r = 0; r < f.rows; r += 1) {
+        let c = 0, wet = 0;
+        for (const run of p.runs[r]) {
+          if (wet) cells.fill(1, r * f.cols + c, r * f.cols + c + run);
+          c += run; wet ^= 1;
+        }
+      }
+      return { frame: f, cells, bridges: p.bridges || [], counts: p.counts, source: p.source, regions: p.regions || [] };
+    })
+    .catch(() => null),
 ]);
 document.getElementById("obs").textContent = DATA.summary.observations.toLocaleString();
 document.getElementById("eligible").textContent = DATA.summary.eligible.toLocaleString();
@@ -188,41 +209,6 @@ document.getElementById("detailnote").textContent = DETAIL_MANIFEST.shards.lengt
   ? `Full source detail — ${(detailBytes / 1e6).toFixed(1)} MB in two lossless archive shards; the nearby half loads automatically when you inspect a feature.`
   : "Full source detail is unavailable in this build; render geometry remains complete.";
 
-// The other regions this site has built, from an index build_pages.py writes beside the
-// site's root (tools/build_pages.py: regions.json). The page in a region's own folder is told
-// where that index is by the meta tag; without one, or where it is missing, the switcher stays
-// hidden and the page is the one region it was built for.
-(async () => {
-  const meta = document.querySelector('meta[name="kerbside-regions"]');
-  const index = meta && meta.content;
-  if (!index) return;
-  let regions;
-  try {
-    const response = await fetch(index, { cache: "no-cache" });
-    if (!response.ok) return;
-    regions = await response.json();
-  } catch (err) {
-    return;
-  }
-  const list = (regions && regions.regions) || [];
-  if (list.length < 2) return;
-  const select = document.getElementById("region");
-  const group = document.getElementById("regiongroup");
-  const here = location.pathname.replace(/\/[^/]*$/, "/");
-  const root = index.replace(/regions\.json$/, "");
-  for (const region of list) {
-    const option = document.createElement("option");
-    option.value = new URL(root + region.path, location.href).pathname;
-    option.textContent = `${region.title}${region.built ? "" : " (not built)"}`;
-    option.disabled = !region.built;
-    if (option.value.replace(/[^/]*$/, "") === here) option.selected = true;
-    select.appendChild(option);
-  }
-  select.addEventListener("change", () => { location.href = select.value; });
-  const current = list.find((r) => new URL(root + r.path, location.href).pathname.replace(/[^/]*$/, "") === here);
-  document.getElementById("regionnote").textContent = current && current.note ? current.note : "";
-  group.hidden = false;
-})();
 
 const canvas = document.getElementById("scene");
 // A logarithmic depth buffer, because this scene spans five orders of magnitude: a 126 mm kerb
@@ -253,11 +239,14 @@ const scene = new THREE.Scene();
 //: rather than beside the sky itself: the fog is set up with the scene, long before the sky
 //: texture is drawn, and a const cannot be read before it is reached.
 const HORIZON = new THREE.Color(0xbcd0dc);
-scene.fog = new THREE.Fog(HORIZON, 2400, 16000);
+//: The fog closes where the far plane cuts, so the cut is never seen: past it is sky. The far
+//: plane reaches the five-mile perimeter from the far side of a region.
+const FAR_M = 14000;
+scene.fog = new THREE.Fog(HORIZON, 2400, FAR_M * 0.96);
 
 // The near plane is the other half of the depth problem: precision scales with it, and 0.1 m
 // bought nothing since the camera never comes closer than a few metres to anything.
-const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 6000);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, FAR_M);
 // The measured median kerb, in metres: 9,376 lidar slices, cross-checked against Waymo
 // ground-level lidar to within 1 mm of median. The model is built to it rather than to nominal.
 //: What a way falls back to when nothing has measured its kerb. Not a standard six inches --
@@ -297,6 +286,69 @@ for (const off of ["coverage", "observations", "sequences", "gaps", "kerbs", "ch
   groups[off].visible = false;
 }
 Object.values(groups).forEach((g) => root.add(g));
+
+// The other regions this site has built, from an index build_pages.py writes beside the
+// site's root (tools/build_pages.py: regions.json). The page in a region's own folder is told
+// where that index is by the meta tag; without one, or where it is missing, the switcher stays
+// hidden and the page is the one region it was built for.
+(async () => {
+  const meta = document.querySelector('meta[name="kerbside-regions"]');
+  const index = meta && meta.content;
+  if (!index) return;
+  let regions;
+  try {
+    const response = await fetch(index, { cache: "no-cache" });
+    if (!response.ok) return;
+    regions = await response.json();
+  } catch (err) {
+    return;
+  }
+  const list = (regions && regions.regions) || [];
+  if (list.length < 2) return;
+  const select = document.getElementById("region");
+  const group = document.getElementById("regiongroup");
+  const here = location.pathname.replace(/\/[^/]*$/, "/");
+  const root = index.replace(/regions\.json$/, "");
+  for (const region of list) {
+    const option = document.createElement("option");
+    option.value = new URL(root + region.path, location.href).pathname;
+    option.textContent = `${region.title}${region.built ? "" : " (not built)"}`;
+    option.disabled = !region.built;
+    if (option.value.replace(/[^/]*$/, "") === here) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => { location.href = select.value; });
+  const current = list.find((r) => new URL(root + r.path, location.href).pathname.replace(/[^/]*$/, "") === here);
+  document.getElementById("regionnote").textContent = current && current.note ? current.note : "";
+  group.hidden = false;
+  // The other built regions, as markers standing over their ground in the perimeter -- a
+  // click on one opens it. What was rendered is visible from where you are, across the bay.
+  for (const region of list) {
+    if (!region.built || region === current || !region.bbox) continue;
+    const [south, west, north, east] = region.bbox;
+    const [x, y] = xy((west + east) / 2, (south + north) / 2);
+    // The perimeter reaches every region and the country between; a region past the far plane
+    // is simply not drawn from here, and the switcher above still lists it.
+    const sprite = labelSprite(`${region.title}  \u2192`, "#e8f4ff", 900);
+    sprite.position.set(x, 160, -y);
+    sprite.userData.href = new URL(root + region.path, location.href).href;
+    sprite.userData.surface = "region_marker";
+    regionMarkers.add(sprite);
+    // A post from the marker to the ground, so it reads as standing somewhere.
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 150, 8),
+                                new THREE.MeshStandardMaterial({ color: 0xe8f4ff, roughness: 0.6 }));
+    post.position.set(x, 75 + PENINSULA_Y, -y);
+    regionMarkers.add(post);
+    // The region's box, outlined on the ground: where the rendered area stands in the country.
+    const outline = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([v3(west, south, PENINSULA_Y + 1), v3(east, south, PENINSULA_Y + 1), v3(east, north, PENINSULA_Y + 1), v3(west, north, PENINSULA_Y + 1)]),
+      new THREE.LineBasicMaterial({ color: 0xe8f4ff, transparent: true, opacity: 0.55 }));
+    regionMarkers.add(outline);
+  }
+})();
+const regionMarkers = new THREE.Group();
+regionMarkers.name = "regionMarkers";
+scene.add(regionMarkers);
 
 const lazyLayerBuilders = new Map();
 //: A layer asked for before it is registered. The build yields to the browser now, so the
@@ -342,14 +394,22 @@ const TERRAIN_FRAME = TERRAIN ? TERRAIN.meta.frame : null;
 //: own spread, is water: the backdrop is drawn as sea there, at SEA_Y, and nothing stands on it.
 const SEA_SURFACE_M = (TERRAIN && TERRAIN.meta.waterline && TERRAIN.meta.waterline.surface_m !== null
   && TERRAIN.meta.waterline.surface_m !== undefined) ? TERRAIN.meta.waterline.surface_m : -0.14;
-//: The returns off the water spread a quarter of a metre either side of the surface.
-const WATERLINE_M = SEA_SURFACE_M + 0.45;
+//: Ground under this is water. Where the waterline pass set the grid's water cells to the
+//: surface (smc.terrain.waterline records how many), the water is exactly at the surface and
+//: a hand's breadth covers it; otherwise the returns off the water spread a quarter of a
+//: metre either side of the surface and the band is wider. The wide band on a grid whose
+//: water was already set flooded the quays of Jack London Square, which stand a metre over
+//: the estuary, between the buildings.
+const WATERLINE_M = SEA_SURFACE_M + ((TERRAIN && TERRAIN.meta.waterline && TERRAIN.meta.waterline.cells_water) ? 0.06 : 0.45);
 //: Where the sea is drawn: a hand above the returns, so that no water-surface return shows
 //: through the sea as a grey fleck.
 const SEA_Y = SEA_SURFACE_M + 0.12;
 //: Over open water with no returns at all -- outside the lidar, the middle of the bay -- the
-//: ground is a low quay's height above the sea, so that a pier drawn there stands out of it.
-const OPEN_WATER_GROUND_M = SEA_SURFACE_M + 0.6;
+//: ground is the sea's surface. It stood a low quay's height above it once, so that a pier
+//: drawn there stood out of the water, and the open bay inside the grid was drawn as a grey
+//: shelf for it; the piers stand on the grid's own ground now (the coastline goes round them),
+//: and the open water is water.
+const OPEN_WATER_GROUND_M = SEA_SURFACE_M;
 //: Where the terrain has no data (outside the lidar, under the bay) the ground is the sea's.
 function terrainHeightAt(x, z) {
   if (!TERRAIN_FRAME) return 0;
@@ -671,6 +731,9 @@ const LAND_Y = -0.12;
 const BAY_Y = SEA_Y - 0.05;
 const WATER_Y = SEA_Y + 0.01;
 const BEACH_Y = SEA_Y + 0.03;
+//: A pier's deck: under the yards in the ground stack (checked at load with the rest), over the
+//: sea it stands beside.
+const PIER_DECK_Y = 0.012;
 
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(width, depth, 1, 1),
@@ -711,22 +774,45 @@ const TERRAIN_APRON_STEP_M = 32.0;
 const TERRAIN_APRON_DECAY_M = 700.0;
 const TERRAIN_LAND = new THREE.Color(0x4a4a45);
 const TERRAIN_SEA = new THREE.Color(0x2c6187);
-const TERRAIN_PLATE = new THREE.Color(0x3d5142);
+//: The country beyond the survey: grass, plainly, so the edge of what was measured is legible.
+const TERRAIN_PLATE = new THREE.Color(0x4a6f3c);
+//: The backdrop's grey gives way to the grass over this distance past the grid's edge; the
+//: height eases over TERRAIN_APRON_DECAY_M.
+const TERRAIN_APRON_COLOUR_M = 300.0;
 const terrainTiles = [];
 //: The backdrop's height and colour at a point: land under the ground, or the sea where the
 //: ground is at or under the waterline. ``apron`` is how far outside the grid the point lies.
+//: Land or water beyond the grid, from the perimeter's map-derived cells; null where the
+//: perimeter does not reach (or was not built), in which case the grid's edge cell decides.
+//: The perimeter's frame is its own (centred on the atlas, not on this region), so a point
+//: here goes through lon/lat to reach its cell.
+function perimeterCell(x, z) {
+  const f = PERIMETER.frame;
+  const lon = midLon + x / metersPerLon, lat = midLat - z / metersPerLat;
+  return [Math.floor(((lat - f.mid_lat) * f.metres_per_lat - f.y0) / f.step_m),
+          Math.floor(((lon - f.mid_lon) * f.metres_per_lon - f.x0) / f.step_m)];
+}
+function perimeterWaterAt(x, z) {
+  if (!PERIMETER) return null;
+  const f = PERIMETER.frame;
+  const [r, c] = perimeterCell(x, z);
+  if (r < 0 || c < 0 || r >= f.rows || c >= f.cols) return null;
+  return PERIMETER.cells[r * f.cols + c] === 1;
+}
 function backdropAt(x, z, apron = 0) {
   // Outside the grid the lookup clamps to the grid's edge cell, so the apron carries that
-  // cell's land or water outward: water past a wet edge, land past a dry one.
+  // cell's land or water outward: water past a wet edge, land past a dry one -- unless the
+  // perimeter, which has the map's coastline, says otherwise.
   const edge = cutLiftAt(x, z);
-  if (edge < WATERLINE_M) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
+  const wet = apron > 0 ? perimeterWaterAt(x, z) : null;
+  if (wet === true || (wet === null && edge < WATERLINE_M)) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
   let h = edge;
   if (apron > 0) {
     // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
     // grey ring round the city.
     const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
     h = PENINSULA_Y + (h - PENINSULA_Y) * s;
-    return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, s) };
+    return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_PLATE.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M)) };
   }
   return { y: h - TERRAIN_MESH_UNDER_M, colour: TERRAIN_LAND };
 }
@@ -744,10 +830,15 @@ function addBackdropTile(xs, zs, apronOf) {
   }
   const index = new Uint32Array((w - 1) * (h - 1) * 6);
   let k = 0;
+  // Wound to face up whichever way the rows run: the rows here run toward -z, and wound the
+  // other way the whole backdrop faced down -- invisible from above, so that everywhere no
+  // surface covered the ground the bay disc showed through from underneath as water.
+  const up = (zs[Math.min(1, h - 1)] - zs[0]) < 0;
   for (let r = 0; r + 1 < h; r += 1) {
     for (let c = 0; c + 1 < w; c += 1) {
       const a = r * w + c, b = a + 1, d = a + w, e = d + 1;
-      index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e;
+      if (up) { index[k++] = a; index[k++] = b; index[k++] = d; index[k++] = b; index[k++] = e; index[k++] = d; }
+      else { index[k++] = a; index[k++] = d; index[k++] = b; index[k++] = b; index[k++] = d; index[k++] = e; }
     }
   }
   const geometry = new THREE.BufferGeometry();
@@ -761,7 +852,7 @@ function addBackdropTile(xs, zs, apronOf) {
   terrainTiles.push(tile);
   root.add(tile);
 }
-const TERRAIN_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.99, metalness: 0.0 });
+const TERRAIN_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.99, metalness: 0.0, side: THREE.DoubleSide });
 if (TERRAIN_FRAME) {
   const f = TERRAIN_FRAME;
   const cols = Math.floor((f.cols - 1) / TERRAIN_MESH_STRIDE) + 1;
@@ -831,7 +922,7 @@ const TERRAIN_REFINE_MIN_M = 4.0;
 const TERRAIN_UNDER_CHORD_M = 0.2;
 const TERRAIN_REFINE_BY_SURFACE = {
   walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
-  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0],
   yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
 };
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
@@ -1136,7 +1227,23 @@ const LAND_CENTRE = { lon: -122.4460, lat: 37.7490 };
 const BAY_RADIUS_M = 26000.0;
 //: The peninsula, roughly. Eleven kilometres square covers San Francisco proper with a margin.
 const LAND_SPAN_M = 11600.0;
-{
+//: The perimeter's cells are drawn in tiles this many cells a side, each culled on its own;
+//: within a tile each row's runs of land and water are one quad each, so the three and a half
+//: million cells of the atlas are a few tens of thousands of quads.
+const PERIMETER_TILE_CELLS = 240;
+//: A bridge deck over water stands this high above the sea -- a bay bridge's clearance -- and
+//: comes down to the ground at each end no steeper than PERIMETER_BRIDGE_GRADE.
+const PERIMETER_BRIDGE_CLEARANCE_M = 55.0;
+const PERIMETER_BRIDGE_GRADE = 0.05;
+const PERIMETER_PIER_M = 160.0;
+//: The perimeter's tiles stand this far under the grid's own apron, so that where a cell
+//: straddles the apron's edge the apron is drawn and not a fight between the two: at three
+//: kilometres the depth buffer tells planes apart by the metre, not the centimetre.
+const PERIMETER_UNDER_M = 2.0;
+if (!PERIMETER) {
+  // No perimeter built: a disc of sea round the city, and the plate of land the city sits on,
+  // over the middle of it. With the perimeter the disc lies wholly inside the atlas and would
+  // only fight it for the pixels.
   const [cx, cy] = xy(CITY.lon, CITY.lat);
   const bay = new THREE.Mesh(
     new THREE.CircleGeometry(BAY_RADIUS_M, 96),
@@ -1147,17 +1254,144 @@ const LAND_SPAN_M = 11600.0;
   bay.rotation.x = -Math.PI / 2;
   bay.position.set(cx, BAY_Y, -cy);
   root.add(bay);
-
-  // The land the city sits on, over the middle of the bay. Without it the disc would put water
-  // through the Mission and the Sunset, which are the wrong side of the coast from here.
-  const [lx, ly] = xy(LAND_CENTRE.lon, LAND_CENTRE.lat);
-  const land = new THREE.Mesh(
-    new THREE.PlaneGeometry(LAND_SPAN_M, LAND_SPAN_M, 1, 1),
-    new THREE.MeshStandardMaterial({ color: 0x3d5142, roughness: 1.0, metalness: 0.0 })
-  );
-  land.rotation.x = -Math.PI / 2;
-  land.position.set(lx, PENINSULA_Y, -ly);
-  root.add(land);
+  {
+    // No perimeter built: the plate of land the city sits on, over the middle of the bay.
+    const [lx, ly] = xy(LAND_CENTRE.lon, LAND_CENTRE.lat);
+    const land = new THREE.Mesh(
+      new THREE.PlaneGeometry(LAND_SPAN_M, LAND_SPAN_M, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0x3d5142, roughness: 1.0, metalness: 0.0 })
+    );
+    land.rotation.x = -Math.PI / 2;
+    land.position.set(lx, PENINSULA_Y, -ly);
+    root.add(land);
+  }
+}
+if (PERIMETER) {
+  // The country round the region as the map has it: grass where the land is, sea where the
+  // water is, in tiles, with the cells under the grid and its apron left to them.
+  const f = PERIMETER.frame;
+  const g = TERRAIN_FRAME;
+  const apronWest = g ? g.x0 - TERRAIN_APRON_M : Infinity, apronEast = g ? g.x0 + g.cols * g.step_m + TERRAIN_APRON_M : -Infinity;
+  const apronSouth = g ? g.y0 - TERRAIN_APRON_M : Infinity, apronNorth = g ? g.y0 + g.rows * g.step_m + TERRAIN_APRON_M : -Infinity;
+  const underApron = (x, y) => x > apronWest && x < apronEast && y > apronSouth && y < apronNorth;
+  const grass = TERRAIN_PLATE, sea = TERRAIN_SEA;
+  // A cell corner in the atlas's frame, here: through lon/lat, since the frames differ.
+  const here = (c, r) => {
+    const lon = f.mid_lon + (f.x0 + c * f.step_m) / f.metres_per_lon;
+    const lat = f.mid_lat + (f.y0 + r * f.step_m) / f.metres_per_lat;
+    return xy(lon, lat);
+  };
+  for (let r0 = 0; r0 < f.rows; r0 += PERIMETER_TILE_CELLS) {
+    for (let c0 = 0; c0 < f.cols; c0 += PERIMETER_TILE_CELLS) {
+      const r1 = Math.min(f.rows, r0 + PERIMETER_TILE_CELLS), c1 = Math.min(f.cols, c0 + PERIMETER_TILE_CELLS);
+      const position = [], colour = [], index = [];
+      for (let r = r0; r < r1; r += 1) {
+        // The row's runs: one quad per run of one kind, cut where the apron begins and ends.
+        let c = c0;
+        while (c < c1) {
+          const wet = PERIMETER.cells[r * f.cols + c];
+          const [xa, ya] = here(c, r);
+          // A cell is left to the apron only when the whole of it lies under the apron: one
+          // that straddles the apron's edge is drawn (under it, PERIMETER_UNDER_M down), or
+          // the strip of it outside the apron was a line of sky along the edge.
+          const whollyUnder = (x, y) => underApron(x + 0.5, y + 0.5) && underApron(x + f.step_m - 0.5, y + f.step_m - 0.5);
+          const under = whollyUnder(xa, ya);
+          let end = c + 1;
+          while (end < c1 && PERIMETER.cells[r * f.cols + end] === wet) {
+            const [xe, ye] = here(end, r);
+            if (whollyUnder(xe, ye) !== under) break;
+            end += 1;
+          }
+          if (!under) {
+            const [xb, yb] = here(end, r + 1);
+            const h = (wet ? SEA_Y - 0.02 : PENINSULA_Y) - PERIMETER_UNDER_M;
+            const col = wet ? sea : grass;
+            const base = position.length / 3;
+            for (const [x, y] of [[xa, ya], [xb, ya], [xb, yb], [xa, yb]]) {
+              position.push(x, h, -y);
+              colour.push(col.r, col.g, col.b);
+            }
+            // Wound to face up (+y): z runs to -north.
+            index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+          }
+          c = end;
+        }
+      }
+      if (!index.length) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colour, 3));
+      geometry.setIndex(index);
+      geometry.computeVertexNormals();
+      geometry.computeBoundingSphere();
+      const tile = new THREE.Mesh(geometry, TERRAIN_MATERIAL);
+      tile.userData.surface = "perimeter";
+      root.add(tile);
+    }
+  }
+  // The bridges: a deck over the water at clearance height, down to the ground at each end
+  // no steeper than the grade, on piers. The map's ways, whole, so a span that leaves the
+  // region reaches the other shore -- Oakland's, or Marin's.
+  const deckMaterial = new THREE.MeshStandardMaterial({ color: 0x5a5c5e, roughness: 0.9, metalness: 0.05, side: THREE.DoubleSide });
+  const pierMaterial = new THREE.MeshStandardMaterial({ color: 0x8a8d90, roughness: 0.85, metalness: 0.05 });
+  const pierUnit = new THREE.BoxGeometry(1, 1, 1);
+  const groundOutside = (x, z) => {
+    const inside = g && x >= g.x0 && x <= g.x0 + g.cols * g.step_m && -z >= g.y0 && -z <= g.y0 + g.rows * g.step_m;
+    if (inside) return cutLiftAt(x, z);
+    const wet = perimeterWaterAt(x, z);
+    return wet ? SEA_Y : PENINSULA_Y;
+  };
+  let decks = 0, piers = 0;
+  const pierBoxes = [];
+  for (const bridge of PERIMETER.bridges) {
+    if (!bridge.over_water.some(Boolean)) continue;          // a road bridge over a road: not this
+    const pts = bridge.points.map(([lon, lat]) => { const [x, y] = xy(lon, lat); return [x, -y]; });
+    if (pts.length < 2) continue;
+    const width = bridge.lanes ? bridge.lanes * 3.5 + 3 : 18;
+    const ds = [0];
+    for (let i = 1; i < pts.length; i += 1) ds.push(ds[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const target = pts.map(([x, z], i) => bridge.over_water[i] ? SEA_Y + PERIMETER_BRIDGE_CLEARANCE_M : groundOutside(x, z) + 1.0);
+    const h = target.slice();
+    for (let i = 1; i < h.length; i += 1) h[i] = Math.max(h[i], h[i - 1] - PERIMETER_BRIDGE_GRADE * (ds[i] - ds[i - 1]));
+    for (let i = h.length - 2; i >= 0; i -= 1) h[i] = Math.max(h[i], h[i + 1] - PERIMETER_BRIDGE_GRADE * (ds[i + 1] - ds[i]));
+    const position = [], index = [];
+    for (let i = 0; i < pts.length; i += 1) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+      const dx = b[0] - a[0], dz = b[1] - a[1], len = Math.hypot(dx, dz) || 1;
+      const nx = -dz / len * width / 2, nz = dx / len * width / 2;
+      position.push(pts[i][0] + nx, h[i], pts[i][1] + nz, pts[i][0] - nx, h[i], pts[i][1] - nz);
+      if (i) { const k = i * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(position, 3));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    const deck = new THREE.Mesh(geometry, deckMaterial);
+    deck.userData.surface = "bridge";
+    deck.userData.name = bridge.name;
+    root.add(deck);
+    decks += 1;
+    let next = PERIMETER_PIER_M / 2;
+    for (let i = 1; i < pts.length; i += 1) {
+      while (next <= ds[i]) {
+        const t0 = (next - ds[i - 1]) / ((ds[i] - ds[i - 1]) || 1);
+        const x = pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t0, z = pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t0;
+        const top = h[i - 1] + (h[i] - h[i - 1]) * t0;
+        if (bridge.over_water[i] && top - SEA_Y > 8) { pierBoxes.push([x, SEA_Y - 2, z, 5, top - SEA_Y + 2, width * 0.6]); piers += 1; }
+        next += PERIMETER_PIER_M;
+      }
+    }
+  }
+  if (pierBoxes.length) {
+    const mesh = new THREE.InstancedMesh(pierUnit, pierMaterial, pierBoxes.length);
+    const dummy = new THREE.Object3D();
+    pierBoxes.forEach(([x, y, z, w, hgt, d], i) => { dummy.position.set(x, y + hgt / 2, z); dummy.scale.set(w, hgt, d); dummy.updateMatrix(); mesh.setMatrixAt(i, dummy.matrix); });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.surface = "bridge_pier";
+    root.add(mesh);
+  }
+  console.info(`kerbside: perimeter ${PERIMETER.frame.cols}x${PERIMETER.frame.rows} cells, ${decks} bridge decks on ${piers} piers (${PERIMETER.source})`);
 }
 
 function line(points, color, opacity = 1, y = 2, widthHint = 1) {
@@ -4842,6 +5076,38 @@ function insideCarriageway(x, z, slack = 0.4) {
   return false;
 }
 
+//: Whether a point is on the body of a carriageway other than the ways named -- for the
+//: corner pieces. A corner is built from its two legs' own kerbs, so those two ways cannot
+//: be the reason to refuse it: the stamped band is a segment's average width where the
+//: corner is built at the node's, and a road that widens away from the junction overlapped
+//: its own corner by a few decimetres. And no end caps: every way ending at a node reached
+//: into every corner of the junction by its own half width. Only a third carriageway's body
+//: across the wedge -- a slip lane, a diagonal street -- says the corner is on the road.
+//: 403 of the corridor's 1,738 corners were refused for one of the two; they are the
+//: missing corner chunks.
+function onAnotherCarriageway(x, z, slack, exclude) {
+  const cx = Math.floor(x / CARRIAGEWAY_CELL);
+  const cz = Math.floor(z / CARRIAGEWAY_CELL);
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      const bucket = carriagewayGrid.get(`${cx + dx}:${cz + dz}`);
+      if (!bucket) continue;
+      for (const [ax, az, bx, bz, half, , source] of bucket) {
+        if (source && exclude.includes(source)) continue;
+        const ex = bx - ax, ez = bz - az;
+        const l2 = ex * ex + ez * ez;
+        if (l2 < 1e-9) continue;
+        const t = ((x - ax) * ex + (z - az) * ez) / l2;
+        if (t <= 0 || t >= 1) continue;                  // the body, not the caps
+        const px = ax + ex * t, pz = az + ez * t;
+        const limit = Math.max(0, half - slack);
+        if ((x - px) ** 2 + (z - pz) ** 2 < limit * limit) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function pavementSurroundedByStreet(x, z, width) {
   const reach = Math.max(0.85, Math.min(2.4, width));
   let sides = 0;
@@ -5918,7 +6184,8 @@ function addPavementCorners() {
       for (const q of [K, A1, C, B1]) {
         samples.push([q[0] + (mid[0] - q[0]) * 0.2, q[1] + (mid[1] - q[1]) * 0.2]);
       }
-      if (samples.some(([sx, sy]) => insideCarriageway(sx, -sy, 0.15))) {
+      const legs = [leg.way, corner.B.way];
+      if (samples.some(([sx, sy]) => onAnotherCarriageway(sx, -sy, 0.15, legs))) {
         skipped.onRoad += 1;
         continue;
       }
@@ -9477,6 +9744,8 @@ function outbuildingRoofTexture(seed) {
 }
 
 function buildingMesh(feature) {
+  // A station under the street has no walls above it.
+  if (feature.underground) return null;
   const shape = footprintShape(feature.points);
   if (!shape) return null;
   const areaM2 = footprintArea(feature.points);
@@ -10698,9 +10967,33 @@ for (const way of DRAW_ORDER) {
  }
  continue;
  }
+ if (way.kind === "pier") {
+ // A pier's deck: scored concrete, lifted onto the ground the grid has under it (the quay's
+ // height, carried out along the pier), so it stands over the water at the quay's level.
+ const shape = footprintShape(way.points);
+ if (shape) {
+ const geom = new THREE.ShapeGeometry(shape);
+ geom.rotateX(-Math.PI / 2);
+ const uv = geom.getAttribute("uv"), pos = geom.getAttribute("position");
+ for (let i = 0; i < uv.count; i += 1) uv.setXY(i, pos.getX(i) / 1.5, pos.getZ(i) / 1.5);
+ const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+ map: SIDEWALK, color: 0xd8d8d4, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide,
+ }));
+ mesh.position.y = PIER_DECK_Y;
+ mesh.userData.surface = "pier";
+ groups.ground.add(mesh);
+ }
+ continue;
+ }
  if (way.kind === "water") {
     // The bay, the lagoon and Aquatic Park. Nothing in the query reached them before, so the
-    // whole northern edge of the corridor was drawn as ground.
+    // whole northern edge of the corridor was drawn as ground. Where the grid has a measured
+    // waterline the sea is the ground's own (the waterline pass set the grid to the surface
+    // under these very polygons), and a sheet laid over it a centimetre up is a second plane
+    // the depth buffer cannot tell from the first a few kilometres out: the bands off the
+    // coastline were long shards of darker water from any height.
+    if (TERRAIN && TERRAIN.meta.waterline && TERRAIN.meta.waterline.surface_m !== null
+        && TERRAIN.meta.waterline.surface_m !== undefined) continue;
     const shape = footprintShape(way.points);
     if (shape) {
       const geom = new THREE.ShapeGeometry(shape);
@@ -11484,7 +11777,7 @@ const COURT_LINE_Y = 0.042;    // the paint on the courts
 
 //: No two of these may be equal, and none may reach the carriageway's own top at 0.06.
 const GROUND_STACK = {
-  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y, PARKING_Y, PARKING_LINE_Y,
+  YARD_Y, SERVICE_YARD_Y, PARK_Y, FRONT_WALK_Y, COURT_Y, COURT_LINE_Y, PARKING_Y, PARKING_LINE_Y, PIER_DECK_Y,
 };
 {
   const seen = new Map();
@@ -11722,12 +12015,42 @@ function grassVariantForRing(ring, count) {
 
 //: How small a ground-cover triangle that straddles a kerb line is cut before it is judged.
 const RING_CLIP_M = 3.0;
+//: A ground-cover ring is cut to the region's box, this far past it. The Presidio's park
+//: polygon runs kilometres past the corridor; lifted onto the ground at its corners, the
+//: corner inside the box on a hill and the corner outside on nothing, it was a green
+//: triangle a kilometre long tilted seventy metres into the air over the apron.
+const RING_BOX_MARGIN_M = 40.0;
+function clipRingToBox(ring) {
+  const [bw, bs] = xy(bbox.west, bbox.south), [be, bn] = xy(bbox.east, bbox.north);
+  const west = bw - RING_BOX_MARGIN_M, east = be + RING_BOX_MARGIN_M, south = bs - RING_BOX_MARGIN_M, north = bn + RING_BOX_MARGIN_M;
+  let poly = ring.map(([lon, lat]) => xy(lon, lat));
+  // Sutherland-Hodgman against each of the four edges.
+  for (const [inside, cut] of [
+    [(p) => p[0] >= west, (a, b) => { const t0 = (west - a[0]) / (b[0] - a[0]); return [west, a[1] + (b[1] - a[1]) * t0]; }],
+    [(p) => p[0] <= east, (a, b) => { const t0 = (east - a[0]) / (b[0] - a[0]); return [east, a[1] + (b[1] - a[1]) * t0]; }],
+    [(p) => p[1] >= south, (a, b) => { const t0 = (south - a[1]) / (b[1] - a[1]); return [a[0] + (b[0] - a[0]) * t0, south]; }],
+    [(p) => p[1] <= north, (a, b) => { const t0 = (north - a[1]) / (b[1] - a[1]); return [a[0] + (b[0] - a[0]) * t0, north]; }],
+  ]) {
+    const out = [];
+    for (let i = 0; i < poly.length; i += 1) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const ia = inside(a), ib = inside(b);
+      if (ia) out.push(a);
+      if (ia !== ib) out.push(cut(a, b));
+    }
+    poly = out;
+    if (poly.length < 3) return null;
+  }
+  return poly.map(([x, y]) => lonLatFromXZ(x, -y));
+}
 function ringGeometry(rings, y, clipToRoad = true) {
   // One geometry for every ring handed in, triangulated by ear clipping through THREE.Shape.
   const positions = [];
   const uvs = [];
   const indices = [];
-  for (const ring of rings) {
+  for (const raw of rings) {
+    const ring = clipRingToBox(raw);
+    if (!ring) continue;
     const shape = new THREE.Shape();
     let started = false;
     for (const [lon, lat] of ring) {
@@ -14422,6 +14745,11 @@ canvas.addEventListener("pointerup", async (e) => {
   // A drag is an orbit, not a destination. Only a press that barely moved counts as a click.
   if (Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
   if (e.button === 2) return;   // handled on contextmenu, which fires first on a two-finger tap
+  // A region marker first: it opens that region's page.
+  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const marker = ray.intersectObjects(regionMarkers.children, false).find((h) => h.object.userData.href);
+  if (marker) { location.href = marker.object.userData.href; return; }
   const feature = pickedFeature(e.clientX, e.clientY);
   const summary = await featureSummary(feature);
   if (summary && tip) {
@@ -14680,7 +15008,7 @@ window.kerbside = {
     const target = new THREE.Vector3(x, targetY === null ? groundLiftAt(x, -y) : targetY, -y);
     const yaw = (heading * Math.PI) / 180;
     const pitch = (tilt * Math.PI) / 180;
-    const cam = new THREE.PerspectiveCamera(fov, w / h, 0.5, 6000);
+    const cam = new THREE.PerspectiveCamera(fov, w / h, 0.5, FAR_M);
     cam.position.set(target.x + Math.sin(yaw) * Math.cos(pitch) * from,
                      target.y + Math.sin(pitch) * from,   // above the ground the target is on
                      target.z + Math.cos(yaw) * Math.cos(pitch) * from);

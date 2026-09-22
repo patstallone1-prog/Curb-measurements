@@ -1,7 +1,7 @@
 {
  "source": "USGS 3DEP CA_SanFrancisco_1_B23 ground returns (class 2), via Entwine",
  "region": "sf-mission",
- "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position",
+ "method": "mean of the ground returns in each 2.0 m cell; empty cells filled from neighbours out to 6 cells; holes still open are grown into from their edge a cell a step, out to 60 cells; 2% of returns held out and compared with the bilinear grid at their position; holes the map's land (the atlas) covers are closed however wide",
  "sensor_accuracy_note": "USGS states about 0.10 m RMSEz for this collection; the figures here are the grid's own error on top of that, measured against held-out returns of the same lidar.",
  "frame": {
   "mid_lon": -122.41624999999999,
@@ -18,9 +18,9 @@
   "dtype": "int16-le-cm"
  },
  "cells_with_ground": 350622,
- "cells_filled": 292748,
- "cells_no_data": 850925,
- "cells_filled_far": 99999,
+ "cells_filled": 1143673,
+ "cells_no_data": 0,
+ "cells_filled_far": 850925,
  "tiles": 56,
  "height_range_m": [
   4.35,
@@ -90,7 +90,8 @@
   "coastlines": 0,
   "surface_m": null,
   "cells_set_to_water": 0,
-  "cells_open_water": 850925,
+  "cells_open_water": 0,
   "note": "no water surface in the grid"
- }
+ },
+ "cells_filled_land": 764225
 }

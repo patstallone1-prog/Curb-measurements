@@ -5,7 +5,13 @@
    "title": "San Francisco: Marina to the Financial District",
    "path": "sf-corridor-3d.html",
    "built": true,
-   "note": "The corridor: the city's kerb lines, the footway survey, the lidar."
+   "note": "The corridor: the city's kerb lines, the footway survey, the lidar.",
+   "bbox": [
+    37.786,
+    -122.4475,
+    37.8095,
+    -122.392
+   ]
   },
   {
    "name": "sf-mission",
@@ -14,6 +20,12 @@
    "built": true,
    "city": "san-francisco",
    "description": "Mission District: flat grid, dense storefronts, painted facades, heavy imagery",
+   "bbox": [
+    37.748,
+    -122.4275,
+    37.77,
+    -122.405
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -24,7 +36,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:25:00Z",
+   "built_at": "2026-09-22T00:39:05Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -44,6 +56,12 @@
    "built": false,
    "city": "san-francisco",
    "description": "South of Market: wide one-way arterials, warehouses, new towers, freeway ramps",
+   "bbox": [
+    37.77,
+    -122.42,
+    37.79,
+    -122.39
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -60,6 +78,12 @@
    "built": true,
    "city": "san-francisco",
    "description": "Haight, Duboce, Castro: Victorians, hills, Muni tunnel portals",
+   "bbox": [
+    37.755,
+    -122.455,
+    37.765,
+    -122.43
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -70,7 +94,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:25:16Z",
+   "built_at": "2026-09-21T19:49:23Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -90,6 +114,12 @@
    "built": false,
    "city": "san-francisco",
    "description": "Inner and Central Richmond: the avenues, Geary, fog, few tall buildings",
+   "bbox": [
+    37.775,
+    -122.51,
+    37.79,
+    -122.46
+   ],
    "stages": {
     "discover": "done",
     "osm": "failed"
@@ -104,6 +134,12 @@
    "built": true,
    "city": "san-francisco",
    "description": "Sunset: rows of near-identical houses, the L Taraval, wide flat avenues",
+   "bbox": [
+    37.74,
+    -122.51,
+    37.765,
+    -122.47
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -113,7 +149,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:25:54Z",
+   "built_at": "2026-09-22T00:38:14Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -133,6 +169,12 @@
    "built": true,
    "city": "oakland",
    "description": "Downtown Oakland, Broadway, Lake Merritt's west shore: the first region outside San Francisco",
+   "bbox": [
+    37.795,
+    -122.285,
+    37.815,
+    -122.26
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -143,7 +185,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:26:18Z",
+   "built_at": "2026-09-22T00:37:32Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
@@ -163,6 +205,12 @@
    "built": true,
    "city": "berkeley",
    "description": "Downtown Berkeley and the campus edge: Shattuck, Telegraph, protected bike lanes",
+   "bbox": [
+    37.865,
+    -122.275,
+    37.88,
+    -122.255
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -173,7 +221,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:26:32Z",
+   "built_at": "2026-09-22T00:38:32Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -193,6 +241,12 @@
    "built": true,
    "city": "palo-alto",
    "description": "University Avenue and the streets either side: low, leafy, angled parking",
+   "bbox": [
+    37.44,
+    -122.17,
+    37.452,
+    -122.155
+   ],
    "stages": {
     "osm": "done",
     "imagery": "done",
@@ -203,7 +257,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:26:41Z",
+   "built_at": "2026-09-21T19:59:28Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
@@ -223,6 +277,12 @@
    "built": true,
    "city": "san-jose",
    "description": "Downtown San Jose: light rail in the street, big blocks, the SAP Center",
+   "bbox": [
+    37.325,
+    -121.905,
+    37.345,
+    -121.875
+   ],
    "stages": {
     "discover": "done",
     "osm": "done",
@@ -233,7 +293,7 @@
     "build": "done",
     "audit": "done"
    },
-   "built_at": "2026-09-21T16:26:59Z",
+   "built_at": "2026-09-21T20:03:46Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",

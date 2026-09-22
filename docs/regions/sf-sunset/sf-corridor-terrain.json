@@ -18,9 +18,9 @@
   "dtype": "int16-le-cm"
  },
  "cells_with_ground": 2159431,
- "cells_filled": 675489,
- "cells_no_data": 9152,
- "cells_filled_far": 45103,
+ "cells_filled": 684641,
+ "cells_no_data": 62788,
+ "cells_filled_far": 0,
  "tiles": 304,
  "height_range_m": [
   0.01,
@@ -88,11 +88,11 @@
  "waterline": {
   "polygons": 1,
   "coastlines": 0,
-  "surface_m": 0.272,
-  "cells_set_to_water": 987,
-  "cells_open_water": 9152,
+  "surface_m": 0.492,
+  "cells_set_to_water": 494,
+  "cells_open_water": 62788,
   "cells_water": 987,
-  "land_m": 1.2,
-  "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines out to ground more than LAND_M over the water, were set to the water surface the lidar measured; the renderer draws the sea at and under that surface"
- }
+  "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines, were set to the water surface the lidar measured whatever the grid's fill had them at; the renderer draws the sea at and under that surface"
+ },
+ "cells_filled_land": 0
 }
