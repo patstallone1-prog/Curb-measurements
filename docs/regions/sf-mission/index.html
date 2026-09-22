@@ -318,10 +318,44 @@ Object.values(groups).forEach((g) => root.add(g));
     if (option.value.replace(/[^/]*$/, "") === here) option.selected = true;
     select.appendChild(option);
   }
-  select.addEventListener("change", () => { location.href = select.value; });
+  // Choosing a region flies you there. It used to load another page, which is a blank screen,
+  // a rebuild, and a new world that does not remember where you were -- for a place that is
+  // already drawn, across the bay, in the same model you are standing in.
+  select.addEventListener("change", () => {
+    const region = list.find((r) => new URL(root + r.path, location.href).pathname === select.value);
+    if (region && region.bbox) flyToRegion(region);
+    else location.href = select.value;
+  });
   const current = list.find((r) => new URL(root + r.path, location.href).pathname.replace(/[^/]*$/, "") === here);
   document.getElementById("regionnote").textContent = current && current.note ? current.note : "";
   group.hidden = false;
+  //: How much of the screen a region should fill when you are flown to it: far enough out that
+  //: its whole box is in view, which for a two-kilometre district is about two kilometres up.
+  const REGION_FRAME = 1.4;
+  function flyToRegion(region) {
+    const [south, west, north, east] = region.bbox;
+    const [x, y] = xy((west + east) / 2, (south + north) / 2);
+    const [x0, y0] = xy(west, south);
+    const [x1, y1] = xy(east, north);
+    setFirstPerson(false);
+    state.target.set(x, PENINSULA_Y, -y);
+    state.dist = Math.max(600, Math.hypot(x1 - x0, y1 - y0) * REGION_FRAME);
+    state.pitch = 0.95;
+    if (typeof avatar !== "undefined") avatar.position.set(x, AVATAR_STAND_Y, -y);
+    placeCamera();
+    // The tree has a moment's warning that the world is about to be somewhere else.
+    updateTileTree(performance.now());
+    const note = document.getElementById("regionnote");
+    if (note) {
+      note.textContent = `${region.title}. `;
+      const link = document.createElement("a");
+      link.href = new URL(root + region.path, location.href).pathname;
+      link.textContent = "Open the full survey here";
+      link.style.color = "#8fd0ff";
+      note.appendChild(link);
+    }
+  }
+  window.kerbsideFlyToRegion = flyToRegion;
   // The other built regions, as markers standing over their ground in the perimeter -- a
   // click on one opens it. What was rendered is visible from where you are, across the bay.
   for (const region of list) {
@@ -336,6 +370,7 @@ Object.values(groups).forEach((g) => root.add(g));
     // goes out once the region under it is being drawn as a place rather than pointed at.
     sprite.userData.hideWithin = REGION_MARKER_HIDE_M;
     sprite.userData.href = new URL(root + region.path, location.href).href;
+    sprite.userData.region = region;
     sprite.userData.surface = "region_marker";
     regionMarkers.add(sprite);
     // A post from the marker to the ground, so it reads as standing somewhere.
@@ -1607,12 +1642,19 @@ function buildTile(tile, layers) {
     massing: TILE_MASSING_MATERIAL.clone(),
     buildings: TILE_BUILDING_MATERIAL.clone(),
     roads: TILE_ROAD_MATERIAL.clone(),
+    pavement: TILE_WALK_MATERIAL.clone(),
+    paint: TILE_PAINT_MATERIAL.clone(),
   };
   tile.materials = Object.values(materials);
   if (layers.massing) group.add(...tileMassing(layers.massing, f, lonOf, latOf, materials.massing));
   if (layers.buildings) group.add(...tileBuildings(layers.buildings, f, lonOf, latOf, materials.buildings));
-  for (const name of ["roads", "roads_major"]) {
-    if (layers[name]) group.add(...tileRoads(layers[name], f, lonOf, latOf, materials.roads));
+  // The street, from the outside in: the carriageway, the paint on it, the footways beside it.
+  for (const [name, material, height] of [["roads", materials.roads, TILE_ROAD_Y],
+                                          ["roads_major", materials.roads, TILE_ROAD_Y],
+                                          ["carriageway", materials.roads, TILE_ROAD_Y],
+                                          ["crossings", materials.paint, TILE_PAINT_Y],
+                                          ["pavement", materials.pavement, TILE_WALK_Y]]) {
+    if (layers[name]) group.add(...tileRoads(layers[name], f, lonOf, latOf, material, height));
   }
   group.visible = false;
   // Deeper tiles draw after shallower ones, so a parent fading out lies over its children
@@ -1632,6 +1674,23 @@ const TILE_ROAD = new THREE.Color(0x4a4f55);
 const TILE_MASSING_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_WALL, roughness: 0.92, metalness: 0.0, transparent: true });
 const TILE_BUILDING_MATERIAL = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.0, transparent: true });
 const TILE_ROAD_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_ROAD, roughness: 0.96, metalness: 0.0, transparent: true, side: THREE.DoubleSide });
+//: The footway and the paint on the road. The page's own concrete and its own white are what
+//: the street renderer uses a few metres away, so the seam at the region's edge is a seam in
+//: detail and not in colour.
+const TILE_WALK = new THREE.Color(0x8e918a);
+const TILE_PAINT_COLOUR = new THREE.Color(0xe8e8e4);
+const TILE_WALK_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_WALK, roughness: 0.96, metalness: 0.0, transparent: true, side: THREE.DoubleSide });
+const TILE_PAINT_MATERIAL = new THREE.MeshStandardMaterial({ color: TILE_PAINT_COLOUR, roughness: 0.9, metalness: 0.0, transparent: true, side: THREE.DoubleSide });
+//: The tile street's own stack, over the atlas's ground: tarmac, the paint on it, the kerb's
+//: height to the footway. Millimetres apart would fight; these are the real steps.
+const TILE_ROAD_Y = 0.15;
+const TILE_PAINT_Y = 0.22;
+const TILE_WALK_Y = 0.30;
+//: The ground the tile city stands on: the atlas's own surface, which is drawn
+//: PERIMETER_UNDER_M under the region grid's apron so the two do not fight for the pixels
+//: where they meet. Built on PENINSULA_Y instead, every street outside a region stood on a
+//: two-metre plinth with a drop to the grass either side.
+const TILE_GROUND_Y = PENINSULA_Y - PERIMETER_UNDER_M;
 const TILE_BOX = new THREE.BoxGeometry(1, 1, 1);
 
 function tileMassing(rows, f, lonOf, latOf, material) {
@@ -1645,7 +1704,7 @@ function tileMassing(rows, f, lonOf, latOf, material) {
   const dummy = new THREE.Object3D();
   kept.forEach(([cx, cy, halfA, halfB, bearing, height], i) => {
     const h = height / 100.0;
-    dummy.position.set(f.x0 + cx * f.sx, PENINSULA_Y + h / 2, -(f.y0 + cy * f.sy));
+    dummy.position.set(f.x0 + cx * f.sx, TILE_GROUND_Y + h / 2, -(f.y0 + cy * f.sy));
     dummy.rotation.set(0, -bearing / 100.0 * Math.PI / 180, 0);
     dummy.scale.set(Math.max(2.0, halfA * f.sx * 2), h, Math.max(2.0, halfB * f.sy * 2));
     dummy.updateMatrix();
@@ -1668,7 +1727,7 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
     if (ring.length >= 3 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
     if (ring.length < 3) continue;
     const wall = packed >= 0 ? roof.setHex(packed) : TILE_WALL;
-    const top = PENINSULA_Y + height;
+    const top = TILE_GROUND_Y + height;
     // The walls: a quad an edge, wound outward whichever way the ring runs.
     let area = 0;
     for (let i = 0; i < ring.length; i += 1) {
@@ -1680,7 +1739,7 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
       const base = position.length / 3;
       const p = flip ? [b, a] : [a, b];
-      position.push(p[0][0], PENINSULA_Y, p[0][1], p[1][0], PENINSULA_Y, p[1][1],
+      position.push(p[0][0], TILE_GROUND_Y, p[0][1], p[1][0], TILE_GROUND_Y, p[1][1],
                     p[1][0], top, p[1][1], p[0][0], top, p[0][1]);
       for (let k = 0; k < 4; k += 1) colour.push(wall.r, wall.g, wall.b);
       index.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -1707,24 +1766,28 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
   return [new THREE.Mesh(geometry, material)];
 }
 
-function tileRoads(rows, f, lonOf, latOf, material) {
+function tileRoads(rows, f, lonOf, latOf, material, height = TILE_ROAD_Y) {
   const position = [], index = [];
   for (const row of rows) {
-    const width = Math.max(4.0, row[0] / 100.0);
+    const width = Math.max(1.2, row[0] / 100.0);
     const pts = [];
     for (let i = 1; i + 1 < row.length; i += 2) {
       if (i === 1 && tileOwnGround(lonOf(row[i]), latOf(row[i + 1]))) { pts.length = 0; break; }
       pts.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
     }
     if (pts.length < 2) continue;
+    // Every road in the tile goes into one buffer, so a road's triangles are indexed from
+    // where its own vertices start. Indexed from zero -- which is what this did -- the first
+    // road was a road and all the rest were slivers stitched back to its first two vertices.
+    const base = position.length / 3;
     for (let i = 0; i < pts.length; i += 1) {
       const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
       const dx = b[0] - a[0], dz = b[1] - a[1];
       const len = Math.hypot(dx, dz) || 1;
       const nx = -dz / len * width / 2, nz = dx / len * width / 2;
-      position.push(pts[i][0] + nx, PENINSULA_Y + 0.15, pts[i][1] + nz,
-                    pts[i][0] - nx, PENINSULA_Y + 0.15, pts[i][1] - nz);
-      if (i) { const k = i * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
+      position.push(pts[i][0] + nx, TILE_GROUND_Y + height, pts[i][1] + nz,
+                    pts[i][0] - nx, TILE_GROUND_Y + height, pts[i][1] - nz);
+      if (i) { const k = base + i * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
     }
   }
   if (!index.length) return [];
@@ -15311,8 +15374,15 @@ canvas.addEventListener("pointerup", async (e) => {
   // A region marker first: it opens that region's page.
   pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(pointer, camera);
+  // A marker is a place across the bay, not a link to another page: clicking one flies you
+  // to it in the world you are already in.
   const marker = ray.intersectObjects(regionMarkers.children, false).find((h) => h.object.userData.href);
-  if (marker) { location.href = marker.object.userData.href; return; }
+  if (marker) {
+    const region = marker.object.userData.region;
+    if (region && window.kerbsideFlyToRegion) window.kerbsideFlyToRegion(region);
+    else location.href = marker.object.userData.href;
+    return;
+  }
   const feature = pickedFeature(e.clientX, e.clientY);
   const summary = await featureSummary(feature);
   if (summary && tip) {
