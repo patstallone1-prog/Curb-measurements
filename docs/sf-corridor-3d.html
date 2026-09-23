@@ -1773,8 +1773,8 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
     // city of different houses rather than a field of identical pale blocks.
     const wall = packed >= 0 ? roof.setHex(packed) : tileInventedColour(archetype, ring[0], height);
     const drop = earthDrop(ring[0][0], ring[0][1]);
-    const base = TILE_GROUND_Y - drop;
-    const top = base + height;
+    const groundY = TILE_GROUND_Y - drop;
+    const top = groundY + height;
     // The walls: a quad an edge, wound outward whichever way the ring runs.
     let area = 0;
     for (let i = 0; i < ring.length; i += 1) {
@@ -1784,12 +1784,13 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
     const flip = area > 0;
     for (let i = 0; i < ring.length; i += 1) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
-      const base = position.length / 3;
+      const vertexBase = position.length / 3;
       const p = flip ? [b, a] : [a, b];
-      position.push(p[0][0], base, p[0][1], p[1][0], base, p[1][1],
+      position.push(p[0][0], groundY, p[0][1], p[1][0], groundY, p[1][1],
                     p[1][0], top, p[1][1], p[0][0], top, p[0][1]);
       for (let k = 0; k < 4; k += 1) colour.push(wall.r, wall.g, wall.b);
-      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      index.push(vertexBase, vertexBase + 1, vertexBase + 2,
+                 vertexBase, vertexBase + 2, vertexBase + 3);
     }
     // The roof: the ring triangulated flat, a shade darker than the walls.
     const contour = ring.map(([x, z]) => new THREE.Vector2(x, z));
