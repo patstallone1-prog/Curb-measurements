@@ -429,6 +429,25 @@ function xy(lon, lat) { return [(lon - midLon) * metersPerLon, (lat - midLat) * 
 // there: the merged street surfaces vertex by vertex, a building at the lowest corner of its
 // footprint, a tree or a post at its foot, the walker at each step, the camera where it lands.
 const TERRAIN_FRAME = TERRAIN ? TERRAIN.meta.frame : null;
+//: The earth is round, and over a Bay Area it shows. Eight kilometres out the ground is five
+//: metres below the plane you are standing on; at forty it is a hundred and twenty-five. Drawn
+//: flat, the far shore sat too high, the horizon was a hard line across the sky, and the whole
+//: model read as a tabletop -- which is what "the earth seems flat" is.
+//:
+//: The drop is the sagitta of the earth's own curve, d squared over twice the radius, and it
+//: starts at the edge of the region's own grid rather than at the camera: inside the grid it
+//: would be a few centimetres of nothing, and a step at the boundary is worse than no curve at
+//: all. Written this way it is zero at the edge and matches the real curve well past it.
+const EARTH_RADIUS_M = 6371000.0;
+const EARTH_FLAT_M = TERRAIN_FRAME
+  ? Math.hypot(TERRAIN_FRAME.cols * TERRAIN_FRAME.step_m, TERRAIN_FRAME.rows * TERRAIN_FRAME.step_m) / 2
+  : 3000.0;
+function earthDrop(x, z) {
+  const d2 = x * x + z * z;
+  const flat2 = EARTH_FLAT_M * EARTH_FLAT_M;
+  return d2 <= flat2 ? 0 : (d2 - flat2) / (2 * EARTH_RADIUS_M);
+}
+
 // ---- the sea ------------------------------------------------------------------------------
 //
 //: The height of the water's surface, measured: the median of the grid's returns off the water
@@ -887,7 +906,7 @@ function backdropAt(x, z, apron = 0) {
   // perimeter, which has the map's coastline, says otherwise.
   const edge = cutLiftAt(x, z);
   const wet = apron > 0 ? perimeterWaterAt(x, z) : null;
-  if (wet === true || (wet === null && edge < WATERLINE_M)) return { y: SEA_Y - 0.02, colour: TERRAIN_SEA };
+  if (wet === true || (wet === null && edge < WATERLINE_M)) return { y: SEA_Y - 0.02 - earthDrop(x, z), colour: TERRAIN_SEA };
   let h = edge;
   // Sand: the atlas's beaches, and the low ground beside a mapped beach.
   const cls = apron > 0 ? perimeterClassAt(x, z) : null;
@@ -899,9 +918,9 @@ function backdropAt(x, z, apron = 0) {
     h = PENINSULA_Y + (h - PENINSULA_Y) * s;
     const ground = cls === 3 ? TERRAIN_BUILT : TERRAIN_PLATE;
     const colour = sandy ? TERRAIN_SAND : ground.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M));
-    return { y: h - TERRAIN_MESH_UNDER_M, colour };
+    return { y: h - TERRAIN_MESH_UNDER_M - earthDrop(x, z), colour };
   }
-  return { y: h - TERRAIN_MESH_UNDER_M, colour: sandy ? TERRAIN_SAND : TERRAIN_LAND };
+  return { y: h - TERRAIN_MESH_UNDER_M - earthDrop(x, z), colour: sandy ? TERRAIN_SAND : TERRAIN_LAND };
 }
 function addBackdropTile(xs, zs, apronOf) {
   const w = xs.length, h = zs.length;
@@ -1395,7 +1414,7 @@ if (PERIMETER) {
             const col = wet === 1 ? sea : wet === 2 ? sand : wet === 3 ? town : grass;
             const base = position.length / 3;
             for (const [x, y] of [[xa, ya], [xb, ya], [xb, yb], [xa, yb]]) {
-              position.push(x, h, -y);
+              position.push(x, h - earthDrop(x, -y), -y);
               colour.push(col.r, col.g, col.b);
             }
             // Wound to face up (+y): z runs to -north.
@@ -1691,6 +1710,7 @@ const TILE_WALK_Y = 0.30;
 //: where they meet. Built on PENINSULA_Y instead, every street outside a region stood on a
 //: two-metre plinth with a drop to the grass either side.
 const TILE_GROUND_Y = PENINSULA_Y - PERIMETER_UNDER_M;
+
 const TILE_BOX = new THREE.BoxGeometry(1, 1, 1);
 
 function tileMassing(rows, f, lonOf, latOf, material) {
@@ -1704,7 +1724,8 @@ function tileMassing(rows, f, lonOf, latOf, material) {
   const dummy = new THREE.Object3D();
   kept.forEach(([cx, cy, halfA, halfB, bearing, height], i) => {
     const h = height / 100.0;
-    dummy.position.set(f.x0 + cx * f.sx, TILE_GROUND_Y + h / 2, -(f.y0 + cy * f.sy));
+    const mx = f.x0 + cx * f.sx, mz = -(f.y0 + cy * f.sy);
+    dummy.position.set(mx, TILE_GROUND_Y + h / 2 - earthDrop(mx, mz), mz);
     dummy.rotation.set(0, -bearing / 100.0 * Math.PI / 180, 0);
     dummy.scale.set(Math.max(2.0, halfA * f.sx * 2), h, Math.max(2.0, halfB * f.sy * 2));
     dummy.updateMatrix();
@@ -1715,19 +1736,45 @@ function tileMassing(rows, f, lonOf, latOf, material) {
   return [mesh];
 }
 
+//: The archetypes the tile tree names, in the order smc.tiles.compile writes them.
+const TILE_ARCHETYPES = ["residential", "office", "hotel", "retail", "restaurant", "civic",
+                         "school", "industrial", "parking", "park", "generic"];
+const TILE_COLOUR = new THREE.Color();
+function tileInventedColour(archetype, at, height) {
+  // A seed from where the building stands: the same building is the same colour every visit,
+  // and two buildings side by side are not.
+  const seed = ((Math.round(at[0] * 4) * 73856093) ^ (Math.round(at[1] * 4) * 19349663)) >>> 0;
+  // Exactly what the street renderer does for a building no photograph reached: the
+  // archetype's own palette where the archetype has one, and otherwise the palette of the
+  // material its height and the city's building stock suggest. Four in five buildings outside
+  // San Francisco are "generic", which has no archetype palette at all -- given one colour
+  // for want of that fallback, every one of them came out the same pale block.
+  const style = ARCHETYPE_STYLE[archetype];
+  const palette = style && style.colours ? style.colours
+                                         : pickMaterial(seed, height, archetype, null).colours;
+  return TILE_COLOUR.setHex(palette[Math.floor(random(seed + 11) * palette.length)]);
+}
+
 function tileBuildings(rows, f, lonOf, latOf, material) {
   const position = [], colour = [], index = [];
   const roof = new THREE.Color();
   for (const row of rows) {
     const height = row[0] / 100.0;
     const packed = row[1];
-    if (tileOwnGround(lonOf(row[2]), latOf(row[3]))) continue;
+    const archetype = TILE_ARCHETYPES[row[2]] || "generic";
+    if (tileOwnGround(lonOf(row[3]), latOf(row[4]))) continue;
     const ring = [];
-    for (let i = 2; i + 1 < row.length; i += 2) ring.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
+    for (let i = 3; i + 1 < row.length; i += 2) ring.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
     if (ring.length >= 3 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
     if (ring.length < 3) continue;
-    const wall = packed >= 0 ? roof.setHex(packed) : TILE_WALL;
-    const top = TILE_GROUND_Y + height;
+    // The colour off a photograph of this building where there is one; otherwise the same
+    // invented colour the street renderer gives an unsampled building -- its archetype's own
+    // palette, picked by a seed from where it stands, so a city nobody has photographed is a
+    // city of different houses rather than a field of identical pale blocks.
+    const wall = packed >= 0 ? roof.setHex(packed) : tileInventedColour(archetype, ring[0], height);
+    const drop = earthDrop(ring[0][0], ring[0][1]);
+    const base = TILE_GROUND_Y - drop;
+    const top = base + height;
     // The walls: a quad an edge, wound outward whichever way the ring runs.
     let area = 0;
     for (let i = 0; i < ring.length; i += 1) {
@@ -1739,7 +1786,7 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
       const base = position.length / 3;
       const p = flip ? [b, a] : [a, b];
-      position.push(p[0][0], TILE_GROUND_Y, p[0][1], p[1][0], TILE_GROUND_Y, p[1][1],
+      position.push(p[0][0], base, p[0][1], p[1][0], base, p[1][1],
                     p[1][0], top, p[1][1], p[0][0], top, p[0][1]);
       for (let k = 0; k < 4; k += 1) colour.push(wall.r, wall.g, wall.b);
       index.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -1769,6 +1816,21 @@ function tileBuildings(rows, f, lonOf, latOf, material) {
 function tileRoads(rows, f, lonOf, latOf, material, height = TILE_ROAD_Y) {
   const position = [], index = [];
   for (const row of rows) {
+    // A leading zero means the kerbs were measured: the row is the two kerb lines themselves,
+    // left and right in turn, and the carriageway is the strip between them. Everything else
+    // is a centreline with a width, which is what a way with no cross-sections has.
+    if (row[0] === 0) {
+      const base = position.length / 3;
+      let n = 0;
+      for (let i = 1; i + 3 < row.length; i += 4, n += 1) {
+        const lx = f.x0 + row[i] * f.sx, lz = -(f.y0 + row[i + 1] * f.sy);
+        const rx = f.x0 + row[i + 2] * f.sx, rz = -(f.y0 + row[i + 3] * f.sy);
+        position.push(lx, TILE_GROUND_Y + height - earthDrop(lx, lz), lz,
+                      rx, TILE_GROUND_Y + height - earthDrop(rx, rz), rz);
+        if (n) { const k = base + n * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
+      }
+      continue;
+    }
     const width = Math.max(1.2, row[0] / 100.0);
     const pts = [];
     for (let i = 1; i + 1 < row.length; i += 2) {
@@ -1780,13 +1842,16 @@ function tileRoads(rows, f, lonOf, latOf, material, height = TILE_ROAD_Y) {
     // where its own vertices start. Indexed from zero -- which is what this did -- the first
     // road was a road and all the rest were slivers stitched back to its first two vertices.
     const base = position.length / 3;
+    // eslint-disable-next-line no-unused-vars
     for (let i = 0; i < pts.length; i += 1) {
       const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
       const dx = b[0] - a[0], dz = b[1] - a[1];
       const len = Math.hypot(dx, dz) || 1;
       const nx = -dz / len * width / 2, nz = dx / len * width / 2;
-      position.push(pts[i][0] + nx, TILE_GROUND_Y + height, pts[i][1] + nz,
-                    pts[i][0] - nx, TILE_GROUND_Y + height, pts[i][1] - nz);
+      const lx = pts[i][0] + nx, lz = pts[i][1] + nz;
+      const rx = pts[i][0] - nx, rz = pts[i][1] - nz;
+      position.push(lx, TILE_GROUND_Y + height - earthDrop(lx, lz), lz,
+                    rx, TILE_GROUND_Y + height - earthDrop(rx, rz), rz);
       if (i) { const k = base + i * 2; index.push(k - 2, k, k - 1, k - 1, k, k + 1); }
     }
   }
