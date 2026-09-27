@@ -955,6 +955,8 @@ function addBackdropTile(xs, zs, apronOf) {
   geometry.computeBoundingSphere();
   const tile = new THREE.Mesh(geometry, TERRAIN_MATERIAL);
   tile.userData.surface = "terrain";
+  // Backdrop first; inferred ground-cover polygons mask it before streets/buildings draw.
+  tile.renderOrder = -2;
   terrainTiles.push(tile);
   root.add(tile);
 }
@@ -1028,13 +1030,17 @@ const TERRAIN_REFINE_MIN_M = 4.0;
 const TERRAIN_UNDER_CHORD_M = 0.2;
 const TERRAIN_REFINE_BY_SURFACE = {
   walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
-  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0], plaza: [12.0, 0],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0],
+  // Visible plaza paving must follow the 2 m terrain grid. A 12 m chord fell 40 cm below
+  // that grid around 600 Montgomery, exposing dark terrain as angular holes in the paving.
+  plaza: [2.0, 0, 2.0, true],
   yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
 };
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
 //: stair stands, and chasing every step to the grid's own cell size ran a yard to millions.
 const TERRAIN_REFINE_GROWTH = 4;
-function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_CHORD_M) {
+function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_CHORD_M,
+                          minEdge = TERRAIN_REFINE_MIN_M, snapToTerrain = false) {
   const position = geometry.getAttribute("position");
   // A multi-material geometry's index ranges are its material groups; splitting would move them.
   if (!position || (geometry.groups && geometry.groups.length)) return geometry;
@@ -1057,7 +1063,7 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
     const a = index[t], b = index[t + 1], c = index[t + 2];
     area += Math.abs((px(b) - px(a)) * (pz(c) - pz(a)) - (px(c) - px(a)) * (pz(b) - pz(a))) / 2;
   }
-  const areaBudget = area / (TERRAIN_REFINE_MIN_M * TERRAIN_REFINE_MIN_M) * 2;
+  const areaBudget = area / (minEdge * minEdge) * 2;
   const budget = Math.max(position.count * TERRAIN_REFINE_GROWTH + 50000, areaBudget);
   // Where an edge is cut, and whether. Every part is refined on its own -- a pavement ribbon, the
   // corner piece beside it, the kerb tile in front -- and two parts that meet along a line used
@@ -1068,26 +1074,28 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   // and a short one whose midpoint the ground leaves by more than the tolerance is cut in the
   // middle. Two parts sharing an edge make the same cuts, so the seam stays closed.
   const lattice = maxEdge;
+  const gridX = snapToTerrain && TERRAIN_FRAME ? TERRAIN_FRAME.x0 + TERRAIN_FRAME.step_m / 2 : 0;
+  const gridZ = snapToTerrain && TERRAIN_FRAME ? -(TERRAIN_FRAME.y0 + TERRAIN_FRAME.step_m / 2) : 0;
   const cutAt = (a, b, len) => {
-    if (len >= TERRAIN_REFINE_MIN_M) {
+    if (len >= minEdge) {
       let best = -1, bestOff = Infinity;
-      for (const [pa, pb] of [[px(a), px(b)], [pz(a), pz(b)]]) {
+      for (const [pa, pb, origin] of [[px(a), px(b), gridX], [pz(a), pz(b), gridZ]]) {
         const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
-        for (let k = Math.floor(lo / lattice) + 1; k * lattice < hi; k += 1) {
-          const t0 = (k * lattice - pa) / (pb - pa);
+        for (let k = Math.floor((lo - origin) / lattice) + 1; origin + k * lattice < hi; k += 1) {
+          const t0 = (origin + k * lattice - pa) / (pb - pa);
           if (t0 > 1e-4 && t0 < 1 - 1e-4 && Math.abs(t0 - 0.5) < bestOff) { best = t0; bestOff = Math.abs(t0 - 0.5); }
         }
       }
       if (best >= 0) return best;
     }
-    if (!TERRAIN_FRAME || !(chord > 0) || len <= TERRAIN_REFINE_MIN_M / 4 || count > budget) return -1;
+    if (!TERRAIN_FRAME || !(chord > 0) || len <= minEdge / 4 || count > budget) return -1;
     const mid = terrainHeightAt((px(a) + px(b)) / 2, (pz(a) + pz(b)) / 2);
     const bend = Math.abs(mid - (terrainHeightAt(px(a), pz(a)) + terrainHeightAt(px(b), pz(b))) / 2);
     // Down to the minimum edge for a bend over the tolerance; to half that for a bend over twice
     // it and a quarter for four times -- a retaining wall or a flight of steps in the grid, which
     // a four-metre edge can only drape over, and which the grid's own decimetre of noise never
     // reaches.
-    if (bend > chord * 4 || (bend > chord * 2 && len > TERRAIN_REFINE_MIN_M / 2) || (bend > chord && len > TERRAIN_REFINE_MIN_M)) return 0.5;
+    if (bend > chord * 4 || (bend > chord * 2 && len > minEdge / 2) || (bend > chord && len > minEdge)) return 0.5;
     return -1;
   };
   // Keyed by the pair as one number: a string key here was a third of the lift's time. The same
@@ -1157,10 +1165,10 @@ const SETTLE_CELL_M = 2.0;
 //: What settles onto what: the surfaces stood on, and each standing surface's height above them.
 const SETTLE_RULES = [
   { onto: new Set(["walk", "walk_narrow"]), above: { tactile_warning: 0.018, curb_ramp: 0.016 }, label: "Setting the pads on the pavement" },
-  // 3.5 cm, not 2: at a junction the carriageway is several ribbons -- two streets' and the
-  // box -- a centimetre or two apart in height, and paint two centimetres over the highest one
-  // under its vertices still had the next ribbon's step come up through it between them.
-  { onto: new Set(["road"]), above: { crossing: 0.035, crossing_edges: 0.035 }, grid: 1.0, label: "Painting the crossings on the road" },
+  // Junction asphalt comes from several overlapping ribbons. Sample the paint at half-metre
+  // spacing so the road cannot rise through the interior of a long triangle; a small lift
+  // also absorbs the few-centimetre mismatch between independently triangulated ribbons.
+  { onto: new Set(["road"]), above: { crossing: 0.06, crossing_edges: 0.06 }, grid: 0.5, label: "Painting the crossings on the road" },
 ];
 const settleKey = (x, z) => Math.floor(x / SETTLE_CELL_M) * 1048576 + Math.floor(z / SETTLE_CELL_M);
 async function settleOnto(rule) {
@@ -1286,8 +1294,8 @@ function liftOneMesh(o) {
       return 1;
     }
     if (!o.geometry || !o.geometry.getAttribute("position")) return 0;
-    const [limit, chord] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
-    o.geometry = refineForTerrain(o.geometry, limit, chord);
+    const [limit, chord, minEdge, snapToTerrain] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
+    o.geometry = refineForTerrain(o.geometry, limit, chord, minEdge, snapToTerrain);
     const attribute = o.geometry.getAttribute("position");
     // Vertices are lifted in the world frame; a mesh that is placed rather than built where
     // it stands gets the lift on its own local axes.
@@ -1648,6 +1656,12 @@ function tileFrame(tile) {
   return { x0, y0, sx: metersPerLon / kx / 100.0, sy: metersPerLat / ky / 100.0, kx, ky, west, south };
 }
 
+function addTileMeshes(group, meshes) {
+  // Three.js treats add() with zero arguments as add(undefined), and logs an error. A tile
+  // layer can legitimately be empty after local-ground ownership removes its features.
+  if (meshes.length) group.add(...meshes);
+}
+
 function buildTile(tile, layers) {
   const group = new THREE.Group();
   group.name = `tile:${tile.id}`;
@@ -1663,17 +1677,30 @@ function buildTile(tile, layers) {
     roads: TILE_ROAD_MATERIAL.clone(),
     pavement: TILE_WALK_MATERIAL.clone(),
     paint: TILE_PAINT_MATERIAL.clone(),
+    tactile: new THREE.MeshStandardMaterial({
+      map: TACTILE_WARNING, color: 0xffffff, roughness: 0.86, metalness: 0.0,
+      transparent: true, side: THREE.DoubleSide,
+    }),
   };
   tile.materials = Object.values(materials);
-  if (layers.massing) group.add(...tileMassing(layers.massing, f, lonOf, latOf, materials.massing));
-  if (layers.buildings) group.add(...tileBuildings(layers.buildings, f, lonOf, latOf, materials.buildings));
-  // The street, from the outside in: the carriageway, the paint on it, the footways beside it.
+  if (layers.massing) addTileMeshes(group, tileMassing(layers.massing, f, lonOf, latOf, materials.massing));
+  if (layers.buildings) addTileMeshes(group, tileBuildings(layers.buildings, f, lonOf, latOf, materials.buildings));
+  // The street, from the outside in: carriageway and footways.  Crossings are not a wide road
+  // ribbon: their resolved style becomes either repeated continental bars or two parallel lines,
+  // plus the same full rectangular yellow warning fields used by the near-region renderer.
   for (const [name, material, height] of [["roads", materials.roads, TILE_ROAD_Y],
                                           ["roads_major", materials.roads, TILE_ROAD_Y],
                                           ["carriageway", materials.roads, TILE_ROAD_Y],
-                                          ["crossings", materials.paint, TILE_PAINT_Y],
                                           ["pavement", materials.pavement, TILE_WALK_Y]]) {
-    if (layers[name]) group.add(...tileRoads(layers[name], f, lonOf, latOf, material, height));
+    if (layers[name]) addTileMeshes(group, tileRoads(layers[name], f, lonOf, latOf, material, height));
+  }
+  if (layers.crossings_continental) {
+    addTileMeshes(group, tileCrossings(layers.crossings_continental, "continental", f, lonOf, latOf,
+                                       materials.paint, materials.tactile));
+  }
+  if (layers.crossings_parallel) {
+    addTileMeshes(group, tileCrossings(layers.crossings_parallel, "parallel", f, lonOf, latOf,
+                                       materials.paint, materials.tactile));
   }
   group.visible = false;
   // Deeper tiles draw after shallower ones, so a parent fading out lies over its children
@@ -1863,6 +1890,107 @@ function tileRoads(rows, f, lonOf, latOf, material, height = TILE_ROAD_Y) {
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
   return [new THREE.Mesh(geometry, material)];
+}
+
+function tileCrossings(rows, style, f, lonOf, latOf, paintMaterial, tactileMaterial) {
+  const paintPosition = [], paintIndex = [];
+  const tactilePosition = [], tactileUv = [], tactileIndex = [];
+  const BAR_M = 0.43;
+  const PERIOD_M = 0.86;
+  const EDGE_M = 0.12;
+  const PAD_DEPTH_M = 0.91;
+  const PAD_SETBACK_M = 0.18;
+
+  const addQuad = (position, index, cx, cz, ux, uz, halfAlong, halfAcross, y) => {
+    const nx = -uz, nz = ux;
+    const base = position.length / 3;
+    for (const [along, across] of [[-halfAlong, -halfAcross], [halfAlong, -halfAcross],
+                                   [halfAlong, halfAcross], [-halfAlong, halfAcross]]) {
+      const x = cx + ux * along + nx * across;
+      const z = cz + uz * along + nz * across;
+      position.push(x, TILE_GROUND_Y + y - earthDrop(x, z), z);
+    }
+    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    return base;
+  };
+
+  const addPad = (at, into, crossingWidth) => {
+    const dx = at[0] - into[0], dz = at[1] - into[1];
+    const length = Math.hypot(dx, dz);
+    if (!(length > 0.5)) return;
+    const ux = dx / length, uz = dz / length;
+    const width = Math.max(1.22, Math.min(1.52, crossingWidth));
+    const cx = at[0] + ux * (PAD_DEPTH_M / 2 + PAD_SETBACK_M);
+    const cz = at[1] + uz * (PAD_DEPTH_M / 2 + PAD_SETBACK_M);
+    const base = addQuad(tactilePosition, tactileIndex, cx, cz, ux, uz,
+                         PAD_DEPTH_M / 2, width / 2, TILE_WALK_Y + 0.018);
+    tactileUv.push(0, 0, PAD_DEPTH_M / 0.48, 0,
+                   PAD_DEPTH_M / 0.48, width / 0.48, 0, width / 0.48);
+    // addQuad appends exactly four vertices; keep this assertion visible to future format edits.
+    if (base * 2 + 8 !== tactileUv.length) throw new Error("tile tactile UV mismatch");
+  };
+
+  for (const row of rows) {
+    const width = Math.max(1.2, row[0] / 100.0);
+    const points = [];
+    for (let i = 1; i + 1 < row.length; i += 2) {
+      if (i === 1 && tileOwnGround(lonOf(row[i]), latOf(row[i + 1]))) {
+        points.length = 0;
+        break;
+      }
+      points.push([f.x0 + row[i] * f.sx, -(f.y0 + row[i + 1] * f.sy)]);
+    }
+    if (points.length < 2) continue;
+    for (let i = 1; i < points.length; i += 1) {
+      const a = points[i - 1], b = points[i];
+      const dx = b[0] - a[0], dz = b[1] - a[1];
+      const length = Math.hypot(dx, dz);
+      if (!(length > 0.5)) continue;
+      const ux = dx / length, uz = dz / length;
+      if (style === "parallel") {
+        const offset = Math.max(0.25, width / 2 - EDGE_M / 2);
+        const nx = -uz, nz = ux;
+        for (const side of [-1, 1]) {
+          addQuad(paintPosition, paintIndex,
+                  (a[0] + b[0]) / 2 + nx * side * offset,
+                  (a[1] + b[1]) / 2 + nz * side * offset,
+                  ux, uz, length / 2, EDGE_M / 2, TILE_PAINT_Y);
+        }
+      } else {
+        // Centre the bar sequence so both ends have equal clear paint margin.
+        const count = Math.max(1, Math.floor((length + (PERIOD_M - BAR_M)) / PERIOD_M));
+        const occupied = (count - 1) * PERIOD_M + BAR_M;
+        const start = (length - occupied) / 2 + BAR_M / 2;
+        for (let bar = 0; bar < count; bar += 1) {
+          const along = start + bar * PERIOD_M;
+          addQuad(paintPosition, paintIndex, a[0] + ux * along, a[1] + uz * along,
+                  ux, uz, BAR_M / 2, width / 2, TILE_PAINT_Y);
+        }
+      }
+    }
+    addPad(points[0], points[1], width);
+    addPad(points[points.length - 1], points[points.length - 2], width);
+  }
+
+  const meshes = [];
+  if (paintIndex.length) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(paintPosition, 3));
+    geometry.setIndex(paintIndex);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    meshes.push(new THREE.Mesh(geometry, paintMaterial));
+  }
+  if (tactileIndex.length) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(tactilePosition, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(tactileUv, 2));
+    geometry.setIndex(tactileIndex);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    meshes.push(new THREE.Mesh(geometry, tactileMaterial));
+  }
+  return meshes;
 }
 
 //: The tiles to draw: from the root down, refining only where the tile being drawn would be
@@ -2720,6 +2848,11 @@ function intersectionWalkwayCutback(width) {
 const OFFICIAL_CURB_CELL_M = 20.0;
 const officialCurbGrid = new Map();
 const officialIslandCurbGrid = new Map();
+// Only a closed surveyed footprint can establish where crossing paint must stop.
+// Open island curb fragments are useful road-envelope evidence, but do not prove
+// that the space between them is concrete rather than asphalt.
+const crossingIslandCurbGrid = new Map();
+const mappedDividerCurbGrid = new Map();
 //: The middle of a divided street where the lidar found no raised median (role "median",
 //: source "lidar"): the inner edge of each half for the kerb envelope, and nothing else --
 //: a painted centre is not a kerb and must not part a crossing or stop a pavement.
@@ -2740,19 +2873,55 @@ function addOfficialCurbGridSegment(grid, ax, az, bx, bz) {
   }
 }
 
+function closedPhysicalRing(points) {
+  if (!points || points.length < 4) return null;
+  const ring = points.map(([lon, lat]) => {
+    const [x, y] = xy(lon, lat);
+    return [x, -y];
+  });
+  const first = ring[0], last = ring[ring.length - 1];
+  if (Math.hypot(last[0] - first[0], last[1] - first[1]) > 0.12) return null;
+  let twiceArea = 0;
+  for (let i = 1; i < ring.length; i += 1) {
+    twiceArea += ring[i - 1][0] * ring[i][1] - ring[i][0] * ring[i - 1][1];
+  }
+  // A folded line can return to its start without enclosing a physical island.
+  return Math.abs(twiceArea) >= 0.8 ? ring : null;
+}
+
+function closedOfficialIslandRing(line) {
+  return line.r === "island" ? closedPhysicalRing(line.p) : null;
+}
+
+function indexMappedDividerGeometry(ways) {
+  mappedDividerCurbGrid.clear();
+  for (const way of ways || []) {
+    if (way.kind !== "divider") continue;
+    const ring = closedPhysicalRing(way.points);
+    if (!ring) continue;
+    for (let i = 1; i < ring.length; i += 1) {
+      addOfficialCurbGridSegment(mappedDividerCurbGrid,
+        ring[i - 1][0], ring[i - 1][1], ring[i][0], ring[i][1]);
+    }
+  }
+}
+
 function indexOfficialCurbGeometry(lines) {
   officialCurbGrid.clear();
   officialIslandCurbGrid.clear();
+  crossingIslandCurbGrid.clear();
   officialMedianGrid.clear();
   for (const line of lines || []) {
     if (!line.p || line.p.length < 2) continue;
     const grid = line.r === "island" ? officialIslandCurbGrid
       : line.r === "median" ? officialMedianGrid : officialCurbGrid;
+    const closedIsland = closedOfficialIslandRing(line) !== null;
     for (let i = 1; i < line.p.length; i += 1) {
       const [ax, ay] = xy(line.p[i - 1][0], line.p[i - 1][1]);
       const [bx, by] = xy(line.p[i][0], line.p[i][1]);
       if (Math.hypot(bx - ax, by - ay) < 0.04) continue;
       addOfficialCurbGridSegment(grid, ax, -ay, bx, -by);
+      if (closedIsland) addOfficialCurbGridSegment(crossingIslandCurbGrid, ax, -ay, bx, -by);
     }
   }
 }
@@ -2834,14 +3003,17 @@ function crossingPaintLegs(points) {
   if (!(length > 1.0)) return [points];
   const dx = (bx - ax) / length;
   const dz = (bz - az) / length;
-  const islands = officialIslandCurbGrid.size
-    ? rayCurbIntersections(ax, az, dx, dz, length + 0.5, officialIslandCurbGrid)
+  const islandHits = (grid) => grid.size
+    ? rayCurbIntersections(ax, az, dx, dz, length + 0.5, grid)
         .filter((value) => value > 0.2 && value < length - 0.2)
-        .sort((a, b) => a - b)
     : [];
+  const officialIslands = islandHits(crossingIslandCurbGrid);
+  const mappedIslands = islandHits(mappedDividerCurbGrid);
+  const islands = officialIslands.concat(mappedIslands).sort((a, b) => a - b);
   // Between an odd and an even island kerb the span stands on the island, not the road --
   // whether or not the carriageway grid runs on beneath it.
-  const onIsland = (tt) => islands.filter((v) => v < tt).length % 2 === 1;
+  const onIsland = (tt) => officialIslands.filter((v) => v < tt).length % 2 === 1
+    || mappedIslands.filter((v) => v < tt).length % 2 === 1;
   // A run ends where the island kerb is when one was hit in the last step, and otherwise
   // halfway between the last station on the road and the first off it.
   const edgeBetween = (t0, t1) => islands.find((v) => v >= t0 && v <= t1) ?? (t0 + t1) / 2;
@@ -6302,15 +6474,15 @@ function cornerLegsAt(leg) {
 }
 
 function cornerNeighbour(leg, side) {
-  // The next leg round the junction on this side of this one: anticlockwise for the left.
+  // The immediately adjacent leg round the junction on this side of this one: anticlockwise
+  // for the left.  Do not skip over a same-named fork while searching.  That made A select C
+  // across B while C selected B, leaving two non-reciprocal cuts that could never be filled by
+  // a corner slab.  The angular wedge belongs to adjacent legs; if those two are one street
+  // forking or bending, it simply is not a street corner.
   let best = null;
   let bestTurn = Infinity;
   for (const other of cornerLegsAt(leg)) {
     if (other.way._junctionInternal) continue;
-    // A fork or a slightly bent continuation of this street can be the closest leg in angle.
-    // It is not the pavement around the corner, so discard it while searching rather than
-    // selecting it and returning null below: there may still be a real cross-street next.
-    if (leg.way.name && other.way.name === leg.way.name) continue;
     let turn = other.bearing - leg.bearing;
     turn = ((turn % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
     if (side < 0) turn = (2 * Math.PI - turn) % (2 * Math.PI);
@@ -6320,6 +6492,7 @@ function cornerNeighbour(leg, side) {
   if (!best) return null;
   const degrees = (bestTurn * 180) / Math.PI;
   if (degrees < CORNER_MIN_DEG || degrees > CORNER_MAX_DEG) return null;
+  if (leg.way.name && best.way.name === leg.way.name) return null;
   return best;
 }
 
@@ -10596,7 +10769,10 @@ function buildingMesh(feature) {
   // The building itself is merged, so this group holds only whatever detail stayed separate.
   // Returning an empty one adds fifteen thousand objects to the scene graph that draw nothing
   // and are walked on every frame.
-  return group.children.length ? group : null;
+  // The ordinary roof and walls were queued through addMerged above, so this group is
+  // intentionally empty. Returning null here misreported a successful building as absent
+  // and laid a dark fallback footprint over the plaza/sidewalk beneath every such building.
+  return group.children.length ? group : true;
 }
 
 // ---- photographed facades ----
@@ -11606,6 +11782,7 @@ let streetLabelCount = 0;
 const ROAD_TOP_M = 0.06;
 //: A crossing's paint has a vertex every this far along its legs, for settleOnto.
 const CROSSING_PAINT_STEP_M = 0.5;
+indexMappedDividerGeometry(DATA.ways);
 for (const way of DATA.ways) {
   if (way.kind !== "crossing" || !way.points || way.points.length < 2) continue;
   if (wayLength(way.points) > 40) continue;
@@ -11722,7 +11899,7 @@ for (const way of DRAW_ORDER) {
       if (base) addMerged("footprint", base, "footprint");
     }
     if (way.covered) {
-      if (building) groups.mapped3d.add(building);
+      if (building && building.isObject3D) groups.mapped3d.add(building);
       // A dropped kerb outside means a way in. The city records 14,130 of these against
       // buildings in this corridor, with the width of each.
       for (const opening of way.garages || []) {
@@ -12406,6 +12583,30 @@ function fillRoadwayToKerbs() {
   return counts;
 }
 const roadwayFilled = fillRoadwayToKerbs();
+
+function addClosedOfficialIslandSurfaces() {
+  let laid = 0;
+  for (const line of OFFICIAL_GEOMETRY.curb_lines || []) {
+    const ring = closedOfficialIslandRing(line);
+    if (!ring) continue;
+    // The closed official curb is the physical evidence. Do not reject it using
+    // the approximate OSM carriageway ribbon, which can miss small junction islands.
+    const shape = new THREE.Shape();
+    ring.forEach(([x, z], i) => { if (i) shape.lineTo(x, -z); else shape.moveTo(x, -z); });
+    shape.closePath();
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+      depth: MEDIAN_KERB_M + 0.006, bevelEnabled: false, steps: 1,
+    });
+    geometry.rotateX(-Math.PI / 2);
+    geometry.translate(0, ROAD_TOP_M, 0);
+    const mesh = new THREE.Mesh(geometry, surfaceMaterial("walk", 0xffffff, 1.0));
+    mesh.userData.surface = "median";
+    addMerged("median:official-closed-island", mesh, "median");
+    laid += 1;
+  }
+  return laid;
+}
+const officialIslandsLaid = addClosedOfficialIslandSurfaces();
 
 // Ground. Everything that is not a road, a footway or a building stands on something -- back
 // yards, light wells, car parks, the middle of a block -- and none of it is mapped. Without a
@@ -13580,10 +13781,15 @@ function buildCourts(ground) {
   // meadow between the towers (scripts/build_ground_cover.py decides which lots).
   const plazaGeom = ringGeometry((ground.plazas || []).map((y) => y.p), PLAZA_Y);
   if (plazaGeom) {
-    addGround(new THREE.Mesh(plazaGeom, new THREE.MeshStandardMaterial({
+    const plazaMesh = new THREE.Mesh(plazaGeom, new THREE.MeshStandardMaterial({
       map: SIDEWALK, color: 0xc4c1b8, roughness: 0.96, metalness: 0.0,
-      side: THREE.DoubleSide,
-    })), "plaza");
+      side: THREE.DoubleSide, depthTest: false,
+    }));
+    // The coarse backdrop can bridge above the finer measured ground in steep 4 m cells.
+    // Draw the mapped plaza over that *visual backdrop* without moving its ground geometry;
+    // later roads and buildings still use the normal depth test and stand above the plaza.
+    plazaMesh.renderOrder = -1;
+    addGround(plazaMesh, "plaza");
   }
 
   const serviceGeom = ringGeometry((ground.service_yards || []).map((y) => y.p), SERVICE_YARD_Y);
@@ -14863,7 +15069,14 @@ function setFirstPerson(on) {
 }
 
 let dragging = false, last = [0, 0];
-canvas.addEventListener("pointerdown", (e) => { dragging = true; last = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointerdown", (e) => {
+  // Looking around is never a movement command.  Cancel a held key whose
+  // keyup may have been lost while the canvas or browser regained focus.
+  held.clear();
+  dragging = true;
+  last = [e.clientX, e.clientY];
+  canvas.setPointerCapture(e.pointerId);
+});
 canvas.addEventListener("pointermove", (e) => {
   if (!dragging) return;
   const dx = e.clientX - last[0], dy = e.clientY - last[1];
@@ -15507,9 +15720,9 @@ function animateAvatar(distance, direction, moving) {
     avatar.userData.walkPhase += distance * 4.8;
   }
   const swing = moving ? Math.sin(avatar.userData.walkPhase) : 0;
-  const lift = moving ? Math.abs(Math.sin(avatar.userData.walkPhase * 2)) * 0.045 * AVATAR_SCALE : 0;
-  // The feet follow the ground: down the bore of a tunnel, up onto the hill at its mouth.
-  avatar.position.y = AVATAR_STAND_Y + lift + walkerGroundAt(avatar.position.x, avatar.position.z);
+  // Keep the contact plane on the sampled surface.  Limbs and the imported walk
+  // clip carry the gait; lifting the whole rig made both feet hover each step.
+  avatar.position.y = AVATAR_STAND_Y + walkerGroundAt(avatar.position.x, avatar.position.z);
   avatar.userData.leftLeg.rotation.x = swing * 0.58;
   avatar.userData.rightLeg.rotation.x = -swing * 0.58;
   avatar.userData.leftArm.rotation.x = -swing * 0.48;

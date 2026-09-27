@@ -31,23 +31,23 @@
     "osm": "done",
     "terrain": "done",
     "imagery": "done",
-    "official": "done",
-    "lidar": "running",
+    "official": "stale",
+    "lidar": "done",
     "build": "done",
-    "audit": "done"
+    "audit": "stale"
    },
-   "built_at": "2026-09-22T00:39:05Z",
+   "built_at": "2026-09-27T17:45:09Z",
    "active": {
-    "kerbs": "none",
-    "kerb_height": "none",
-    "building_height": "none",
-    "building_colour": "none",
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
+    "building_height": "lidar",
+    "building_colour": "imagery",
     "terrain": "lidar",
     "parking": "none",
     "curb_ramps": "official",
     "lanes": "osm+priors"
    },
-   "note": "terrain from lidar"
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
   },
   {
    "name": "sf-soma",
@@ -86,20 +86,20 @@
    ],
    "stages": {
     "discover": "done",
-    "osm": "done",
+    "osm": "failed",
     "terrain": "done",
     "imagery": "done",
     "official": "done",
-    "lidar": "done",
-    "build": "done",
-    "audit": "done"
+    "lidar": "running",
+    "build": "stale",
+    "audit": "stale"
    },
-   "built_at": "2026-09-21T19:49:23Z",
+   "built_at": "2026-09-27T05:13:31Z",
    "active": {
     "kerbs": "none",
     "kerb_height": "none",
     "building_height": "none",
-    "building_colour": "none",
+    "building_colour": "imagery",
     "terrain": "lidar",
     "parking": "none",
     "curb_ramps": "official",
@@ -145,22 +145,23 @@
     "osm": "done",
     "terrain": "done",
     "imagery": "done",
-    "official": "done",
+    "official": "stale",
     "build": "done",
-    "audit": "done"
+    "audit": "stale",
+    "lidar": "done"
    },
-   "built_at": "2026-09-22T00:38:14Z",
+   "built_at": "2026-09-27T13:57:55Z",
    "active": {
-    "kerbs": "none",
-    "kerb_height": "none",
-    "building_height": "none",
-    "building_colour": "none",
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
+    "building_height": "lidar",
+    "building_colour": "imagery",
     "terrain": "lidar",
     "parking": "none",
     "curb_ramps": "official",
     "lanes": "osm+priors"
    },
-   "note": "terrain from lidar"
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
   },
   {
    "name": "oakland-downtown",
@@ -183,9 +184,9 @@
     "official": "done",
     "lidar": "done",
     "build": "done",
-    "audit": "done"
+    "audit": "stale"
    },
-   "built_at": "2026-09-22T00:37:32Z",
+   "built_at": "2026-09-27T05:14:34Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
@@ -215,16 +216,16 @@
     "discover": "done",
     "osm": "done",
     "imagery": "done",
-    "official": "done",
+    "official": "stale",
     "terrain": "done",
     "lidar": "done",
     "build": "done",
-    "audit": "done"
+    "audit": "stale"
    },
-   "built_at": "2026-09-22T00:38:32Z",
+   "built_at": "2026-09-27T05:14:54Z",
    "active": {
-    "kerbs": "none",
-    "kerb_height": "none",
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
     "building_height": "lidar",
     "building_colour": "none",
     "terrain": "lidar",
@@ -232,7 +233,7 @@
     "curb_ramps": "none",
     "lanes": "osm+priors"
    },
-   "note": "building_height from lidar; terrain from lidar"
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
   },
   {
    "name": "palo-alto-downtown",
@@ -250,17 +251,17 @@
    "stages": {
     "osm": "done",
     "imagery": "done",
-    "official": "done",
+    "official": "stale",
     "discover": "done",
     "terrain": "done",
     "lidar": "done",
     "build": "done",
-    "audit": "done"
+    "audit": "stale"
    },
-   "built_at": "2026-09-21T19:59:28Z",
+   "built_at": "2026-09-27T14:10:42Z",
    "active": {
-    "kerbs": "none",
-    "kerb_height": "none",
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
     "building_height": "lidar",
     "building_colour": "none",
     "terrain": "lidar",
@@ -268,7 +269,7 @@
     "curb_ramps": "none",
     "lanes": "osm+priors"
    },
-   "note": "building_height from lidar; terrain from lidar"
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
   },
   {
    "name": "san-jose-downtown",
@@ -288,15 +289,15 @@
     "osm": "done",
     "terrain": "done",
     "imagery": "done",
-    "official": "done",
+    "official": "stale",
     "lidar": "done",
     "build": "done",
-    "audit": "done"
+    "audit": "stale"
    },
-   "built_at": "2026-09-21T20:03:46Z",
+   "built_at": "2026-09-27T14:54:08Z",
    "active": {
-    "kerbs": "none",
-    "kerb_height": "none",
+    "kerbs": "lidar",
+    "kerb_height": "lidar",
     "building_height": "lidar",
     "building_colour": "none",
     "terrain": "lidar",
@@ -304,7 +305,7 @@
     "curb_ramps": "none",
     "lanes": "osm+priors"
    },
-   "note": "building_height from lidar; terrain from lidar"
+   "note": "kerbs from lidar; building_height from lidar; terrain from lidar"
   }
  ]
 }
