@@ -14170,6 +14170,19 @@ function dropKerbsAtDriveways(ways) {
 const kerbVerticesDropped = dropKerbsAtDriveways(DATA.ways);
 // Everything at ground level stands on the ground the lidar measured (the tunnels carry their own).
 await liftOntoGroundAsync(groups.streets, "Standing the streets on the ground");
+// The survey layers that were built in the flat model's frame, beside the streets, stand on
+// the same ground. Left out of the lift, the measured-kerb bands lay at the flat model's
+// height while the city around them had been raised onto the hill: 2,244 ribbons at y = 0.24
+// under a Sunset that the lidar puts at 79 m, which is 74 m of solid ground between the
+// viewer and the layer. Nobody had seen it because the layer is off until asked for -- which
+// is exactly why it was worth asking.
+for (const [name, label] of [["kerbs", "Standing the measured kerbs on the ground"],
+                             ["official", "Standing the city's records on the ground"],
+                             ["chunks", "Standing the survey chunks on the ground"]]) {
+  if (groups[name] && groups[name].children.length) {
+    await liftOntoGroundAsync(groups[name], label);
+  }
+}
 await settleOntoPavement();
 //: For anything driving the page -- the audit's photographs, a test -- the moment the streets
 //: are finished; the ground cover sets its own flag when it is down (see the ground fetch).
