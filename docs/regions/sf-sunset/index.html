@@ -1028,19 +1028,155 @@ const TERRAIN_REFINE_MIN_M = 4.0;
 //: The underlay's top is 23 cm under the pavement's; its chords may leave the ground by less
 //: than that, or they stand up through it.
 const TERRAIN_UNDER_CHORD_M = 0.2;
+//: A fifth field turns the adaptive lattice on for a surface: the spacing then follows the
+//: ground under it (latticeAt) instead of being one number for the whole city.
+//:
+//: It is on for the wide flat covers laid over the hill -- a yard, a park, a plaza, the
+//: pavement underlay -- because those are what the hill comes up through, and off for the
+//: street ribbons. Streets are already cut every five metres along their length by densifyWay
+//: and are a couple of lanes wide; turning it on for them took the corridor from 15.53 M
+//: triangles to 26.19 M and its build from 56 s to 161 s, and fixed nothing, because the sag
+//: was never there.
 const TERRAIN_REFINE_BY_SURFACE = {
-  walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
-  parking_lot: [12.0, 0], front_walk: [12.0, 0], tree_pit: [12.0, 0], pier: [12.0, 0],
+  // Not the underlay: it is a backstop laid five centimetres under everything else so that
+  // grass and frontages win over it, so its own sag is never what anybody sees -- and it is
+  // the widest surface in the model, 7.35 M triangles of the corridor's 25.5 M when it was
+  // given the adaptive lattice. It keeps one spacing.
+  walk_underlay: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
+  footprint: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M], garage: [TERRAIN_REFINE_M, TERRAIN_UNDER_CHORD_M],
+  parking_lot: [12.0, 0], front_walk: [12.0, 0],
+  tree_pit: [12.0, 0], pier: [12.0, 0],
   // Visible plaza paving must follow the 2 m terrain grid. A 12 m chord fell 40 cm below
   // that grid around 600 Montgomery, exposing dark terrain as angular holes in the paving.
   plaza: [2.0, 0, 2.0, true],
-  yard: [16.0, TERRAIN_CHORD_M], park: [16.0, TERRAIN_CHORD_M], service_yard: [16.0, TERRAIN_CHORD_M], court: [16.0, TERRAIN_CHORD_M],
+  yard: [16.0, TERRAIN_CHORD_M, undefined, false, true],
+  park: [16.0, TERRAIN_CHORD_M, undefined, false, true],
+  service_yard: [16.0, TERRAIN_CHORD_M, undefined, false, true],
+  court: [16.0, TERRAIN_CHORD_M, undefined, false, true],
 };
 //: The bend rule may not multiply a mesh past this: the grid is stepped wherever a wall or a
 //: stair stands, and chasing every step to the grid's own cell size ran a yard to millions.
 const TERRAIN_REFINE_GROWTH = 4;
+//: And a mesh may not pass this many vertices however much area it covers. The cut index is
+//: packed as a * 2^24 + b, so two vertices past 16,777,216 share a key and the refinement
+//: reads back somebody else's cut; V8's Map gives out at about the same place. Four million is
+//: clear of both, and a merged mesh that wants more is one that should have been split.
+const REFINE_VERTEX_CAP = 4_000_000;
+// ---- how fine the ground has to be cut, place by place ----
+//
+// A surface is cut against a world lattice, and the lattice used to be one spacing for the
+// whole city per surface kind: 2 m for plaza, 16 m for yards and parks. A single spacing
+// cannot be right everywhere. On the flat of the Sunset a 16 m triangle lies on the ground;
+// on Nob Hill the same triangle spans six metres of relief and sags metres through it, and the
+// hill comes up through the lawn as the grey angular holes at 625 Pine and around St Mary's
+// Square. Measured over this corridor's 2 m terrain grid, a 16 m span holds a median of 1.02 m
+// of relief and 6.00 m at the 95th percentile.
+//
+// What decides the spacing is two things about a place, not one:
+//
+// *The total incline over the cell*, in degrees, rather than its average slope. A uniform
+// grade and a flight of steps can share an average and need completely different meshes: the
+// grade is a plane a coarse triangle sits on, the steps are a shape it bridges. Summing the
+// angle of every step across the cell separates them -- a cell of dramatic ups and downs
+// accumulates a large total however flat its ends are relative to each other.
+//
+// *How much is drawn on it.* Bare hillside nobody paves can stay coarse however steep it is;
+// a cell carrying yards, paths, parks and plazas is one where the sag shows, and is worth the
+// triangles. The count comes from the ground cover's own rings.
+const LATTICE_CELL_M = 32.0;
+//: Degrees of accumulated incline across one cell, and what each earns. The finest is the
+//: terrain grid's own step, below which there is nothing left to resolve.
+const LATTICE_BY_INCLINE = [
+  [420, 2.0],   // a cliff, a stair, a retaining wall: the grid's own step
+  [220, 3.0],
+  [110, 4.0],
+  [55, 6.0],
+  [25, 9.0],
+  [0, 16.0],    // flat ground: as it was
+];
+//: Cover rings over a cell that count as "much is drawn here", and the step finer it earns.
+const LATTICE_BUSY_RINGS = 6;
+//: Never coarser than this where anything is drawn at all.
+const LATTICE_DRAWN_MAX_M = 12.0;
+
+const latticeField = new Map();
+let latticeCover = null;
+//: The ground cover, once it has been fetched. The lattice reads it to tell a cell that
+//: carries yards and paths from bare hillside nobody paves.
+let GROUND = null;
+
+function latticeCoverCounts() {
+  // How many ground-cover rings touch each cell, by the rings' own vertices. The cover is what
+  // makes a sag visible: it is drawn over the hill, and the hill comes through it.
+  if (latticeCover) return latticeCover;
+  latticeCover = new Map();
+  const ground = (typeof GROUND === "object" && GROUND) || {};
+  for (const key of ["parks", "yards", "lawns", "front_walks", "service_yards", "backyards",
+                     "plazas", "courts", "pitches"]) {
+    for (const ring of ground[key] || []) {
+      const pts = ring.p || ring;
+      if (!Array.isArray(pts)) continue;
+      const seen = new Set();
+      for (const q of pts) {
+        if (!Array.isArray(q) || q.length < 2) continue;
+        const [x, y] = xy(q[0], q[1]);
+        const cell = `${Math.floor(x / LATTICE_CELL_M)}:${Math.floor(-y / LATTICE_CELL_M)}`;
+        if (seen.has(cell)) continue;      // one ring counts once per cell
+        seen.add(cell);
+        latticeCover.set(cell, (latticeCover.get(cell) || 0) + 1);
+      }
+    }
+  }
+  return latticeCover;
+}
+
+function latticeAt(x, z) {
+  // The lattice spacing for the cell this point is in, worked out once per cell.
+  if (!TERRAIN_FRAME) return TERRAIN_REFINE_M;
+  const cx = Math.floor(x / LATTICE_CELL_M);
+  const cz = Math.floor(z / LATTICE_CELL_M);
+  const key = `${cx}:${cz}`;
+  const known = latticeField.get(key);
+  if (known !== undefined) return known;
+  // Total incline: the angle of every step of the terrain grid across the cell, added up.
+  const step = TERRAIN_FRAME.step_m;
+  const x0 = cx * LATTICE_CELL_M;
+  const z0 = cz * LATTICE_CELL_M;
+  let degrees = 0;
+  let previousRow = null;
+  for (let j = 0; j <= LATTICE_CELL_M; j += step) {
+    const row = [];
+    for (let i = 0; i <= LATTICE_CELL_M; i += step) {
+      row.push(terrainHeightAt(x0 + i, z0 + j));
+    }
+    for (let i = 1; i < row.length; i += 1) {
+      degrees += Math.atan2(Math.abs(row[i] - row[i - 1]), step) * 180 / Math.PI;
+    }
+    if (previousRow) {
+      for (let i = 0; i < row.length; i += 1) {
+        degrees += Math.atan2(Math.abs(row[i] - previousRow[i]), step) * 180 / Math.PI;
+      }
+    }
+    previousRow = row;
+  }
+  let spacing = TERRAIN_REFINE_M;
+  for (const [over, metres] of LATTICE_BY_INCLINE) {
+    if (degrees >= over) { spacing = metres; break; }
+  }
+  const rings = latticeCoverCounts().get(key) || 0;
+  if (rings > 0) spacing = Math.min(spacing, LATTICE_DRAWN_MAX_M);
+  // Busy ground earns one step finer than its incline alone would buy.
+  if (rings >= LATTICE_BUSY_RINGS) {
+    const finer = LATTICE_BY_INCLINE.find(([, m]) => m < spacing);
+    if (finer) spacing = finer[1];
+  }
+  latticeField.set(key, spacing);
+  return spacing;
+}
+
 function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_CHORD_M,
-                          minEdge = TERRAIN_REFINE_MIN_M, snapToTerrain = false) {
+                          minEdge = TERRAIN_REFINE_MIN_M, snapToTerrain = false,
+                          adaptive = false) {
   const position = geometry.getAttribute("position");
   // A multi-material geometry's index ranges are its material groups; splitting would move them.
   if (!position || (geometry.groups && geometry.groups.length)) return geometry;
@@ -1063,8 +1199,15 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
     const a = index[t], b = index[t + 1], c = index[t + 2];
     area += Math.abs((px(b) - px(a)) * (pz(c) - pz(a)) - (px(c) - px(a)) * (pz(b) - pz(a))) / 2;
   }
-  const areaBudget = area / (minEdge * minEdge) * 2;
-  const budget = Math.max(position.count * TERRAIN_REFINE_GROWTH + 50000, areaBudget);
+  // The budget is what the area could need at the finest cut it may actually be given. With a
+  // lattice that goes to the terrain grid's own two metres where the ground demands it, a
+  // budget sized for the four-metre minimum would stop the refinement in exactly the places
+  // that asked for it.
+  const finest = adaptive ? Math.min(minEdge, maxEdge, LATTICE_BY_INCLINE[0][1])
+                         : Math.min(minEdge, maxEdge);
+  const areaBudget = area / (finest * finest) * 2;
+  const budget = Math.min(REFINE_VERTEX_CAP,
+                          Math.max(position.count * TERRAIN_REFINE_GROWTH + 50000, areaBudget));
   // Where an edge is cut, and whether. Every part is refined on its own -- a pavement ribbon, the
   // corner piece beside it, the kerb tile in front -- and two parts that meet along a line used
   // to bisect it differently, so that on a hill one side stood on the ground where the other
@@ -1073,11 +1216,25 @@ function refineForTerrain(geometry, maxEdge = TERRAIN_REFINE_M, chord = TERRAIN_
   // it crosses a line of a fixed world lattice maxEdge apart (the crossing nearest its middle),
   // and a short one whose midpoint the ground leaves by more than the tolerance is cut in the
   // middle. Two parts sharing an edge make the same cuts, so the seam stays closed.
-  const lattice = maxEdge;
+  // The surface's own spacing is a ceiling, not the answer: plaza asks for two metres and gets
+  // them everywhere, a yard asks for sixteen and gets as many as the ground under it needs.
+  // Read per edge from its endpoints, so two parts sharing an edge still cut it identically
+  // and the seam stays closed.
+  const latticeFor = adaptive
+    ? (a, b) => Math.min(maxEdge, latticeAt(px(a), pz(a)), latticeAt(px(b), pz(b)))
+    : () => maxEdge;
   const gridX = snapToTerrain && TERRAIN_FRAME ? TERRAIN_FRAME.x0 + TERRAIN_FRAME.step_m / 2 : 0;
   const gridZ = snapToTerrain && TERRAIN_FRAME ? -(TERRAIN_FRAME.y0 + TERRAIN_FRAME.step_m / 2) : 0;
   const cutAt = (a, b, len) => {
-    if (len >= minEdge) {
+    const lattice = latticeFor(a, b);
+    // The budget binds here too. It never used to: the lattice branch cut whatever it liked
+    // and only the chord branch asked whether there was room, which was harmless while the
+    // lattice was one coarse number and fatal as soon as it could ask for two metres over a
+    // merged mesh the size of the corridor. The cut index is keyed as a * 2^24 + b, so a mesh
+    // has nowhere to put its 16.7 millionth vertex: the ground build died there with
+    // "Map maximum size exceeded" and every park, yard and plaza in the city went with it.
+    if (count > budget) return -1;
+    if (len >= Math.min(minEdge, lattice)) {
       let best = -1, bestOff = Infinity;
       for (const [pa, pb, origin] of [[px(a), px(b), gridX], [pz(a), pz(b), gridZ]]) {
         const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
@@ -1294,8 +1451,8 @@ function liftOneMesh(o) {
       return 1;
     }
     if (!o.geometry || !o.geometry.getAttribute("position")) return 0;
-    const [limit, chord, minEdge, snapToTerrain] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
-    o.geometry = refineForTerrain(o.geometry, limit, chord, minEdge, snapToTerrain);
+    const [limit, chord, minEdge, snapToTerrain, adaptive] = TERRAIN_REFINE_BY_SURFACE[o.userData.surface] || [TERRAIN_REFINE_M, TERRAIN_CHORD_M];
+    o.geometry = refineForTerrain(o.geometry, limit, chord, minEdge, snapToTerrain, adaptive);
     const attribute = o.geometry.getAttribute("position");
     // Vertices are lifted in the world frame; a mesh that is placed rather than built where
     // it stands gets the lift on its own local axes.
@@ -13882,6 +14039,10 @@ function buildCourts(ground) {
   let ground;
   try {
     ground = await fetch(asset("sf-corridor-ground.json"), { cache: "no-cache" }).then((r) => r.json());
+    // The lattice asks how much is drawn on a cell before it decides how finely to cut it.
+    GROUND = ground;
+    latticeCover = null;
+    latticeField.clear();
   } catch (err) {
     window.kerbsideReady = Object.assign(window.kerbsideReady || {}, { ground: true });
     return;
