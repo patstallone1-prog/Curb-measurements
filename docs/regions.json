@@ -181,12 +181,12 @@
     "osm": "done",
     "terrain": "done",
     "imagery": "done",
-    "official": "done",
-    "lidar": "done",
+    "official": "stale",
+    "lidar": "stale",
     "build": "done",
     "audit": "stale"
    },
-   "built_at": "2026-09-28T02:04:49Z",
+   "built_at": "2026-09-29T02:49:19Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",

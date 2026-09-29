@@ -2568,9 +2568,13 @@ function tiledMap(base, name, repeatU, repeatV) {
 //: the vertex UVs rather than in a cloned texture, a footway's slabs stay 1.52 m whatever the
 //: shape of the run.
 function surfaceScale(surface, width) {
-  if (surface === "walk") return [SLAB_M, SLAB_M];
-  if (surface === "kerb") return [SLAB_M, SLAB_M];
-  if (surface === "walk_underlay") return [SLAB_M, SLAB_M];
+  // One repeat of the pavement texture is SLAB_BLOCK slabs across, so the ground it covers is
+  // that many slabs. The slab is still 1.52 m; what changed is how far apart two identical
+  // slabs are.
+  const walkRepeat = WALK_UV_M;
+  if (surface === "walk") return [walkRepeat, walkRepeat];
+  if (surface === "kerb") return [walkRepeat, walkRepeat];
+  if (surface === "walk_underlay") return [walkRepeat, walkRepeat];
   if (surface === "walk_narrow") return [NARROW_SLAB_M, width];
   if (surface === "bike") return [5.5, BIKE_LANE_M];
   if (surface === "road") return [8.0, 8.0];
@@ -7611,8 +7615,8 @@ function addPavementCorners() {
       const top = y + thickness / 2;
       // The slab, tiled in the pavement's own frame so its flags continue round the corner:
       // u runs along the leg from the cut, v across from the outer edge, as the ribbon's do.
-      const uOf = (q) => ((q[0] - frame.P[0]) * frame.a[0] + (q[1] - frame.P[1]) * frame.a[1] - cutA) / SLAB_M;
-      const vOf = (q) => (vC - ((q[0] - frame.P[0]) * frame.na[0] + (q[1] - frame.P[1]) * frame.na[1])) / SLAB_M;
+      const uOf = (q) => ((q[0] - frame.P[0]) * frame.a[0] + (q[1] - frame.P[1]) * frame.a[1] - cutA) / WALK_UV_M;
+      const vOf = (q) => (vC - ((q[0] - frame.P[0]) * frame.na[0] + (q[1] - frame.P[1]) * frame.na[1])) / WALK_UV_M;
       const ring = side > 0 ? [K, A1, C, B1] : [K, B1, C, A1];
       const position = [];
       const uv = [];
@@ -8392,7 +8396,7 @@ function apronSlab(opening) {
       // something upstream is wrong about this cut, and none is better than one in the road.
       if (insideCarriageway(x, z, 0.2)) return null;
       positions.push(x, row.y, z);
-      uvs.push(sign > 0 ? width / SLAB_M : 0, row.at / SLAB_M);
+      uvs.push(sign > 0 ? width / WALK_UV_M : 0, row.at / WALK_UV_M);
     }
   }
   for (let r = 1; r < rows.length; r += 1) {
@@ -8625,9 +8629,9 @@ function addCrossingLandingPad(endpoint, intoCrossing, crossingWidth, y) {
   ], 3));
   geometry.setAttribute("uv", new THREE.Float32BufferAttribute([
     0, 0,
-    pad.width / SLAB_M, 0,
-    pad.width / SLAB_M, pad.depth / SLAB_M,
-    0, pad.depth / SLAB_M,
+    pad.width / WALK_UV_M, 0,
+    pad.width / WALK_UV_M, pad.depth / WALK_UV_M,
+    0, pad.depth / WALK_UV_M,
   ], 2));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   geometry.computeVertexNormals();
@@ -8790,6 +8794,14 @@ function addSidewalkCrossingReplacements(points, y) {
   return added;
 }
 
+//: How many slabs across one texture. A single scored slab tiled edge to edge is a stamp: the
+//: aggregate, the staining and the broom marks land in the same place on every slab in the
+//: city, and from above a pavement reads as a chequerboard of one square repeated -- which is
+//: what "procedural square paving" is. Four by four slabs to a texture, each poured with its
+//: own seed and its own tone, puts the repeat at 6.1 m instead of 1.52 m and breaks the eye's
+//: hold on it. The slab itself is still 1.52 m; nothing about the geometry changes.
+const SLAB_BLOCK = 4;
+
 function sidewalkTexture(variant = "square") {
   // Scored concrete, as San Francisco actually pours it: a mid grey rather than a pale one,
   // with exposed aggregate speckle at two scales, the fine parallel striations a broom leaves
@@ -8797,32 +8809,58 @@ function sidewalkTexture(variant = "square") {
   // you at a glance that you are looking at a pavement and not at a grey strip; the grain is
   // what stops it looking like painted card.
   const size = 128;
+  const block = variant === "narrow" ? 1 : SLAB_BLOCK;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size * block;
+  const outer = canvas.getContext("2d");
+  // Each slab is poured on its own canvas and then set into the block, so that every one gets
+  // its own aggregate, its own staining and its own tone rather than a copy of the first.
+  for (let bx = 0; bx < block; bx += 1) {
+    for (let by = 0; by < block; by += 1) {
+      outer.drawImage(sidewalkSlab(variant, size, bx * block + by), bx * size, by * size);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
+
+function sidewalkSlab(variant, size, seed) {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#696d65";
+  // Every number this slab needs comes off its own seed, so no two slabs in the block share
+  // an aggregate, a stain or a broom stroke.
+  const grit = (n) => random(n + seed * 977);
+  // A pour is never quite the colour of the pour beside it: the concrete came on a different
+  // day, off a different truck, and has weathered for a different number of years.
+  const tone = 0.90 + grit(seed * 71 + 3) * 0.20;
+  const base = [0x69, 0x6d, 0x65].map((v) => Math.max(0, Math.min(255, Math.round(v * tone))));
+  ctx.fillStyle = `rgb(${base[0]},${base[1]},${base[2]})`;
   ctx.fillRect(0, 0, size, size);
 
   // Coarse aggregate: the stones in the mix, a few pixels across.
   for (let i = 0; i < size * size * 0.02; i += 1) {
-    const shade = random(i * 13);
+    const shade = grit(i * 13);
     ctx.fillStyle = shade < 0.56 ? "rgba(44,46,42,0.34)" : "rgba(166,168,158,0.22)";
-    const r = 1 + random(i * 17) * 1.8;
+    const r = 1 + grit(i * 17) * 1.8;
     ctx.beginPath();
-    ctx.arc(random(i * 3) * size, random(i * 5) * size, r, 0, Math.PI * 2);
+    ctx.arc(grit(i * 3) * size, grit(i * 5) * size, r, 0, Math.PI * 2);
     ctx.fill();
   }
   // Fine grain over the whole slab.
   for (let i = 0; i < size * size * 0.5; i += 1) {
-    const shade = random(i * 7);
+    const shade = grit(i * 7);
     ctx.fillStyle = shade < 0.5 ? "rgba(0,0,0,0.20)"
       : shade < 0.85 ? "rgba(255,255,255,0.075)" : "rgba(104,96,84,0.16)";
-    ctx.fillRect(random(i * 3) * size, random(i * 5) * size, 1, 1);
+    ctx.fillRect(grit(i * 3) * size, grit(i * 5) * size, 1, 1);
   }
   // Broom finish: shallow parallel striations across the slab, which is what a finisher leaves
   // and what gives real pavement its direction under raking light.
   for (let y = 0; y < size; y += 2) {
-    ctx.fillStyle = random(y * 29) < 0.5 ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.04)";
+    ctx.fillStyle = grit(y * 29) < 0.5 ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.04)";
     ctx.fillRect(0, y, size, 1);
   }
   // Staining along the joints, where water sits and dirt collects.
@@ -8853,16 +8891,18 @@ function sidewalkTexture(variant = "square") {
   ctx.strokeStyle = "rgba(200,202,194,0.14)";
   ctx.lineWidth = 1.2;
   if (variant !== "narrow") ctx.strokeRect(4.0, 4.0, size - 8, size - 8);
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  return texture;
+  return canvas;
 }
 
 const SIDEWALK = sidewalkTexture();
 const NARROW_SIDEWALK = sidewalkTexture("narrow");
 //: One scored square, in metres. Five feet is the usual San Francisco pour.
 const SLAB_M = 1.52;
+//: The ground one repeat of the pavement texture covers. The texture is a block of SLAB_BLOCK
+//: distinct slabs, so every UV written for a pavement -- the ribbons, the corner pieces, the
+//: kerb-ramp pads -- has to be in units of the block rather than of the slab. Divide by the
+//: slab and one slab's worth of ground shows the whole block squeezed into it.
+const WALK_UV_M = SLAB_M * SLAB_BLOCK;
 const NARROW_SLAB_M = 2.75;
 const NARROW_WALK_M = 1.8;
 

@@ -86,12 +86,12 @@
   }
  },
  "waterline": {
-  "polygons": 13,
-  "coastlines": 0,
+  "polygons": 15,
+  "coastlines": 3,
   "surface_m": 0.852,
   "cells_set_to_water": 0,
   "cells_open_water": 2062,
-  "cells_water": 66159,
+  "cells_water": 87020,
   "note": "cells inside the map's closed water polygons, and on the seaward side of its coastlines, were set to the water surface the lidar measured whatever the grid's fill had them at; the renderer draws the sea at and under that surface"
  },
  "cells_filled_land": 30281
