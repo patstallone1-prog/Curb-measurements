@@ -165,13 +165,13 @@
   },
   {
    "name": "oakland-downtown",
-   "title": "Downtown Oakland, Broadway, Lake Merritt's west shore",
+   "title": "Downtown Oakland, Lake Merritt, and the Oakland-Alameda tube approaches",
    "path": "regions/oakland-downtown/sf-corridor-3d.html",
    "built": true,
    "city": "oakland",
-   "description": "Downtown Oakland, Broadway, Lake Merritt's west shore: the first region outside San Francisco",
+   "description": "Downtown Oakland, Lake Merritt, and the Oakland-Alameda tube approaches",
    "bbox": [
-    37.795,
+    37.785,
     -122.285,
     37.815,
     -122.26
@@ -222,7 +222,7 @@
     "build": "done",
     "audit": "stale"
    },
-   "built_at": "2026-09-27T05:14:54Z",
+   "built_at": "2026-09-28T05:44:45Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
@@ -258,7 +258,7 @@
     "build": "done",
     "audit": "stale"
    },
-   "built_at": "2026-09-27T14:10:42Z",
+   "built_at": "2026-09-28T05:45:48Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
@@ -290,11 +290,11 @@
     "terrain": "done",
     "imagery": "done",
     "official": "stale",
-    "lidar": "running",
+    "lidar": "done",
     "build": "done",
     "audit": "stale"
    },
-   "built_at": "2026-09-27T14:54:08Z",
+   "built_at": "2026-09-28T05:50:37Z",
    "active": {
     "kerbs": "lidar",
     "kerb_height": "lidar",
