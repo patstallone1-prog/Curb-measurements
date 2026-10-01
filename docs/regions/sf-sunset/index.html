@@ -7,29 +7,28 @@
 <meta name="kerbside-regions" content="../../regions.json" />
 <title>Kerbside Sunset 3D</title>
 <style>
-:root { color-scheme: light; --bg:#edf3f4; --panel:#fffdf9; --line:#c8d8dc; --ink:#21363b; --muted:#577076; --pink:#a23e67; --green:#288660; --amber:#aa772b; --cyan:#237d9a; }
+:root { color-scheme: light; --bg:#edf3f4; --panel:#fffdf9; --line:#c8d8dc; --ink:#21363b; --muted:#577076; --accent:#8c844c; --green:#288660; --amber:#aa772b; --cyan:#237d9a; }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow:hidden; }
 #scene { position:fixed; inset:0; display:block; width:100vw; height:100vh; }
-.hud { position:fixed; top:14px; left:14px; bottom:14px; width:min(340px, calc(100vw - 28px)); display:flex; flex-direction:column; gap:10px; pointer-events:none; }
+.hud { position:fixed; top:14px; left:14px; bottom:14px; width:min(340px, calc(100vw - 28px)); display:flex; flex-direction:column; gap:10px; pointer-events:none; z-index:8; }
 /* The panel takes the column it is given rather than shrinking to its contents, so the
    sections breathe instead of being packed against the title. */
 .hud .panel { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:2px; }
-.hud[data-open="false"] .panel { flex:0 0 auto; padding:12px 16px; }
-#find { width:100%; padding:9px 10px; border-radius:7px; border:1px solid var(--line);
-#region { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.06); color:#e8eef2; font-size:13px; }
-        background:rgba(7,16,19,.75); color:var(--ink); font:inherit; }
+.hud[data-open="false"] .panel { display:none; }
+#fold { align-self:flex-start; pointer-events:auto; min-width:48px; min-height:44px; background:#fff; color:var(--ink); box-shadow:0 8px 24px rgba(28,61,66,.2); }
+#fold:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+#find { width:100%; padding:9px 10px; border-radius:7px; border:1px solid var(--line); background:#fff; color:var(--ink); font:inherit; }
+#region { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#fff; color:var(--ink); font-size:13px; }
 #find::placeholder { color:var(--muted); }
 #hits { list-style:none; margin:6px 0 0; padding:0; max-height:190px; overflow:auto; }
 #hits li { padding:7px 9px; border-radius:6px; cursor:pointer; font-size:13px; color:var(--muted); }
-#hits li:hover, #hits li[aria-selected=true] { background:rgba(255,77,143,.16); color:var(--ink); }
+#hits li:hover, #hits li[aria-selected=true] { background:rgba(140,132,76,.16); color:var(--ink); }
 /* Collapsing targets the sections themselves rather than one wrapper. The wrapper closes
    where the original panel did, which left the layer groups outside it and folding hid
    only the statistics. */
-.hud[data-open="false"] .collapsible { display:none; }
 .bar { pointer-events:auto; display:flex; align-items:center; gap:8px; }
 .bar h1 { flex:1; margin:0; }
-#fold { flex:1; }
 .primary-actions { margin-top:10px; }
 .group { margin-top:12px; }
 .group > h2 { margin:0 0 7px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600; }
@@ -41,18 +40,18 @@ h1 { margin:0 0 8px; font-size:18px; line-height:1.1; font-weight:700; letter-sp
 .stat span { color:var(--muted); font-size:10px; text-transform:uppercase; }
 .legend { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; color:var(--muted); font-size:12px; }
 .key { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
-.sw { width:10px; height:10px; border-radius:50%; background:var(--pink); }
+.sw { width:10px; height:10px; border-radius:50%; background:var(--accent); }
 .toolbar { display:flex; flex-wrap:wrap; gap:7px; }
 .toolbar button { padding:8px 10px; font-size:13px; }
 button { color:var(--ink); background:rgba(16,25,30,.9); border:1px solid var(--line); border-radius:7px; padding:10px 12px; font:inherit; cursor:pointer; }
-button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgba(255,77,143,.20); }
+button[aria-pressed=true] { border-color:var(--accent); color:#fff; background:rgba(140,132,76,.20); }
 /* Clear of the sidebar, which takes the whole left column when it is open. The tip used to
    start at the same 14px and simply print itself over the panel's lower half. */
 #addr { position:fixed; z-index:9; max-width:280px; padding:10px 12px; border-radius:8px;
-  background:rgba(12,20,24,.94); border:1px solid var(--line); color:var(--ink);
+  background:rgba(12,20,24,.94); border:1px solid #82959b; color:#fff;
   font-size:12px; line-height:1.45; box-shadow:0 14px 34px rgba(0,0,0,.4); pointer-events:none; }
 #addr b { font-size:13px; }
-#addr .sub { color:var(--muted); }
+#addr .sub { color:#fff; }
 #tip { position:fixed; left:368px; bottom:14px; width:min(520px, calc(100vw - 382px)); color:var(--muted); font-size:12px; }
 #progress { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(12,18,24,0.88); color:#e8eef2; padding:14px 22px; border-radius:8px; font-size:15px; letter-spacing:0.01em; z-index:20; pointer-events:none; }
 @media (max-width: 760px) {
@@ -72,7 +71,8 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
 <canvas id="scene"></canvas>
 <div id="progress" hidden>Loading the corridor&hellip;</div>
 <div class="hud" id="hud" data-open="false">
-  <div class="panel">
+  <button id="fold" aria-expanded="false" aria-controls="map-sidebar" aria-label="Open map controls" title="Map controls">☰ Map</button>
+  <div class="panel" id="map-sidebar">
     <div class="bar">
       <h1>Kerbside Sunset 3D</h1>
     </div>
@@ -88,7 +88,6 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
     <div class="toolbar primary-actions">
       <button id="firstperson" aria-pressed="false" title="See out of the walker's eyes; drag to look, arrows to walk">First person</button>
       <button id="reset">Reset view</button>
-      <button id="fold" aria-expanded="false" aria-controls="controls" title="Show map layers and details">More controls</button>
     </div>
     <div class="collapsible" id="controls">
     <div class="sub" id="regionnote"></div>
@@ -138,7 +137,7 @@ button[aria-pressed=true] { border-color:var(--pink); color:#fff; background:rgb
       <p id="furniturenote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
       <p id="detailnote" style="margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5"></p>
     </div>
-    <div id="tip"><b>Drag to look around</b> &mdash; the walker stays put until you use the arrow keys or choose a place in search. Arrow keys move at 20&nbsp;mph in orbit view and 12&nbsp;mph in first person, relative to the way you are facing. Wheel or pinch to zoom &mdash; in first person the wheel zooms your view up to 2x. The survey layers are off by default: turn them on for where photographs were taken, which blocks are covered, and which streets nobody has captured yet.</div>
+    <div id="tip"><b>Click to move</b> without changing zoom. Right-click to teleport to street-level zoom; when close, right-click a building for its address. Drag to look around, use arrow keys to walk, and wheel or pinch to zoom. The survey layers are off by default; enable them here to inspect coverage.</div>
     </div>
   </div>
 </div>
@@ -161,7 +160,8 @@ import { GLTFLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/GL
 // overlay.  Load the compact official sidecar before laying out crossings; a network failure
 // still leaves the renderer's local-road-width fallback available.
 const EMPTY_DETAIL_MANIFEST = { shards: [], offline_assets: [] };
-const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN, PERIMETER] = await Promise.all([
+const EMPTY_WORLD_OBJECTS = { objects: [] };
+const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN, PERIMETER, WORLD_OBJECTS] = await Promise.all([
   fetch(asset("sf-corridor-3d.json"), { cache: "no-cache" }).then((r) => {
     if (!r.ok) throw new Error(`payload ${r.status}`);
     return r.json();
@@ -206,6 +206,11 @@ const [DATA, OFFICIAL_GEOMETRY, DETAIL_MANIFEST, TERRAIN, PERIMETER] = await Pro
       return { frame: f, cells, bridges: p.bridges || [], counts: p.counts, source: p.source, regions: p.regions || [] };
     })
     .catch(() => null),
+  // Reconstructed objects (scripts/build_world_objects.py): measured shapes that replace the
+  // page's own drawing of the same things where they stand. Absent, nothing changes.
+  fetch(asset("sf-corridor-world-objects.json"), { cache: "no-cache" })
+    .then((r) => r.ok ? r.json() : EMPTY_WORLD_OBJECTS)
+    .catch(() => EMPTY_WORLD_OBJECTS),
 ]);
 document.getElementById("obs").textContent = DATA.summary.observations.toLocaleString();
 document.getElementById("eligible").textContent = DATA.summary.eligible.toLocaleString();
@@ -306,6 +311,7 @@ const groups = {
   official: new THREE.Group(),
   chunks: new THREE.Group(),
   gaps: new THREE.Group(),
+  reconstructed: new THREE.Group(),
 };
 // What opens is the city: streets, buildings, districts. The survey layers -- where photographs
 // were taken, which cells are covered, which sequences ran, which ways are missing -- are all
@@ -746,6 +752,279 @@ function maybeYield(progress) {
 let BUILDING_LIFT_M = 0;
 function v3(lon, lat, z = 0) { const [x, y] = xy(lon, lat); return new THREE.Vector3(x, z, -y); }
 
+// ---- reconstructed world objects (smc.world) ----
+//
+// Everything else on this page is drawn from a *kind*: a kerb from a road's width, a bench from
+// four boxes, a corner from a corner rule. What follows is drawn from measured shape. The page
+// is told the geometry -- a path and the section swept along it, or triangles per level of
+// detail -- and chooses no model. Where one of these stands, the page's own model of the same
+// thing is not drawn (worldClaims), so the two never sit one on top of the other; everywhere
+// else the old drawing carries on as the fallback it now is.
+const WORLD_OBJECT_MATERIALS = {
+  concrete: { color: 0xb4b3ad, roughness: 0.9 },
+  granite: { color: 0xbdb8b0, roughness: 0.7 },
+  stone: { color: 0xc9c1b2, roughness: 0.82 },
+  wood: { color: 0x8a6a4a, roughness: 0.78 },
+  metal: { color: 0x5d6166, roughness: 0.5, metalness: 0.45 },
+  glass: { color: 0x9fb4c2, roughness: 0.12, metalness: 0.25 },
+  wall: { color: 0xcfc6b8, roughness: 0.86 },
+  trim: { color: 0xe6e1d8, roughness: 0.8 },
+  roof: { color: 0x7a7470, roughness: 0.9 },
+  door: { color: 0x5b4636, roughness: 0.7 },
+  rail: { color: 0x3c3f43, roughness: 0.55, metalness: 0.4 },
+};
+const WORLD_MATERIAL_CACHE = new Map();
+function worldObjectMaterial(name) {
+  let material = WORLD_MATERIAL_CACHE.get(name);
+  if (!material) {
+    material = new THREE.MeshStandardMaterial(WORLD_OBJECT_MATERIALS[name] || WORLD_OBJECT_MATERIALS.concrete);
+    WORLD_MATERIAL_CACHE.set(name, material);
+  }
+  return material;
+}
+
+//: Metres per degree at a latitude -- the same formulae smc.world.compile writes with, so a
+//: vertex lands where the canonical object put it.
+function worldMetresPerDegree(lat) {
+  const r = lat * Math.PI / 180;
+  return [111412.84 * Math.cos(r), 111132.954 - 559.822 * Math.cos(2 * r)];
+}
+function worldLocalToPage(anchor, east, north) {
+  const [perLon, perLat] = worldMetresPerDegree(anchor[1]);
+  const [x, y] = xy(anchor[0] + east / perLon, anchor[1] + north / perLat);
+  return [x, -y];
+}
+
+//: A section swept along a path, exactly as smc.geometry.extrusion.SplineExtrusion sweeps it:
+//: mitred at every vertex, bevel-limited, inner offsets that would fold pulled together, one
+//: strip per section edge (so a kerb's face and top keep their own normals) and a hard seam at
+//: every break (so a sharp corner stays sharp). Local metres in, local metres out.
+const WORLD_MITER_LIMIT = 4.0;
+function sweepGeometryLocal(path, breaks, closedPath, profile, closedProfile, caps) {
+  const n = path.length, count = profile.length;
+  const d = [];
+  for (let k = 0; k < n - 1; k += 1) {
+    const dx = path[k + 1][0] - path[k][0], dy = path[k + 1][1] - path[k][1];
+    const len = Math.hypot(dx, dy);
+    d.push(len > 0 ? [dx / len, dy / len] : (k ? d[k - 1] : [1, 0]));
+  }
+  const left = d.map(([dx, dy]) => [-dy, dx]);
+  const miter = new Array(n), scale = new Array(n).fill(1);
+  miter[0] = left[0];
+  miter[n - 1] = left[n - 2];
+  for (let i = 1; i < n - 1; i += 1) {
+    let mx = left[i - 1][0] + left[i][0], my = left[i - 1][1] + left[i][1];
+    const norm = Math.hypot(mx, my);
+    if (norm < 1e-9) { miter[i] = left[i]; continue; }
+    mx /= norm; my /= norm;
+    miter[i] = [mx, my];
+    scale[i] = Math.min(1 / Math.max(mx * left[i][0] + my * left[i][1], 1e-6), WORLD_MITER_LIMIT);
+  }
+  const closed = closedPath && n > 2 && path[0][0] === path[n - 1][0] && path[0][1] === path[n - 1][1];
+  if (closed) {
+    let mx = left[n - 2][0] + left[0][0], my = left[n - 2][1] + left[0][1];
+    const norm = Math.max(Math.hypot(mx, my), 1e-9);
+    mx /= norm; my /= norm;
+    miter[0] = miter[n - 1] = [mx, my];
+    scale[0] = scale[n - 1] = Math.min(1 / Math.max(mx * left[0][0] + my * left[0][1], 1e-6), WORLD_MITER_LIMIT);
+  }
+  // rings[i][k] = [east, north, up]
+  const rings = [];
+  for (let i = 0; i < n; i += 1) {
+    const ring = [];
+    for (let k = 0; k < count; k += 1) {
+      const lateral = profile[k][0] * scale[i];
+      ring.push([path[i][0] + lateral * miter[i][0], path[i][1] + lateral * miter[i][1], (path[i][2] || 0) + profile[k][1]]);
+    }
+    rings.push(ring);
+  }
+  for (let k = 0; k < count; k += 1) {        // unfold, as smc.geometry.extrusion._unfold
+    for (let round = 0; round < 8; round += 1) {
+      let moved = false;
+      for (let i = 0; i < n - 1; i += 1) {
+        const ox = rings[i + 1][k][0] - rings[i][k][0], oy = rings[i + 1][k][1] - rings[i][k][1];
+        const px = path[i + 1][0] - path[i][0], py = path[i + 1][1] - path[i][1];
+        if (ox * px + oy * py < 0) {
+          const mx = (rings[i][k][0] + rings[i + 1][k][0]) / 2, my = (rings[i][k][1] + rings[i + 1][k][1]) / 2;
+          rings[i][k][0] = rings[i + 1][k][0] = mx;
+          rings[i][k][1] = rings[i + 1][k][1] = my;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+  const edges = [];
+  for (let k = 0; k < count - 1; k += 1) edges.push([k, k + 1]);
+  if (closedProfile) edges.push([count - 1, 0]);
+  const cuts = [0, ...breaks.filter((b) => b > 0 && b < n - 1), n - 1];
+  const vertices = [], index = [];
+  for (let c = 0; c < cuts.length - 1; c += 1) {
+    const a = cuts[c], b = cuts[c + 1], m = b - a + 1;
+    for (const [k0, k1] of edges) {
+      const base = vertices.length / 3;
+      for (let i = a; i <= b; i += 1) vertices.push(...rings[i][k0]);
+      for (let i = a; i <= b; i += 1) vertices.push(...rings[i][k1]);
+      for (let i = 0; i < m - 1; i += 1) {
+        const A = base + i, B = base + m + i, C = base + m + i + 1, D = base + i + 1;
+        index.push(A, B, C, A, C, D);
+      }
+    }
+  }
+  if (caps && closedProfile) {
+    const tris = earClip(profile);
+    for (const [ring, flip] of [[rings[0], true], [rings[n - 1], false]]) {
+      const base = vertices.length / 3;
+      for (const p of ring) vertices.push(...p);
+      for (const [i0, i1, i2] of tris) index.push(...(flip ? [base + i2, base + i1, base + i0] : [base + i0, base + i1, base + i2]));
+    }
+  }
+  return { vertices, index };
+}
+
+function earClip(polygon) {
+  // Ear clipping for a simple polygon, as smc.geometry.extrusion.triangulate_polygon.
+  const pts = polygon;
+  let area = 0;
+  for (let i = 0; i < pts.length; i += 1) {
+    const j = (i + 1) % pts.length;
+    area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+  }
+  const idx = pts.map((_, i) => i);
+  if (area < 0) idx.reverse();
+  const tris = [];
+  const inside = (p, a, b, c) => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0
+    && (c[0] - b[0]) * (p[1] - b[1]) - (c[1] - b[1]) * (p[0] - b[0]) >= 0
+    && (a[0] - c[0]) * (p[1] - c[1]) - (a[1] - c[1]) * (p[0] - c[0]) >= 0;
+  let guard = 0;
+  while (idx.length > 3 && guard < 10000) {
+    guard += 1;
+    let clipped = false;
+    for (let k = 0; k < idx.length; k += 1) {
+      const i0 = idx[(k - 1 + idx.length) % idx.length], i1 = idx[k], i2 = idx[(k + 1) % idx.length];
+      const a = pts[i0], b = pts[i1], c = pts[i2];
+      if ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) <= 1e-12) continue;
+      if (idx.some((j) => j !== i0 && j !== i1 && j !== i2 && inside(pts[j], a, b, c))) continue;
+      tris.push(area >= 0 ? [i0, i1, i2] : [i2, i1, i0]);
+      idx.splice(k, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) break;
+  }
+  if (idx.length === 3) tris.push(area >= 0 ? [idx[0], idx[1], idx[2]] : [idx[2], idx[1], idx[0]]);
+  return tris;
+}
+
+//: The swept level the page draws. Level 1 is the path to a centimetre: the finest level's
+//: detail below that is invisible at street distance, and merged street geometry is culled by
+//: distance as a whole rather than switched per object.
+function worldSweepLevel(lods) {
+  return lods.find((l) => l.level === 1) || lods.reduce((a, b) => (b.level > a.level ? b : a));
+}
+function worldSweepLocal(record) {
+  const level = worldSweepLevel(record.sweep.lods);
+  const path = [];
+  for (let i = 0; i < level.path.length; i += 2) path.push([level.path[i] / 1000, level.path[i + 1] / 1000, 0]);
+  const profile = [];
+  for (let i = 0; i < record.sweep.profile.length; i += 2) profile.push([record.sweep.profile[i] / 1000, record.sweep.profile[i + 1] / 1000]);
+  // A kerb's height follows the page's kerb rule: when every kerb is drawn at one height
+  // (KERB_RENDER_UNIFORM), a reconstructed kerb is too. Its measured height is kept in the
+  // canonical object either way; this is a drawing decision, not a measurement.
+  const height = record.sweep.params && record.sweep.params.height;
+  if (record.type === "curb" && height && height.value > 0 && typeof KERB_RENDER_UNIFORM !== "undefined" && KERB_RENDER_UNIFORM) {
+    const k = renderedKerbHeight(null) / height.value;
+    for (const p of profile) p[1] *= k;
+  }
+  const swept = sweepGeometryLocal(path, level.breaks || [], !!level.closed, profile, !!record.sweep.closed_profile, !!record.sweep.caps);
+  swept.profile = profile;
+  return swept;
+}
+
+//: What each reconstructed object stands in for. A kerb claims the stretch of kerb line within
+//: reach of it and running its way; a bench or a post claims a disc. The page's own drawing
+//: of the same thing is left out there.
+const WORLD_CLAIM_CELL_M = 10;
+const WORLD_CLAIM_ALIGN_COS = Math.cos(35 * Math.PI / 180);
+let WORLD_CLAIMS = null;
+function worldClaims() {
+  if (WORLD_CLAIMS) return WORLD_CLAIMS;
+  const lines = new Map(), points = [];
+  for (const record of (WORLD_OBJECTS.objects || [])) {
+    const claim = record.claim;
+    if (!claim) continue;
+    if (claim.along === "sweep" && record.sweep) {
+      // The claimed line is the swept path itself, in the object's local metres.
+      const path = worldSweepLevel(record.sweep.lods).path;
+      const pts = [];
+      for (let i = 0; i < path.length; i += 2) pts.push(worldLocalToPage(record.anchor, path[i] / 1000, path[i + 1] / 1000));
+      for (let i = 0; i < pts.length - 1; i += 1) {
+        const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+        const seg = { ax, az, bx, bz, reach: claim.reach_m, kind: claim.kind };
+        const x0 = Math.floor((Math.min(ax, bx) - claim.reach_m) / WORLD_CLAIM_CELL_M);
+        const x1 = Math.floor((Math.max(ax, bx) + claim.reach_m) / WORLD_CLAIM_CELL_M);
+        const z0 = Math.floor((Math.min(az, bz) - claim.reach_m) / WORLD_CLAIM_CELL_M);
+        const z1 = Math.floor((Math.max(az, bz) + claim.reach_m) / WORLD_CLAIM_CELL_M);
+        for (let cx = x0; cx <= x1; cx += 1) for (let cz = z0; cz <= z1; cz += 1) {
+          const key = `${cx}:${cz}`;
+          if (!lines.has(key)) lines.set(key, []);
+          lines.get(key).push(seg);
+        }
+      }
+    } else if (claim.point) {
+      const [x, y] = xy(claim.point[0], claim.point[1]);
+      points.push({ x, z: -y, reach: claim.reach_m, kind: claim.kind });
+    }
+  }
+  return (WORLD_CLAIMS = { lines, points });
+}
+function kerbClaimedAt(x, z, dx, dz) {
+  const segs = worldClaims().lines.get(`${Math.floor(x / WORLD_CLAIM_CELL_M)}:${Math.floor(z / WORLD_CLAIM_CELL_M)}`);
+  if (!segs) return false;
+  for (const s of segs) {
+    const sx = s.bx - s.ax, sz = s.bz - s.az, len2 = sx * sx + sz * sz;
+    if (!(len2 > 0)) continue;
+    const t = Math.max(0, Math.min(1, ((x - s.ax) * sx + (z - s.az) * sz) / len2));
+    const ex = s.ax + t * sx - x, ez = s.az + t * sz - z;
+    if (ex * ex + ez * ez > s.reach * s.reach) continue;
+    const len = Math.sqrt(len2);
+    if (Math.abs((sx * dx + sz * dz) / len) >= WORLD_CLAIM_ALIGN_COS) return true;
+  }
+  return false;
+}
+//: A kerb line with the stretches a reconstructed kerb has claimed taken out of it. With no
+//: reconstructed objects on the page it is the line it was given, untouched.
+function unclaimedKerbRuns(points) {
+  if (!worldClaims().lines.size || points.length < 2) return [points];
+  const dense = [points[0]];
+  for (let i = 1; i < points.length; i += 1) {
+    const [ax, ay] = xy(points[i - 1][0], points[i - 1][1]), [bx, by] = xy(points[i][0], points[i][1]);
+    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 1.0));
+    for (let s = 1; s <= steps; s += 1) dense.push(lerpLonLat(points[i - 1], points[i], s / steps));
+  }
+  const page = dense.map(([lon, lat]) => { const [x, y] = xy(lon, lat); return [x, -y]; });
+  const claimed = page.map(([x, z], i) => {
+    const j = Math.min(i, page.length - 2);
+    const dx = page[j + 1][0] - page[j][0], dz = page[j + 1][1] - page[j][1];
+    const len = Math.hypot(dx, dz) || 1;
+    return kerbClaimedAt(x, z, dx / len, dz / len);
+  });
+  const runs = [];
+  let run = [];
+  for (let i = 0; i < dense.length; i += 1) {
+    if (claimed[i]) { if (run.length >= 2) runs.push(run); run = []; continue; }
+    run.push(dense[i]);
+  }
+  if (run.length >= 2) runs.push(run);
+  return runs;
+}
+function furnitureClaimedAt(x, z, kind) {
+  for (const p of worldClaims().points) {
+    if (p.kind === kind && Math.hypot(p.x - x, p.z - z) <= p.reach) return true;
+  }
+  return false;
+}
+
 // A procedural sky, generated once into an environment map. Without one, a metallic material
 // reflects nothing and renders black -- which is why "make it look like glass" is really "give
 // it something to be a mirror of".
@@ -948,9 +1227,8 @@ const TERRAIN_SAND = new THREE.Color(0xc9b98a);
 const TERRAIN_BUILT = new THREE.Color(0x6e7263);
 //: The country beyond the survey: grass, plainly, so the edge of what was measured is legible.
 const TERRAIN_PLATE = new THREE.Color(0x4a6f3c);
-//: The backdrop's grey gives way to the grass over this distance past the grid's edge; the
-//: height eases over TERRAIN_APRON_DECAY_M.
-const TERRAIN_APRON_COLOUR_M = 300.0;
+// The surveyed grid ends at a visible boundary; height can still ease into the country,
+// but its colour must not fade through a dark halo before reaching the grassland.
 const terrainTiles = [];
 //: The backdrop's height and colour at a point: land under the ground, or the sea where the
 //: ground is at or under the waterline. ``apron`` is how far outside the grid the point lies.
@@ -1005,12 +1283,11 @@ function backdropAt(x, z, apron = 0) {
   const cls = apron > 0 ? perimeterClassAt(x, z) : null;
   const sandy = cls === 2 || (edge < SEA_SURFACE_M + BEACH_RISE_M && nearBeach(x, z));
   if (apron > 0) {
-    // Height and colour both ease out to the plate's, so the apron is neither a cliff nor a
-    // grey ring round the city.
+    // Keep the height transition, but cut the colour directly to the mapped country.
     const s = Math.exp(-apron / TERRAIN_APRON_DECAY_M);
     h = PENINSULA_Y + (h - PENINSULA_Y) * s;
     const ground = cls === 3 ? TERRAIN_BUILT : TERRAIN_PLATE;
-    const colour = sandy ? TERRAIN_SAND : ground.clone().lerp(TERRAIN_LAND, Math.exp(-apron / TERRAIN_APRON_COLOUR_M));
+    const colour = sandy ? TERRAIN_SAND : ground;
     return { y: h - TERRAIN_MESH_UNDER_M - earthDrop(x, z), colour };
   }
   return { y: h - TERRAIN_MESH_UNDER_M - earthDrop(x, z), colour: sandy ? TERRAIN_SAND : TERRAIN_LAND };
@@ -1044,9 +1321,15 @@ function addBackdropTile(xs, zs, apronOf) {
   for (let r = 0; r < h; r += 1) {
     for (let c = 0; c < w; c += 1) {
       const i = (r * w + c) * 3;
-      const at = backdropAt(xs[c], zs[r], apronOf ? apronOf(xs[c], zs[r]) : 0);
+      const apron = apronOf ? apronOf(xs[c], zs[r]) : 0;
+      const at = backdropAt(xs[c], zs[r], apron);
+      // The apron and grid share this position but not its colour. Giving the apron's
+      // inner vertices their outside colour removes the last 32 m interpolated halo.
+      const edgeClass = apronOf && apron === 0 ? perimeterClassAt(xs[c], zs[r]) : null;
+      const vertexColour = apronOf && apron === 0 && at.colour === TERRAIN_LAND
+        ? (edgeClass === 3 ? TERRAIN_BUILT : TERRAIN_PLATE) : at.colour;
       position[i] = xs[c]; position[i + 1] = at.y; position[i + 2] = zs[r];
-      colour[i] = at.colour.r; colour[i + 1] = at.colour.g; colour[i + 2] = at.colour.b;
+      colour[i] = vertexColour.r; colour[i + 1] = vertexColour.g; colour[i + 2] = vertexColour.b;
     }
   }
   const index = new Uint32Array((w - 1) * (h - 1) * 6);
@@ -7633,8 +7916,9 @@ function addPavementCorners() {
       mesh.userData.surface = "walk";
       addMerged(`walk:walk:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`, mesh, "walk");
       // Its kerb, round the curb return, the same tile the pavements' kerbs are.
-      addPavementRibbon(kerb.map((q) => lonLatFromXZ(q[0], -q[1])), KERB_LIP_M,
-                        mine.color, mine.opacity, y, thickness, "kerb");
+      for (const run of unclaimedKerbRuns(kerb.map((q) => lonLatFromXZ(q[0], -q[1])))) {
+        addPavementRibbon(run, KERB_LIP_M, mine.color, mine.opacity, y, thickness, "kerb");
+      }
       stampPaved([lonLatFromXZ(K[0], -K[1]), lonLatFromXZ(C[0], -C[1])],
                  Math.hypot(A1[0] - K[0], A1[1] - K[1]), top);
       laid += 1;
@@ -8186,12 +8470,15 @@ function addKerbsidePavement(renderPoints, side, inner, walk, color, opacity, st
         laid += wayLength(run);
         const kerb = offsetWay(run, -side * (inset / 2 + KERB_LIP_M / 2));
         stampPaved(kerb, KERB_LIP_M, y + thickness / 2);
-        addMerged(`walk:kerb:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
-                  ribbon(kerb, KERB_LIP_M, color, opacity, y, thickness, "kerb"), "kerb");
+        for (const lip of unclaimedKerbRuns(kerb)) {
+          addMerged(`walk:kerb:${(Math.round(thickness / 0.05) * 0.05).toFixed(2)}`,
+                    ribbon(lip, KERB_LIP_M, color, opacity, y, thickness, "kerb"), "kerb");
+        }
       }
     } else {
-      addPavementRibbon(offsetWay(stretch, lineAt(KERB_LIP_M / 2)), KERB_LIP_M,
-                        color, opacity, y, thickness, "kerb");
+      for (const run of unclaimedKerbRuns(offsetWay(stretch, lineAt(KERB_LIP_M / 2)))) {
+        addPavementRibbon(run, KERB_LIP_M, color, opacity, y, thickness, "kerb");
+      }
     }
   };
   let start = 0;
@@ -11214,7 +11501,9 @@ function buildingMesh(feature) {
   // No exaggeration. This was multiplied by 1.8 to make massing read from a bird's eye, which
   // put every building eighty per cent taller than OpenStreetMap says it is -- fine as a
   // diagram, wrong the moment somebody walks down the street beside it.
-  let height = Math.max(3, Math.min(260, feature.height_m || 10.5));
+  // No ceiling: the tallest building is as tall as it was measured. (It was clamped to 260 m,
+  // which a supertall tower would have met.) The floor stays: under 3 m is not a building.
+  let height = Math.max(3, feature.height_m || 10.5);
   // A default height on a building whose type has a real one is worse than no default. Only
   // the inferred heights are capped; a measured one is left exactly as recorded.
   // Only a guessed height is capped by the type. A height somebody measured -- lidar over the
@@ -12006,6 +12295,14 @@ function tunnelFloorAt(x, z) {
 //: What the walker stands on at (x, z): the bore's floor inside a tunnel, the hill over a
 //: mouth on top of it, and the flat ground everywhere else -- as a height above the ground.
 function walkerGroundAt(x, z) {
+  // Inside a building whose rooms are built, the walker stands on its floor; on a stoop, on
+  // its steps (see buildInterior). Declared with var so it is safe before they exist.
+  if (typeof standingSurfaces !== "undefined" && standingSurfaces) {
+    for (const surface of standingSurfaces) {
+      const y = surface(x, z);
+      if (y !== null) return y;
+    }
+  }
   const floor = tunnelFloorAt(x, z);
   if (floor !== null) return floor;
   return groundLiftAt(x, z);
@@ -14775,10 +15072,154 @@ emitShopfronts();
 // detail flushes in with the buildings it belongs to.
 const isBuilt = (key) => key.startsWith("part|") || key.startsWith("plane|")
   || key.startsWith("roof|") || key.startsWith("wall|") || key.startsWith("garage|");
+// Reconstructed kerbs and other swept objects join the street geometry: merged by material,
+// tiled, culled at the kerb's range, and stood on the ground by the lift every street surface
+// gets -- built, like the rest, at flat heights from the road's top.
+//: A reconstructed kerb is drawn where the page's own pavement meets it: the road and the
+//: pavement are still laid from widths, and where the survey puts the kerb well out from the
+//: pavement edge those widths drew, the measured kerb would stand alone in the asphalt. Those
+//: stretches wait for the surfaces to be bounded by the kerbs themselves, and are counted.
+const WORLD_KERB_SUPPORT_M = [0.3, 0.8, 1.5];
+const worldSweepStats = { drawn: 0, unsupported_m: 0, supported_m: 0 };
+function worldPavedBeside(anchor, east, north, nx, ny) {
+  for (const d of WORLD_KERB_SUPPORT_M) {
+    const [x, z] = worldLocalToPage(anchor, east + nx * d, north + ny * d);
+    if (pavementTopAt(x, z) !== undefined) return true;
+  }
+  return false;
+}
+function emitWorldSweeps() {
+  for (const record of (WORLD_OBJECTS.objects || [])) {
+    if (!record.sweep) continue;
+    const side = record.sweep.params && record.sweep.params.side ? record.sweep.params.side.value : 0;
+    for (const piece of worldSupportedPieces(record, side)) {
+      const { vertices, index } = sweepGeometryLocal(piece.path, piece.breaks, false, piece.profile,
+                                                     !!record.sweep.closed_profile, !!record.sweep.caps);
+      if (!index.length) continue;
+      const position = new Float32Array(vertices.length);
+      for (let i = 0; i < vertices.length; i += 3) {
+        const [x, z] = worldLocalToPage(record.anchor, vertices[i], vertices[i + 1]);
+        position[i] = x;
+        position[i + 1] = ROAD_TOP_M + vertices[i + 2];
+        position[i + 2] = z;
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+      geometry.setIndex(index);
+      geometry.computeVertexNormals();
+      const mesh = new THREE.Mesh(geometry, worldObjectMaterial(record.material));
+      mesh.userData.surface = "kerb";
+      addMerged(`reconstructed:${record.type}`, mesh, "kerb");
+      worldSweepStats.drawn += 1;
+    }
+  }
+  return worldSweepStats.drawn;
+}
+//: The stretches of a swept kerb with the page's pavement on its footway side, each as its own
+//: path (densified to a metre, breaks carried across). A swept object with no footway side
+//: (a fence, a rail) is drawn whole.
+function worldSupportedPieces(record, side) {
+  const level = worldSweepLevel(record.sweep.lods);
+  const base = worldSweepLocal(record);   // for the profile, uniform-kerb rule applied
+  const profile = base.profile;
+  const raw = [];
+  for (let i = 0; i < level.path.length; i += 2) raw.push([level.path[i] / 1000, level.path[i + 1] / 1000]);
+  const breakSet = new Set(level.breaks || []);
+  if (!side) return [{ path: raw.map(([e, n]) => [e, n, 0]), breaks: [...breakSet], profile }];
+  const dense = [], isBreak = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    if (i > 0) {
+      const [ae, an] = raw[i - 1], [be, bn] = raw[i];
+      const steps = Math.max(1, Math.ceil(Math.hypot(be - ae, bn - an) / 1.0));
+      for (let s = 1; s < steps; s += 1) {
+        dense.push([ae + (be - ae) * s / steps, an + (bn - an) * s / steps]);
+        isBreak.push(false);
+      }
+    }
+    dense.push(raw[i]);
+    isBreak.push(breakSet.has(i));
+  }
+  const supported = dense.map(([e, n], i) => {
+    const j = Math.min(i, dense.length - 2);
+    const de = dense[j + 1][0] - dense[j][0], dn = dense[j + 1][1] - dense[j][1];
+    const len = Math.hypot(de, dn) || 1;
+    return worldPavedBeside(record.anchor, e, n, side * -dn / len, side * de / len);
+  });
+  const pieces = [];
+  let run = [], runBreaks = [];
+  const flush = () => {
+    if (run.length >= 2) pieces.push({ path: run.map(([e, n]) => [e, n, 0]), breaks: runBreaks, profile });
+    run = [];
+    runBreaks = [];
+  };
+  for (let i = 0; i < dense.length; i += 1) {
+    const step = i ? Math.hypot(dense[i][0] - dense[i - 1][0], dense[i][1] - dense[i - 1][1]) : 0;
+    if (!supported[i]) { worldSweepStats.unsupported_m += step; flush(); continue; }
+    if (run.length) worldSweepStats.supported_m += step;
+    if (isBreak[i] && run.length) runBreaks.push(run.length);
+    run.push(dense[i]);
+  }
+  flush();
+  return pieces;
+}
+const worldSweepsDrawn = emitWorldSweeps();
 flushMerged(groups.streets, (key) => !isBuilt(key));
 flushMerged(groups.mapped3d, isBuilt);
 // A garage door is at the level of the driveway outside it, which is the street's ground there.
 for (const mesh of groups.mapped3d.children) if (mesh.userData.surface === "garage") liftOntoGround(mesh);
+
+// Reconstructed rigid objects -- a curved bench, a fitted bollard, a scanned sculpture -- each
+// with its levels of detail. A level is shown from the distance at which the detail it leaves
+// out (its measured geometric error) shrinks below the tile tree's own pixel threshold, so an
+// object refines on exactly the rule the rest of the city does.
+function worldLodDistance(errorM) {
+  if (!(errorM > 0)) return 0;
+  const perPixel = 2 * Math.tan((camera.fov * Math.PI) / 360) / Math.max(window.innerHeight, 1);
+  return errorM / (perPixel * TILE_MAX_SCREEN_ERROR_PX);
+}
+function renderWorldMeshes() {
+  let drawn = 0;
+  for (const record of (WORLD_OBJECTS.objects || [])) {
+    if (!record.mesh || !record.mesh.lods.length) continue;
+    const lod = new THREE.LOD();
+    const levels = [...record.mesh.lods].sort((a, b) => b.level - a.level);
+    for (const level of levels) {
+      const group = new THREE.Group();
+      for (const part of level.parts) {
+        const v = part.v, position = new Float32Array(v.length);
+        for (let i = 0; i < v.length; i += 3) {
+          position[i] = v[i] / 1000;
+          position[i + 1] = v[i + 2] / 1000;
+          position[i + 2] = -v[i + 1] / 1000;
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+        geometry.setIndex(part.i);
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, worldObjectMaterial(part.material));
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+      lod.addLevel(group, level === levels[0] ? 0 : worldLodDistance(level.err_m));
+    }
+    const [x, z] = worldLocalToPage(record.anchor, 0, 0);
+    const top = pavementTopAt(x, z);
+    lod.position.set(x, (top === undefined ? ROAD_TOP_M : top) + groundLiftAt(x, z), z);
+    lod.userData = { surface: "reconstructed", worldObject: {
+      id: record.id, type: record.type, basis: record.basis, confidence: record.confidence,
+      prov: record.prov } };
+    groups.reconstructed.add(lod);
+    drawn += 1;
+  }
+  return drawn;
+}
+const worldMeshesDrawn = renderWorldMeshes();
+if (worldSweepsDrawn || worldMeshesDrawn) {
+  console.info(`reconstructed objects: ${worldSweepsDrawn} swept pieces, ${worldMeshesDrawn} rigid; `
+    + `${Math.round(worldSweepStats.supported_m)} m of kerb drawn, `
+    + `${Math.round(worldSweepStats.unsupported_m)} m waiting on surfaces bounded by the kerbs`);
+}
 
 // ---- the dropped kerb at every garage ----
 //
@@ -15191,7 +15632,9 @@ function addBenches(records) {
   // One geometry, one placement each: there are a few hundred to a region and they are
   // identical but for where they stand and which way they face.
   const anchors = records.map((item, index) => ({ item, index, anchor: furnitureAnchor(item) }))
-    .filter((row) => row.anchor);
+    // A bench somebody has measured is drawn as measured (renderWorldMeshes); the catalogue
+    // bench is only the fallback for the ones nobody has.
+    .filter((row) => row.anchor && !furnitureClaimedAt(row.anchor.x, row.anchor.z, "bench"));
   if (!anchors.length) return 0;
   // One instanced mesh a part, sharing the same placement. The page has no geometry-merge
   // helper loaded and a bench is four boxes; four instanced draws for a few hundred benches
@@ -16156,7 +16599,7 @@ document.getElementById("reset").addEventListener("click", () => {
     const [x, y] = xy(place.lon, place.lat);
     // A named place is an explicit destination: unlike pointer view gestures,
     // search is allowed to move the walker and close the distance.
-    goTo(new THREE.Vector3(x, 0, -y), { travel: true });
+    goTo(eligibleLanding(new THREE.Vector3(x, 0, -y)), { travel: true, zoom: true });
     field.value = place.label;
     showing = [];
     selected = -1;
@@ -16179,7 +16622,7 @@ document.getElementById("reset").addEventListener("click", () => {
   });
 }
 
-// Keep search and view controls visible; expand the data and layer menu on demand.
+// The whole control column, including search and layers, opens only on demand.
 {
   const hud = document.getElementById("hud");
   const fold = document.getElementById("fold");
@@ -16187,8 +16630,9 @@ document.getElementById("reset").addEventListener("click", () => {
     const open = hud.dataset.open !== "false";
     hud.dataset.open = String(!open);
     fold.setAttribute("aria-expanded", String(!open));
-    fold.textContent = open ? "More controls" : "Hide controls";
-    fold.title = open ? "Show map layers and details" : "Hide map layers and details";
+    fold.setAttribute("aria-label", open ? "Open map controls" : "Close map controls");
+    fold.textContent = open ? "☰ Map" : "× Close";
+    fold.title = open ? "Open map controls" : "Close map controls";
   });
 }
 
@@ -16448,7 +16892,7 @@ addEventListener("blur", () => held.clear());   // a key held while tabbing away
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const ray = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-let pressedAt = [0, 0];
+let pressedAt = [NaN, NaN];
 canvas.addEventListener("pointerdown", (e) => { pressedAt = [e.clientX, e.clientY]; });
 const tip = document.getElementById("tip");
 
@@ -16547,8 +16991,7 @@ function pickedFeature(clientX, clientY) {
   // the camera is what makes clicking a facade from street level pick that facade's building.
   pointer.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(pointer, camera);
-  const hit = ray.intersectObjects(groups.mapped3d.children, false)[0];
-  if (hit) {
+  for (const hit of ray.intersectObjects(groups.mapped3d.children, true)) {
     const found = buildingAt(hit.point.x, hit.point.z);
     if (found) return found;
   }
@@ -16574,24 +17017,52 @@ function groundAt(clientX, clientY) {
   return ray.ray.intersectPlane(groundPlane, landing) ? landing : null;
 }
 
-// Pointer gestures only inspect or rotate the view. Search selects a destination;
-// arrows walk. A touchpad gesture must never move the walker accidentally.
-function goTo(landing, { travel }) {
+// Use surface street centrelines as safe destinations when a picked point is inside a
+// building or the camera is too far away to choose a precise gap. Never land on a bridge or
+// in a tunnel merely because its 2D centreline is nearest to the click.
+const streetLandingSegments = [];
+for (const way of DATA.ways) {
+  if (way.kind !== "street" || way.bridge || way.tunnel || !way.points) continue;
+  for (let i = 1; i < way.points.length; i += 1) {
+    const [ax, ay] = xy(...way.points[i - 1]);
+    const [bx, by] = xy(...way.points[i]);
+    const dx = bx - ax, dz = ay - by;
+    if (dx * dx + dz * dz > 1) streetLandingSegments.push([ax, -ay, dx, dz]);
+  }
+}
+function eligibleLanding(landing, forceStreet = false) {
+  if (!landing) return null;
+  if (!forceStreet && !buildingAt(landing.x, landing.z)) return landing;
+  let best = null, bestD2 = Infinity;
+  for (const [ax, az, dx, dz] of streetLandingSegments) {
+    const t = Math.max(0, Math.min(1, ((landing.x - ax) * dx + (landing.z - az) * dz) / (dx * dx + dz * dz)));
+    const x = ax + t * dx, z = az + t * dz;
+    const d2 = (x - landing.x) ** 2 + (z - landing.z) ** 2;
+    if (d2 >= bestD2 || buildingAt(x, z)) continue;
+    best = new THREE.Vector3(x, 0, z);
+    bestD2 = d2;
+  }
+  return best || (!buildingAt(landing.x, landing.z) ? landing : null);
+}
+
+// A click moves the walker without changing zoom. Right-click is the deliberate
+// street-level teleport; dragging and wheel zoom never move the walker.
+function goTo(landing, { travel = false, zoom = false } = {}) {
   if (!landing) return;
   // The ground where the click landed: the terrain's height, or the bore's floor inside a
   // tunnel. The orbit target and the walker's feet both stand on it.
   const ground = walkerGroundAt(landing.x, landing.z);
   if (travel) {
     avatar.position.set(landing.x, AVATAR_STAND_Y + ground, landing.z);
-    state.dist = Math.min(state.dist, ARRIVAL_DIST);
+    if (zoom) state.dist = ARRIVAL_DIST;
   }
   state.target.set(landing.x, (travel ? AVATAR_STAND_Y : 0) + ground, landing.z);
   placeCamera();
 }
 
-canvas.addEventListener("pointerup", async (e) => {
+canvas.addEventListener("pointerup", (e) => {
   // A drag is an orbit, not a destination. Only a press that barely moved counts as a click.
-  if (Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
+  if (Number.isFinite(pressedAt[0]) && Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
   if (e.button === 2) return;   // handled on contextmenu, which fires first on a two-finger tap
   // A region marker first: it opens that region's page.
   pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
@@ -16605,15 +17076,9 @@ canvas.addEventListener("pointerup", async (e) => {
     else location.href = marker.object.userData.href;
     return;
   }
-  const feature = pickedFeature(e.clientX, e.clientY);
-  const summary = await featureSummary(feature);
-  if (summary && tip) {
-    tip.innerHTML = summary;
-    return;
-  }
-  // A plain click is part of looking around, never a change of the walker's
-  // position or the camera's orbit centre. Named-place search remains the
-  // explicit jump-to-place control; arrows are the only movement gesture.
+  if (e.button !== 0) return;
+  const landing = eligibleLanding(groundAt(e.clientX, e.clientY));
+  if (landing) goTo(landing, { travel: true });
 });
 
 // The address, where the building is. Every footprint carries the parcel it stands on and the
@@ -16625,18 +17090,22 @@ function hideAddress() { if (addrBox) addrBox.hidden = true; }
 
 function showAddress(feature, clientX, clientY) {
   if (!addrBox) return false;
+  const escapeText = (value) => String(value).replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
   const address = feature.address || {};
   const parcel = feature.parcel || {};
   const line = address.formatted
     || [address.house_number, address.street].filter(Boolean).join(" ");
-  if (!line && !feature.name) return false;
+  // An unaddressed footprint is still a building pick, not a travel command.
+  // Say what is missing rather than teleporting or fabricating a house number.
+  const label = line || feature.name || "Address unavailable";
   const rest = [
     feature.name && line ? feature.name : "",
     parcel.blklot ? `Parcel ${parcel.blklot}` : "",
     parcel.analysis_neighborhood || "",
   ].filter(Boolean);
-  addrBox.innerHTML = `<b>${line || feature.name}</b>`
-    + (rest.length ? `<br><span class="sub">${rest.join(" &middot; ")}</span>` : "");
+  addrBox.innerHTML = `<b>${escapeText(label)}</b>`
+    + (rest.length ? `<br><span class="sub">${rest.map(escapeText).join(" &middot; ")}</span>` : "");
   addrBox.hidden = false;
   // Placed after it is measurable, and kept inside the window rather than half off the edge.
   const box = addrBox.getBoundingClientRect();
@@ -16645,16 +17114,588 @@ function showAddress(feature, clientX, clientY) {
   return true;
 }
 
-canvas.addEventListener("contextmenu", (e) => {
-  // A two-finger tap or right click asks about a building; it cannot teleport
-  // the walker when the user is merely changing the view.
+canvas.addEventListener("contextmenu", async (e) => {
+  // At close range a building click inspects its address. At overview scale, even a
+  // building pick is a travel request: snap to the nearest safe surface street.
   e.preventDefault();
-  const feature = pickedFeature(e.clientX, e.clientY);
-  if (feature && showAddress(feature, e.clientX, e.clientY)) return;
+  if (Number.isFinite(pressedAt[0]) && Math.hypot(e.clientX - pressedAt[0], e.clientY - pressedAt[1]) > 5) return;
+  const distant = !state.firstPerson && state.dist > 1200;
+  const feature = distant ? null : pickedFeature(e.clientX, e.clientY);
+  if (feature) {
+    showAddress(feature, e.clientX, e.clientY);
+    // Detail shards are still retrieved on demand, now from the inspection gesture.
+    // A plain left click is exclusively movement; the full record lives in the sidebar.
+    const summary = await featureSummary(feature);
+    if (summary && tip) tip.innerHTML = summary;
+    return;
+  }
   hideAddress();
+  const landing = eligibleLanding(groundAt(e.clientX, e.clientY), distant);
+  if (!landing) return;
+  if (state.firstPerson) setFirstPerson(false);
+  goTo(landing, { travel: true, zoom: true });
 });
 canvas.addEventListener("pointerdown", hideAddress);
 addEventListener("keydown", (e) => { if (e.key === "Escape") hideAddress(); });
+
+// ---- solid buildings, doors that open, and the rooms behind them ------------------------------
+//
+// A building is solid: the walker is a circle WALKER_RADIUS_M across its feet and is held off
+// every footprint's walls, sliding along them rather than stopping dead. The way in is a door.
+// Each building's doors come with its fitted interior (scripts/build_interiors_fit.py): an
+// entrance a mapper put on the outline in OpenStreetMap, else a door or shopfront the facade
+// survey photographed, else one inferred at the middle of the wall nearest a street. Stand by
+// one and press Enter: it swings open, the gap in the wall is passable, and the rooms behind it
+// are built -- a real plan of somewhere else (a Swiss apartment building, a single dwelling),
+// chosen because its proportions fit this footprint and tiled where the building is several
+// plans long. It is labelled what it is: a stand-in, not this building's interior.
+const WALKER_RADIUS_M = 0.3;
+const WALK_SUBSTEP_M = 0.15;
+const DOOR_REACH_M = 1.8;
+const DOOR_HEIGHT_M = 2.1;
+const DOOR_DRAW_M = 60;
+const INTERIOR_KEEP_M = 70;
+const INTERIOR_WALL_INSET_M = 0.08;
+const DOOR_SOURCE = ["mapped (OpenStreetMap)", "photographed", "inferred"];
+const ROOM_FLOOR = {
+  living: 0xb08f6a, kitchen: 0xc9c2b4, bedroom: 0xa98a6b, bathroom: 0xd9dcdc, corridor: 0xb9a68a,
+  stair: 0x9c9488, storage: 0x9f978a, balcony: 0x8f8c86, shaft: 0x77736d, elevator: 0x77736d,
+  dining: 0xb08f6a, office: 0xa7a296, commercial: 0xb6b1a6, outdoor: 0x8a8a7e, other: 0xb0a898,
+};
+var standingSurfaces = new Set();
+//: Steps on a stoop, and how deep each tread is.
+const STEP_RISE_M = 0.18;
+const STEP_TREAD_M = 0.3;
+const footprintById = new Map();
+
+// A building on a hill stands on its highest ground: its floor is level with the ground at the
+// top of the footprint, never under the hillside -- the terrain cannot be cut, so a floor below
+// it would have the street running through the rooms. Where the street at a door is lower, the
+// door has a stoop, as San Francisco's do. (The street's ground, not this, is still what the
+// walker stands on outside.)
+function entryFloorY(entry) {
+  if (entry.floorY !== undefined) return entry.floorY;
+  let top = -Infinity;
+  for (const [x, z] of entry.local) top = Math.max(top, terrainGroundAt(x, z));
+  const step = Math.max(2, Math.hypot(entry.maxX - entry.minX, entry.maxZ - entry.minZ) / 30);
+  for (let x = entry.minX; x <= entry.maxX; x += step) {
+    for (let z = entry.minZ; z <= entry.maxZ; z += step) {
+      if (insideFootprint(entry, x, z)) top = Math.max(top, terrainGroundAt(x, z));
+    }
+  }
+  entry.floorY = top + 0.05;
+  return entry.floorY;
+}
+// The ground without any interior or stoop on it.
+function terrainGroundAt(x, z) {
+  const floor = tunnelFloorAt(x, z);
+  return floor !== null ? floor : groundLiftAt(x, z);
+}
+for (const bucket of footprintGrid.values()) {
+  for (const entry of bucket) footprintById.set(String(entry.way.osm_id), entry);
+}
+
+let INTERIORS = null;
+let interiorsRequested = false;
+function requestInteriors() {
+  if (interiorsRequested) return;
+  interiorsRequested = true;
+  fetch(asset("sf-corridor-interiors.json"), { cache: "no-cache" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => {
+      if (!data || !data.buildings) return;
+      INTERIORS = data;
+      for (const [id, record] of Object.entries(data.buildings)) {
+        const entry = footprintById.get(id);
+        if (!entry) continue;
+        entry.fit = record;
+        entry.doors = (record[13] || []).map(([edge, t, width, source]) => doorOn(entry, edge, t, width, source))
+          .filter(Boolean);
+      }
+      console.info(`kerbside: interiors for ${Object.keys(data.buildings).length} buildings, `
+        + `${data.library.length} plans (${JSON.stringify(data.summary.stretch)} stretch)`);
+    })
+    .catch(() => { /* no interiors for this page: buildings stay solid and closed */ });
+}
+
+function doorOn(entry, edge, t, width, source) {
+  const ring = entry.local;
+  const a = ring[edge], b = ring[edge + 1];
+  if (!a || !b) return null;
+  const dx = b[0] - a[0], dz = b[1] - a[1];
+  const length = Math.hypot(dx, dz);
+  if (length < width + 0.2) return null;
+  const ux = dx / length, uz = dz / length;
+  // Keep the whole leaf on the edge.
+  const half = width / 2 / length;
+  const tc = Math.min(1 - half, Math.max(half, t));
+  const cx = a[0] + dx * tc, cz = a[1] + dz * tc;
+  // Inward is the side of the edge the footprint is on.
+  let nx = -uz, nz = ux;
+  if (!insideFootprint(entry, cx + nx * 0.5, cz + nz * 0.5)) { nx = -nx; nz = -nz; }
+  return { entry, edge, t0: tc - half, t1: tc + half, width, source, cx, cz, ux, uz, nx, nz,
+           open: false, angle: 0, mesh: null };
+}
+
+// The wall segments within reach of a point: footprint edges with open doorways left out, the
+// leaves of closed doors, and the partitions of any interior that has been built.
+function wallSegmentsNear(x, z) {
+  const out = [];
+  const seen = new Set();
+  for (let ix = -1; ix <= 1; ix += 1) {
+    for (let iz = -1; iz <= 1; iz += 1) {
+      const bucket = footprintGrid.get(`${Math.floor(x / FOOTPRINT_CELL) + ix}:${Math.floor(z / FOOTPRINT_CELL) + iz}`);
+      if (!bucket) continue;
+      for (const entry of bucket) {
+        if (seen.has(entry) || x < entry.minX - 3 || x > entry.maxX + 3 || z < entry.minZ - 3 || z > entry.maxZ + 3) continue;
+        seen.add(entry);
+        // A station under the street and a canopy on posts have no walls to walk into.
+        if (entry.solid === undefined) {
+          entry.solid = !entry.way.underground && structureClass(entry.way, footprintArea(entry.way.points)) !== "canopy";
+        }
+        if (!entry.solid) continue;
+        const ring = entry.local;
+        for (let i = 0; i + 1 < ring.length; i += 1) {
+          const [ax, az] = ring[i];
+          const [bx, bz] = ring[i + 1];
+          const gaps = (entry.doors || []).filter((d) => d.edge === i && d.open).sort((p, q) => p.t0 - q.t0);
+          let from = 0;
+          for (const gap of gaps) {
+            if (gap.t0 > from) out.push([ax + (bx - ax) * from, az + (bz - az) * from, ax + (bx - ax) * gap.t0, az + (bz - az) * gap.t0]);
+            from = Math.max(from, gap.t1);
+          }
+          if (from < 1) out.push([ax + (bx - ax) * from, az + (bz - az) * from, bx, bz]);
+        }
+        if (entry.interior) for (const s of entry.interior.segments) out.push(s);
+      }
+    }
+  }
+  return out;
+}
+
+function pushOutOfWalls(p, segments) {
+  for (let pass = 0; pass < 3; pass += 1) {
+    let moved = false;
+    for (const [ax, az, bx, bz] of segments) {
+      const sx = bx - ax, sz = bz - az;
+      const len2 = sx * sx + sz * sz;
+      const t = len2 > 1e-12 ? Math.max(0, Math.min(1, ((p.x - ax) * sx + (p.z - az) * sz) / len2)) : 0;
+      const qx = ax + sx * t, qz = az + sz * t;
+      const dx = p.x - qx, dz = p.z - qz;
+      const d = Math.hypot(dx, dz);
+      if (d >= WALKER_RADIUS_M || d < 1e-9) continue;
+      const push = WALKER_RADIUS_M - d;
+      p.x += (dx / d) * push;
+      p.z += (dz / d) * push;
+      moved = true;
+    }
+    if (!moved) return;
+  }
+}
+
+// Move the walker by (mx, mz), in steps short enough that no wall is crossed between checks,
+// sliding along whatever it meets.
+function moveWalker(mx, mz) {
+  const distance = Math.hypot(mx, mz);
+  const steps = Math.max(1, Math.ceil(distance / WALK_SUBSTEP_M));
+  const segments = wallSegmentsNear(avatar.position.x + mx / 2, avatar.position.z + mz / 2);
+  const p = { x: avatar.position.x, z: avatar.position.z };
+  for (let i = 0; i < steps; i += 1) {
+    p.x += mx / steps;
+    p.z += mz / steps;
+    if (segments.length) pushOutOfWalls(p, segments);
+  }
+  const moved = Math.hypot(p.x - avatar.position.x, p.z - avatar.position.z);
+  avatar.position.x = p.x;
+  avatar.position.z = p.z;
+  return moved;
+}
+
+// ---- doors -------------------------------------------------------------------------------------
+const doorMaterial = new THREE.MeshStandardMaterial({ color: 0x5b3b25, roughness: 0.6, metalness: 0.05 });
+const doorwayMaterial = new THREE.MeshBasicMaterial({ color: 0x2a221b, side: THREE.DoubleSide });
+// The facade is merged into tiles and has no hole where a door is, so an open doorway is a
+// portal: the rooms and the swung leaf are drawn first (INTERIOR_ORDER), then this pane writes
+// depth and no colour at the doorway, so the facade behind it fails the depth test and the rooms
+// show through. Only while the eye is outside that building -- from inside there is nothing to
+// see through (the facade's back faces are not drawn), and the pane would hide the street.
+// After the terrain (-2) and the plazas (-1, drawn without a depth test over the coarse
+// backdrop), before the buildings (0): anything drawn after the plazas is not painted over by
+// them. Groups keep order 0 -- three.js compares a group's order before its members'.
+const INTERIOR_ORDER = -0.5;
+const portalMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
+const doorGroup = new THREE.Group();
+doorGroup.name = "doors";
+root.add(doorGroup);
+const doorsShown = new Set();
+function showDoor(door) {
+  if (door.mesh) return;
+  const ground = entryFloorY(door.entry);
+  const street = terrainGroundAt(door.cx - door.nx * 0.6, door.cz - door.nz * 0.6);
+  addStoop(door, street, ground);
+  const hinge = new THREE.Group();
+  // Hinged at the t0 end, standing a hair outside the wall so it is not lost in it.
+  const hx = door.entry.local[door.edge][0] + (door.entry.local[door.edge + 1][0] - door.entry.local[door.edge][0]) * door.t0;
+  const hz = door.entry.local[door.edge][1] + (door.entry.local[door.edge + 1][1] - door.entry.local[door.edge][1]) * door.t0;
+  hinge.position.set(hx - door.nx * 0.04, ground, hz - door.nz * 0.04);
+  hinge.rotation.y = Math.atan2(-door.uz, door.ux);
+  const leaf = new THREE.Mesh(new THREE.BoxGeometry(door.width, DOOR_HEIGHT_M, 0.05), doorMaterial);
+  leaf.position.set(door.width / 2, DOOR_HEIGHT_M / 2, 0);
+  leaf.castShadow = true;
+  leaf.renderOrder = INTERIOR_ORDER;
+  hinge.add(leaf);
+  const portal = new THREE.Mesh(new THREE.PlaneGeometry(Math.max(0.1, door.width - 0.04), DOOR_HEIGHT_M - 0.02), portalMaterial);
+  portal.position.set(hx + door.ux * door.width / 2 - door.nx * 0.06, ground + DOOR_HEIGHT_M / 2,
+    hz + door.uz * door.width / 2 - door.nz * 0.06);
+  portal.rotation.y = Math.atan2(-door.uz, door.ux);
+  portal.renderOrder = INTERIOR_ORDER + 0.1;
+  portal.visible = false;
+  // The opening behind the leaf: dark until the rooms behind it are built.
+  const opening = new THREE.Mesh(new THREE.PlaneGeometry(door.width, DOOR_HEIGHT_M), doorwayMaterial);
+  opening.position.set(hx + door.ux * door.width / 2 - door.nx * 0.02, ground + DOOR_HEIGHT_M / 2,
+    hz + door.uz * door.width / 2 - door.nz * 0.02);
+  opening.rotation.y = Math.atan2(-door.uz, door.ux) + Math.PI;
+  opening.visible = false;
+  doorGroup.add(hinge, opening, portal);
+  door.portal = portal;
+  door.mesh = hinge;
+  door.leaf = leaf;
+  door.opening = opening;
+  door.inward = 1;
+  // Which way round the leaf swings inward depends on which side of the edge is inside.
+  const probe = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), hinge.rotation.y);
+  door.inward = probe.x * door.nx + probe.z * door.nz > 0 ? 1 : -1;
+  doorsShown.add(door);
+}
+const stoopMaterial = new THREE.MeshStandardMaterial({ color: 0x9a948a, roughness: 0.9 });
+function addStoop(door, street, floor) {
+  const rise = floor - street;
+  if (rise < 0.08) return;
+  const steps = Math.ceil(rise / STEP_RISE_M);
+  const each = rise / steps;
+  const depth = steps * STEP_TREAD_M;
+  const group = new THREE.Group();
+  const width = door.width + 0.4;
+  for (let i = 0; i < steps; i += 1) {
+    // Step i is i+1 risers high and runs from the wall out to the edge of its tread.
+    const top = street + each * (steps - i);
+    const out = (i + 1) * STEP_TREAD_M;
+    const box = new THREE.Mesh(new THREE.BoxGeometry(width, top - street + 0.05, STEP_TREAD_M), stoopMaterial);
+    box.position.set(0, (top + street - 0.05) / 2, -(out - STEP_TREAD_M / 2));
+    box.castShadow = true;
+    box.receiveShadow = true;
+    group.add(box);
+  }
+  // Local z points into the building (its inward normal), x along the wall.
+  group.position.set(door.cx, 0, door.cz);
+  group.rotation.y = Math.atan2(door.nx, door.nz);
+  doorGroup.add(group);
+  door.stoop = group;
+  // The walker climbs it: the height at a point is the tread it stands on.
+  door.stoopSurface = (x, z) => {
+    const dx = x - door.cx, dz = z - door.cz;
+    const along = dx * door.ux + dz * door.uz;
+    const outward = -(dx * door.nx + dz * door.nz);
+    if (Math.abs(along) > width / 2 || outward < -0.05 || outward > depth) return null;
+    const i = Math.min(steps - 1, Math.max(0, Math.floor(outward / STEP_TREAD_M)));
+    return street + each * (steps - i);
+  };
+  standingSurfaces.add(door.stoopSurface);
+}
+
+function hideDoor(door) {
+  if (!door.mesh) return;
+  if (door.stoop) {
+    doorGroup.remove(door.stoop);
+    door.stoop.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+    standingSurfaces.delete(door.stoopSurface);
+    door.stoop = null;
+  }
+  doorGroup.remove(door.mesh, door.opening, door.portal);
+  door.leaf.geometry.dispose();
+  door.opening.geometry.dispose();
+  door.portal.geometry.dispose();
+  door.mesh = null;
+  doorsShown.delete(door);
+}
+
+function doorsNear(x, z, reach) {
+  const found = [];
+  const seen = new Set();
+  const span = Math.ceil(reach / FOOTPRINT_CELL);
+  for (let ix = -span; ix <= span; ix += 1) {
+    for (let iz = -span; iz <= span; iz += 1) {
+      const bucket = footprintGrid.get(`${Math.floor(x / FOOTPRINT_CELL) + ix}:${Math.floor(z / FOOTPRINT_CELL) + iz}`);
+      if (!bucket) continue;
+      for (const entry of bucket) {
+        if (seen.has(entry) || !entry.doors) continue;
+        seen.add(entry);
+        for (const door of entry.doors) {
+          const d = Math.hypot(door.cx - x, door.cz - z);
+          if (d <= reach) found.push([d, door]);
+        }
+      }
+    }
+  }
+  return found.sort((a, b) => a[0] - b[0]).map(([, door]) => door);
+}
+
+const doorHint = document.createElement("div");
+doorHint.id = "door-hint";
+doorHint.style.cssText = "position:fixed;left:50%;bottom:72px;transform:translateX(-50%);"
+  + "background:rgba(20,20,20,.78);color:#fff;font:13px/1.4 system-ui,sans-serif;padding:7px 12px;"
+  + "border-radius:6px;pointer-events:none;max-width:min(92vw,520px);text-align:center;z-index:20";
+doorHint.hidden = true;
+document.body.appendChild(doorHint);
+
+function nearestDoor() {
+  const near = doorsNear(avatar.position.x, avatar.position.z, DOOR_REACH_M);
+  return near.length ? near[0] : null;
+}
+
+function toggleDoor(door) {
+  door.open = !door.open;
+  if (door.open) buildInterior(door.entry);
+}
+
+addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.repeat) return;
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+  const door = nearestDoor();
+  if (!door) return;
+  toggleDoor(door);
+  e.preventDefault();
+});
+
+function updateDoors(dt) {
+  const x = avatar.position.x, z = avatar.position.z;
+  for (const door of doorsNear(x, z, DOOR_DRAW_M)) showDoor(door);
+  for (const door of [...doorsShown]) {
+    if (Math.hypot(door.cx - x, door.cz - z) > DOOR_DRAW_M * 1.2 && !door.open) hideDoor(door);
+  }
+  for (const door of doorsShown) {
+    const target = door.open ? Math.PI / 2 * 0.95 : 0;
+    door.angle += Math.sign(target - door.angle) * Math.min(Math.abs(target - door.angle), dt * 3.5);
+    door.leaf.parent.rotation.y = Math.atan2(-door.uz, door.ux) - door.inward * door.angle;
+    door.opening.visible = door.angle > 0.05 && !door.entry.interior;
+    door.portal.visible = door.angle > 0.05 && Boolean(door.entry.interior)
+      && !insideFootprint(door.entry, camera.position.x, camera.position.z);
+  }
+  const door = nearestDoor();
+  const inside = buildingAt(x, z);
+  // A walker already inside (arrived by search, or a saved position) gets the rooms too.
+  if (inside && INTERIORS) {
+    const entry = footprintById.get(String(inside.osm_id));
+    if (entry && !entry.interior) buildInterior(entry);
+  }
+  if (door) {
+    doorHint.textContent = `Enter — ${door.open ? "close" : "open"} the door (${DOOR_SOURCE[door.source]})`;
+    doorHint.hidden = false;
+  } else if (inside && footprintById.get(String(inside.osm_id))?.interior) {
+    const plan = footprintById.get(String(inside.osm_id)).interior.plan;
+    doorHint.textContent = `Inside: ${plan} — a generic plan fitted to this building's proportions, not its real interior`;
+    doorHint.hidden = false;
+  } else {
+    doorHint.hidden = true;
+  }
+  // Interiors nobody is near are taken down again.
+  for (const entry of interiorsBuilt) {
+    const cx = (entry.minX + entry.maxX) / 2, cz = (entry.minZ + entry.maxZ) / 2;
+    if (Math.hypot(cx - x, cz - z) > INTERIOR_KEEP_M + Math.hypot(entry.maxX - entry.minX, entry.maxZ - entry.minZ) / 2) removeInterior(entry);
+  }
+}
+
+// ---- interiors ---------------------------------------------------------------------------------
+const interiorGroup = new THREE.Group();
+interiorGroup.name = "interiors";
+root.add(interiorGroup);
+const interiorsBuilt = new Set();
+const plasterMaterial = new THREE.MeshStandardMaterial({ color: 0xece6dc, roughness: 0.92, side: THREE.DoubleSide });
+const ceilingMaterial = new THREE.MeshStandardMaterial({ color: 0xf4f1ea, roughness: 0.95, side: THREE.DoubleSide });
+const roomFloorMaterials = new Map();
+function roomFloorMaterial(kind) {
+  if (!roomFloorMaterials.has(kind)) {
+    roomFloorMaterials.set(kind, new THREE.MeshStandardMaterial({ color: ROOM_FLOOR[kind] ?? ROOM_FLOOR.other, roughness: 0.8 }));
+  }
+  return roomFloorMaterials.get(kind);
+}
+
+// A segment clipped to the inside of a footprint (inset by `inset`): the pieces between its
+// crossings of the outline whose middles lie inside.
+function clipToFootprint(entry, ax, az, bx, bz) {
+  const ts = [0, 1];
+  const ring = entry.local;
+  const sx = bx - ax, sz = bz - az;
+  for (let i = 0; i + 1 < ring.length; i += 1) {
+    const [cx, cz] = ring[i];
+    const [dx, dz] = ring[i + 1];
+    const ex = dx - cx, ez = dz - cz;
+    const den = sx * ez - sz * ex;
+    if (Math.abs(den) < 1e-12) continue;
+    const t = ((cx - ax) * ez - (cz - az) * ex) / den;
+    const u = ((cx - ax) * sz - (cz - az) * sx) / den;
+    if (t > 0 && t < 1 && u >= 0 && u <= 1) ts.push(t);
+  }
+  ts.sort((p, q) => p - q);
+  const out = [];
+  for (let i = 0; i + 1 < ts.length; i += 1) {
+    const tm = (ts[i] + ts[i + 1]) / 2;
+    if (ts[i + 1] - ts[i] < 1e-4) continue;
+    if (insideFootprint(entry, ax + sx * tm, az + sz * tm)) {
+      out.push([ax + sx * ts[i], az + sz * ts[i], ax + sx * ts[i + 1], az + sz * ts[i + 1]]);
+    }
+  }
+  return out;
+}
+
+function wallQuads(segments, bottom, height) {
+  const positions = [];
+  for (const [ax, az, bx, bz] of segments) {
+    const y0 = bottom, y1 = bottom + height;
+    positions.push(ax, y0, az, bx, y0, bz, bx, y1, bz, ax, y0, az, bx, y1, bz, ax, y1, az);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function buildInterior(entry) {
+  if (entry.interior || !INTERIORS || !entry.fit) return;
+  const [ti, rotated, nx, ny, lon, lat, yawDeg, L, W, storeys, storeyM] = entry.fit;
+  const plan = INTERIORS.library[ti];
+  if (!plan) return;
+  const [cxE, cyN] = xy(lon, lat);
+  const yaw = (yawDeg * Math.PI) / 180;
+  const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+  const along = rotated ? plan.w : plan.l, across = rotated ? plan.l : plan.w;
+  const sx = L / (nx * along), sy = W / (ny * across);
+  // A plan point (u, v), in tile (i, j), to page x, z.
+  const place = (u, v, i, j) => {
+    const pu = rotated ? v : u, pv = rotated ? -u : v;
+    const U = -L / 2 + (i + 0.5) * (L / nx) + pu * sx;
+    const V = -W / 2 + (j + 0.5) * (W / ny) + pv * sy;
+    const east = cxE + U * cosY - V * sinY;
+    const north = cyN + U * sinY + V * cosY;
+    return [east, -north];
+  };
+  const centreX = (entry.minX + entry.maxX) / 2, centreZ = (entry.minZ + entry.maxZ) / 2;
+  const floorY = entryFloorY(entry);
+  const height = Math.max(2.4, Math.min(storeyM || 3.0, 4.5)) - 0.06;
+  const group = new THREE.Group();
+  group.name = `interior:${entry.way.osm_id}`;
+  const segments = [];
+  const doorsInPlan = [];
+  for (let i = 0; i < nx; i += 1) {
+    for (let j = 0; j < ny; j += 1) {
+      for (const [x, y, w] of plan.doors) {
+        const [px, pz] = place(x, y, i, j);
+        doorsInPlan.push([px, pz, w * Math.max(sx, sy)]);
+      }
+      for (const [kindIndex, flat] of plan.rooms) {
+        const kind = INTERIORS.kinds[kindIndex];
+        const pts = [];
+        for (let k = 0; k + 1 < flat.length; k += 2) pts.push(place(flat[k] / 100, flat[k + 1] / 100, i, j));
+        if (pts.length < 3) continue;
+        // The room's floor, where the room lies inside the building.
+        const inside = pts.filter(([px, pz]) => insideFootprint(entry, px, pz)).length;
+        if (inside === pts.length) {
+          const shape = new THREE.Shape(pts.map(([px, pz]) => new THREE.Vector2(px, -pz)));
+          const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape), roomFloorMaterial(kind));
+          floor.rotation.x = -Math.PI / 2;
+          floor.position.y = floorY + 0.01;
+          floor.receiveShadow = true;
+          group.add(floor);
+        }
+        // Its walls, clipped to the footprint, with the plan's doorways left open.
+        for (let k = 0; k < pts.length; k += 1) {
+          const [ax, az] = pts[k];
+          const [bx, bz] = pts[(k + 1) % pts.length];
+          const len = Math.hypot(bx - ax, bz - az);
+          if (len < 0.2) continue;
+          let pieces = [[0, 1]];
+          for (const [dx, dz, dw] of doorsInPlan) {
+            const t = ((dx - ax) * (bx - ax) + (dz - az) * (bz - az)) / (len * len);
+            const off = Math.abs((dx - ax) * (bz - az) - (dz - az) * (bx - ax)) / len;
+            if (off > 0.45 || t < 0 || t > 1) continue;
+            const half = Math.max(0.45, dw / 2) / len;
+            pieces = pieces.flatMap(([p, q]) => (t - half > q || t + half < p) ? [[p, q]]
+              : [[p, Math.max(p, t - half)], [Math.min(q, t + half), q]].filter(([r, s]) => s - r > 1e-3));
+          }
+          for (const [p, q] of pieces) {
+            for (const s of clipToFootprint(entry, ax + (bx - ax) * p, az + (bz - az) * p, ax + (bx - ax) * q, az + (bz - az) * q)) segments.push(s);
+          }
+        }
+      }
+    }
+  }
+  // The outside walls' inner face, inset, with the building's own doors open through it.
+  const lining = [];
+  const ring = entry.local;
+  for (let i = 0; i + 1 < ring.length; i += 1) {
+    const [ax, az] = ring[i];
+    const [bx, bz] = ring[i + 1];
+    const len = Math.hypot(bx - ax, bz - az);
+    if (len < 1e-6) continue;
+    let nxI = -(bz - az) / len, nzI = (bx - ax) / len;
+    const mx = (ax + bx) / 2, mz = (az + bz) / 2;
+    if (!insideFootprint(entry, mx + nxI * 0.3, mz + nzI * 0.3)) { nxI = -nxI; nzI = -nzI; }
+    const ox = nxI * INTERIOR_WALL_INSET_M, oz = nzI * INTERIOR_WALL_INSET_M;
+    let from = 0;
+    for (const door of (entry.doors || []).filter((d) => d.edge === i).sort((p, q) => p.t0 - q.t0)) {
+      if (door.t0 > from) lining.push([ax + (bx - ax) * from + ox, az + (bz - az) * from + oz, ax + (bx - ax) * door.t0 + ox, az + (bz - az) * door.t0 + oz]);
+      // Above the doorway.
+      lining.push(null, [ax + (bx - ax) * door.t0 + ox, az + (bz - az) * door.t0 + oz, ax + (bx - ax) * door.t1 + ox, az + (bz - az) * door.t1 + oz]);
+      from = door.t1;
+    }
+    if (from < 1) lining.push([ax + (bx - ax) * from + ox, az + (bz - az) * from + oz, bx + ox, bz + oz]);
+  }
+  const full = [], lintels = [];
+  for (let k = 0; k < lining.length; k += 1) {
+    if (lining[k] === null) { lintels.push(lining[k + 1]); k += 1; } else full.push(lining[k]);
+  }
+  group.add(new THREE.Mesh(wallQuads(full, floorY, height), plasterMaterial));
+  if (lintels.length) group.add(new THREE.Mesh(wallQuads(lintels, floorY + DOOR_HEIGHT_M, Math.max(0.05, height - DOOR_HEIGHT_M)), plasterMaterial));
+  if (segments.length) {
+    const partitions = new THREE.Mesh(wallQuads(segments, floorY, height), plasterMaterial);
+    partitions.castShadow = true;
+    group.add(partitions);
+  }
+  // Floor and ceiling over the whole footprint.
+  const outline = new THREE.Shape(ring.slice(0, -1).map(([px, pz]) => new THREE.Vector2(px, -pz)));
+  const slab = new THREE.Mesh(new THREE.ShapeGeometry(outline), roomFloorMaterial("other"));
+  slab.rotation.x = -Math.PI / 2;
+  slab.position.y = floorY;
+  slab.receiveShadow = true;
+  const ceiling = new THREE.Mesh(new THREE.ShapeGeometry(outline), ceilingMaterial);
+  ceiling.rotation.x = -Math.PI / 2;
+  ceiling.position.y = floorY + height;
+  group.add(slab, ceiling);
+  const light = new THREE.PointLight(0xfff1dc, 1.4, Math.max(12, Math.hypot(L, W)), 1.6);
+  light.position.set(centreX, floorY + height - 0.3, centreZ);
+  group.add(light);
+  group.traverse((o) => { if (o.isMesh) o.renderOrder = INTERIOR_ORDER; });
+  group.userData = { surface: "interior", grade: "inferred", plan: plan.id, source: plan.src,
+    attribution: (INTERIORS.sources[plan.src] || {}).attribution, storeys, stretch: [entry.fit[11], entry.fit[12]] };
+  interiorGroup.add(group);
+  const source = INTERIORS.sources[plan.src] || {};
+  const floorSurface = (x, z) => (insideFootprint(entry, x, z) ? floorY : null);
+  standingSurfaces.add(floorSurface);
+  entry.interior = { group, segments, floorSurface,
+    plan: `${plan.src === "resplan" ? "ResPlan dwelling" : "Swiss Dwellings building"} ${plan.id}${nx * ny > 1 ? ` ×${nx * ny}` : ""} (${source.license || ""})` };
+  interiorsBuilt.add(entry);
+}
+
+function removeInterior(entry) {
+  if (!entry.interior) return;
+  interiorGroup.remove(entry.interior.group);
+  standingSurfaces.delete(entry.interior.floorSurface);
+  entry.interior.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+  entry.interior = null;
+  interiorsBuilt.delete(entry);
+}
+window.kerbsideInteriors = () => ({ loaded: Boolean(INTERIORS), built: [...interiorsBuilt].map((e) => e.way.osm_id),
+  summary: INTERIORS && INTERIORS.summary });
 
 let previous = performance.now();
 function animateAvatar(distance, direction, moving) {
@@ -16681,6 +17722,7 @@ function updateAvatarMixer(dt) {
 function stepAvatar(now) {
   const dt = Math.min((now - previous) / 1000, 0.1);   // clamped: a backgrounded tab returns
   previous = now;                                       // with a huge delta and would teleport
+  updateDoors(dt);
   if (!held.size || dragging) {
     animateAvatar(0, new THREE.Vector3(), false);
     updateAvatarMixer(dt);
@@ -16698,11 +17740,13 @@ function stepAvatar(now) {
   if (!move.lengthSq()) return;
   const scaled = state.firstPerson ? FIRST_PERSON_SPEED : STREET_SPEED;
   move.normalize().multiplyScalar(scaled * dt);
-  avatar.position.add(move);
+  requestInteriors();
+  // Buildings are solid: the walker slides along their walls and goes in by a door.
+  const moved = moveWalker(move.x, move.z);
   const lon = midLon + avatar.position.x / metersPerLon;
   const lat = midLat - avatar.position.z / metersPerLat;
   if (window.kerbsideOpenFullRegionAt && window.kerbsideOpenFullRegionAt(lon, lat)) return;
-  animateAvatar(move.length(), move, true);
+  animateAvatar(moved, move, true);
   updateAvatarMixer(dt);
   state.target.copy(avatar.position);
   placeCamera();
@@ -16855,6 +17899,7 @@ window.kerbside = {
   cutLiftAt, approachRoadAt, wayFollowsCut, APPROACH_CUTS, junctionBoxHulls,
   goTo, setFirstPerson, placeCamera, state, avatar, cullDetailByDistance, DETAIL_RANGE_M, mergeStats, THREE,
   xy, insideCarriageway, buildingAt,
+  moveWalker, wallSegmentsNear, nearestDoor, doorsNear, toggleDoor, footprintById, requestInteriors, buildInterior,
   pickedFeature,
   // The corner pieces: how many cuts were decided and how many pieces laid between them.
   recentred,
